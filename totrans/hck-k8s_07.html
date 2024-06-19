@@ -1,0 +1,966 @@
+<html><head></head><body><div id="sbo-rt-content"><section data-type="chapter" epub:type="chapter" data-pdf-bookmark="Chapter 7. Hard Multitenancy"><div class="chapter" id="ch-hard-multi-tenancy">
+<h1><span class="label">Chapter 7. </span>Hard Multitenancy</h1>
+
+
+<p>Sharing a Kubernetes cluster securely is hard. By default, Kubernetes is not configured to host multiple tenants, and work is needed to make it secure. “Secure” means it <a data-type="indexterm" data-primary="multitenancy" data-secondary="security, overview" id="idm45302811563760"/><a data-type="indexterm" data-primary="security" data-secondary="multitenancy" id="idm45302811562784"/>should be divided fairly between isolated tenants, who shouldn’t be able to see each other and shouldn’t be able to break shared resources for anybody else.</p>
+
+<p>Each tenant may run their own choice of workloads, confined to their own set of namespaces. The combination of security settings in the namespace configuration and the cluster’s access to external and cloud services defines how securely tenants are separated.</p>
+
+<p>Each tenant in a cluster can be considered friendly or hostile, and cluster admins deploy appropriate controls to keep other tenants and the cluster components free from harm. The level of these controls is set for the type of tenants expected by the system’s threat model.</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>A tenant <a data-type="indexterm" data-primary="multitenancy" data-secondary="tenants" id="idm45302811559168"/><a data-type="indexterm" data-primary="tenants" id="idm45302811558160"/>is the cluster’s customer. They may be a team, test or production environment, a hosted tool, or any logical grouping of resources.</p>
+</div>
+
+<p>In this chapter you will sail the shark-infested waters of Kubernetes multitenancy and their namespaced “security
+boundaries.” The control plane’s lockdown techniques are inspected for signs of fraying, we compare
+the data classification of workloads and their cargo, and look at how to monitor our resources.</p>
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Defaults"><div class="sect1" id="idm45302811556240">
+<h1>Defaults</h1>
+
+<p>Namespaces exist <a data-type="indexterm" data-primary="namespaces" data-secondary="resources" id="idm45302811554736"/>to group resources, and Kubernetes doesn’t have an inherent namespace tenancy model. The <a data-type="indexterm" data-primary="namespaced" data-secondary="tenancy" id="idm45302811553488"/>namespaced
+tenancy concept only works for interactions within the Kubernetes API, not the entire cluster.</p>
+
+<p>By default, cross-tenant visibility<a data-type="indexterm" data-primary="cross-tenant visibility, security considerations" id="idm45302811551904"/> is not protected by <a data-type="indexterm" data-primary="networks" data-secondary="cross-tenant visibility" id="idm45302811550976"/>networking, DNS, and some namespaced policy unless
+the cluster is hardened with specific configuration that we’ll examine in this chapter.</p>
+
+<p>A careful defender will segregate a tenant <a data-type="indexterm" data-primary="applications" data-secondary="multitenancy, security considerations" id="idm45302811549328"/>application into multiple namespaces to more clearly delineate the RBAC permissions each service account has and to make it easier to reason and deploy network policy, quotas and limits, and other security tooling. You should only allow one tenant to use each namespace
+because of those namespace-bound policies and resources.</p>
+<div data-type="tip"><h6>Tip</h6>
+<p>A tenant<a data-type="indexterm" data-primary="tenants" data-secondary="types" id="idm45302811546944"/> could be a single
+application, a complex application divided in multiple namespaces, a test environment required for its development, a
+project, or any trust boundary.</p>
+</div>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Threat Model"><div class="sect1" id="idm45302811545360">
+<h1>Threat Model</h1>
+
+<p>The <a href="https://oreil.ly/cHmPD">Kubernetes multitenancy working group</a> considers two categories of<a data-type="indexterm" data-primary="multitenancy" data-secondary="categories" id="idm45302811543152"/><a data-type="indexterm" data-primary="threat models" data-secondary="multitenancy" id="idm45302811542208"/><a data-type="indexterm" data-primary="multitenancy" data-secondary="threat models" id="idm45302811541264"/> 
+<span class="keep-together">multitenancy:</span></p>
+
+<ul>
+<li>
+<p><em>Soft multitenancy</em> is easier for <a data-type="indexterm" data-primary="soft multitenancy" id="idm45302811538288"/>tenants to use and allows greater configuration</p>
+</li>
+<li>
+<p><em>Hard multitenancy</em> aims to be “secure by default,” with <a data-type="indexterm" data-primary="hard multitenancy" id="idm45302811536176"/>security settings preconfigured and immutable</p>
+</li>
+</ul>
+
+<p>Soft multitenancy is a friendly, more permissive security model. It assumes tenants are partially trusted and have the cluster’s best interest at heart, and it permits them to configure parts of their own namespaces.</p>
+
+<p>Hard multitenancy is locked down and assumes tenants are hostile. Multiple controls reduce opportunity for attackers: workload isolation, admission control, network policy, security monitoring, and intrusion detection systems (IDS) are configured in the platform, and tenants only perform a restricted set of operations. The trade-off for such a restrictive configuration is tenant usability.</p>
+
+<p>Our threat model is scoped for hard multitenancy, to strengthen every possible defense against our arch nemesis,
+the scourge of the digital seas, Dread Pirate Captain Hashjack.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Namespaced Resources"><div class="sect1" id="namspaced-resources">
+<h1>Namespaced Resources</h1>
+
+<p>Before we get into hard<a data-type="indexterm" data-primary="resources" data-secondary="separating" id="idm45302811530896"/> and soft multitenancy, let’s have a look at how we can separate resources: namespaces and nodes.</p>
+<div data-type="tip"><h6>Tip</h6>
+<p>Networking doesn’t adhere the idea of <a data-type="indexterm" data-primary="networks" data-secondary="namespaces" id="idm45302811528608"/><a data-type="indexterm" data-primary="namespaces" data-secondary="networks" id="idm45302811527632"/>namespacing: we can apply policy to shape it, but fundamentally it’s a flat subnet.</p>
+</div>
+
+<p>Visibility of your Kubernetes <a data-type="indexterm" data-primary="RBAC (role-based access control)" data-secondary="resources" id="idm45302811526048"/><a data-type="indexterm" data-primary="resources" data-secondary="RBAC" id="idm45302811525008"/>RBAC resources (covered in <a data-type="xref" href="ch08.xhtml#ch-policy">Chapter 8</a>) is either scoped to a namespace such as pods or service accounts or to the whole cluster like nodes or persistent volumes.</p>
+
+<p>Spreading a single tenant<a data-type="indexterm" data-primary="tenants" data-secondary="namespaces" id="idm45302811522560"/><a data-type="indexterm" data-primary="namespaces" data-secondary="tenants" id="idm45302811521584"/> across multiple namespaces reduces the impact of stolen or compromised credentials and
+increases the resistance of the system to compromise, at the cost of some operational complexity. Your teams should be
+able to automate their jobs, which will result in a secure and fast-to-patch system.</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>GitOps operators <a data-type="indexterm" data-primary="GitOps" data-secondary="operators, security considerations" id="idm45302811519008"/><a data-type="indexterm" data-primary="operators, GitOps" id="idm45302811517968"/>may be deployed in a dedicated per-operator namespace. For example, an application may be deployed into
+the namespaces <code>myapp-front-end</code>, <code>myapp-middleware</code>, and <code>myapp-data</code>. A privileged operator that deploys and modifies the
+application in those namespaces may be deployed into a <code>myapp-gitops</code> namespace, so compromise of any namespaces under its
+control (e.g., the <code>myapp-front-end</code>) doesn’t directly or indirectly lead to the compromise of the privileged operator.</p>
+
+<p>GitOps deploys whatever is committed to the repository it is monitoring, so control of production assets extends to the the source repository. For more on securing Git, see <a href="https://oreil.ly/FRDzv">“Hardening Git for GitOps”</a>.</p>
+</div>
+
+<p>In the<a data-type="indexterm" data-primary="RBAC (role-based access control)" data-secondary="namespace scope" id="idm45302811512864"/><a data-type="indexterm" data-primary="namespaces" data-secondary="RBAC, scope" id="idm45302811511888"/> Kubernetes RBAC model, namespaces are cluster-scoped and so suffer coarse cluster-level RBAC: if a user in a tenant namespace has permission to view their own namespace, they can also view all other namespaces on the cluster.</p>
+<div data-type="tip"><h6>Tip</h6>
+<p>OpenShift<a data-type="indexterm" data-primary="OpenShift" id="idm45302811509600"/> introduces the “project” concept, which is a namespace with additional annotations.</p>
+</div>
+
+<p>The API server<a data-type="indexterm" data-primary="API server" data-secondary="namespaced resources, querying" id="idm45302811508112"/><a data-type="indexterm" data-primary="namespaced" data-secondary="resources, querying" id="idm45302811507088"/> can tell you which of its resources are not namespaced with this query
+(output edited to fit):</p>
+
+<pre data-type="programlisting" data-code-language="bash"><code class="nv">$ </code>kubectl api-resources --namespaced<code class="o">=</code><code class="nb">false</code>
+NAME                              SHORTNAMES ... NAMESPACED   KIND
+componentstatuses                 cs             <code class="nb">false        </code>ComponentStatus
+namespaces                        ns             <code class="nb">false        </code>Namespace
+nodes                             no             <code class="nb">false        </code>Node
+persistentvolumes                 pv             <code class="nb">false        </code>PersistentVolume
+...</pre>
+
+<p>Kubernetes’ shared DNS model <a data-type="indexterm" data-primary="DNS" data-secondary="hard multitenancy and" id="idm45302811504320"/>also exposes other namespaces and services and is an example of the difficulties of hard multitenancy. CoreDNS’s <a data-type="indexterm" data-primary="CoreDNS" data-secondary="hard multitenancy and" id="idm45302811503216"/>firewall plug-in can be configured to “prevent Pods in certain Namespaces from looking up Services in other Namespaces.” IP and DNS addresses are useful to an attacker who surveys the visible horizon for their next target.</p>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Node Pools"><div class="sect2" id="idm45302811498400">
+<h2>Node Pools</h2>
+
+<p>The pods in a namespace can span multiple nodes, as <a data-type="xref" href="#multitenancy-shared-namespace">Figure 7-1</a> shows. If an attacker can escape from a container onto the underlying node, they may be able to jump between namespaces, and possibly even nodes, of a cluster.</p>
+
+<figure><div id="multitenancy-shared-namespace" class="figure">
+<img src="Images/haku_0701.png" alt="multitenancy-shared-namespace" width="698" height="356"/>
+<h6><span class="label">Figure 7-1. </span>A namespace often spans multiple nodes, however a single instance of a pod only ever runs on one node</h6>
+</div></figure>
+
+<p>Node pools are<a data-type="indexterm" data-primary="nodes" data-secondary="pools" id="idm45302811493120"/> groups of nodes with the same configuration, and that can scale independently of other node pools. They
+can be used to keep workloads of the same risk, or classification, on the same nodes. For example, web-facing
+applications should be separated from internal APIs and middleware workloads that are not accessible to internet
+traffic, and the control plane should be on a dedicated pool. This means in the event of container breakout, the
+attacker can only access resources on those nodes, and not more sensitive workloads or Secrets, and traversing between
+node pools is not a simple escalation.</p>
+
+<p class="pagebreak-before">You can assign workloads <a data-type="indexterm" data-primary="workloads" data-secondary="node pools" id="idm45302811490720"/>to node pools with labels and node selectors (output
+edited)<a data-type="indexterm" data-primary="nodes" data-secondary="NodeSelector" id="idm45302811489616"/>:</p>
+<pre data-type="programlisting" data-code-language="bash" class="small no-indent">
+<code>user@host:~</code><code> </code><code class="o">[</code><code>0</code><code class="o">]</code><code class="nv">$ </code><code>kubectl</code><code> </code><code>get</code><code> </code><code>nodes</code><code> </code><code>--show-labels</code><code> </code><a class="co" id="comarker11" href="#c011"><img src="Images/1.png" alt="1" width="12" height="12"/></a><code>
+</code><code>NAME</code><code>          </code><code>STATUS</code><code>   </code><code>ROLES</code><code>    </code><code>AGE</code><code>   </code><code>VERSION</code><code>   </code><code>LABELS</code><code>
+</code><code>kube-node-1</code><code>   </code><code>Ready</code><code>    </code><code>master</code><code>   </code><code>11m</code><code>   </code><code>v1.22.1</code><code>   </code><code>beta.kubernetes.io/arch</code><code class="o">=</code><code>amd64,...</code><code>
+</code><code>kube-node-2</code><code>   </code><code>Ready</code><code>    </code><code>&lt;</code><code>none&gt;</code><code>   </code><code>11m</code><code>   </code><code>v1.22.1</code><code>   </code><code>beta.kubernetes.io/arch</code><code class="o">=</code><code>amd64,...</code><code>
+</code><code>kube-node-3</code><code>   </code><code>Ready</code><code>    </code><code>&lt;</code><code>none&gt;</code><code>   </code><code>11m</code><code>   </code><code>v1.22.1</code><code>   </code><code>beta.kubernetes.io/arch</code><code class="o">=</code><code>amd64,...</code><code>
+
+</code><code>user@host:~</code><code> </code><code class="o">[</code><code>0</code><code class="o">]</code><code class="nv">$ </code><code>kubectl</code><code> </code><code>label</code><code> </code><code>nodes</code><code> </code><code>kube-node-2</code><code> </code><code class="se">\
+</code><code>  </code><code>node-restriction.kubernetes.io/nodeclass</code><code class="o">=</code><code>web-facing</code><code> </code><a class="co" id="comarker22" href="#c022"><img src="Images/2.png" alt="2" width="12" height="12"/></a><code>
+</code></pre>
+
+Let’s examine a deployment to see its <code>NodeSelector</code>:
+
+<pre data-type="programlisting" data-code-language="yaml" class="small no-indent">
+<code class="nt">apiVersion</code><code class="p">:</code><code> </code><code class="l-Scalar-Plain">extensions/v1beta1</code><code>
+</code><code class="nt">kind</code><code class="p">:</code><code> </code><code class="l-Scalar-Plain">Deployment</code><code>
+</code><code class="nt">metadata</code><code class="p">:</code><code>
+</code><code>  </code><code class="nt">name</code><code class="p">:</code><code> </code><code class="l-Scalar-Plain">high-risk-workload</code><code>
+</code><code class="nt">spec</code><code class="p">:</code><code>
+</code><code>  </code><code class="nt">replicas</code><code class="p">:</code><code> </code><code class="l-Scalar-Plain">1</code><code>
+</code><code>  </code><code class="nt">template</code><code class="p">:</code><code>
+</code><code>    </code><code class="nt">spec</code><code class="p">:</code><code>
+</code><code>      </code><code class="nt">containers</code><code class="p">:</code><code>
+</code><code>      </code><code class="p-Indicator">-</code><code> </code><code class="nt">image</code><code class="p">:</code><code> </code><code class="l-Scalar-Plain">nginx/</code><code>
+</code><code class="c1"># ...</code><code>
+</code><code>      </code><code class="nt">nodeSelector</code><code class="p">:</code><code>
+</code><code>        </code><code class="nt">node-restriction.kubernetes.io/nodeclass</code><code class="p">:</code><code> </code><code class="l-Scalar-Plain">web-facing</code><code> </code><a class="co" id="comarker33" href="#c033"><img src="Images/3.png" alt="3" width="12" height="12"/></a><code>
+</code></pre>
+
+<dl class="calloutlist">
+ <dt><a class="co" id="c011" href="#comarker11"><img src="Images/1.png" alt="1" width="12" height="12"/></a></dt>
+  <dd><p>See the labels applied to each node.</p></dd>
+ <dt><a class="co" id="c022" href="#comarker22"><img src="Images/2.png" alt="2" width="12" height="12"/></a></dt>
+  <dd><p>Set a node’s class.</p></dd>
+   <dt><a class="co" id="c033" href="#comarker33"><img src="Images/3.png" alt="3" width="12" height="12"/></a></dt>
+  <dd><p>One or more key-value pairs targeting a Node’s labels, to direct the scheduler.</p></dd>
+</dl>
+<div data-type="warning" epub:type="warning"><h6>Warning</h6>
+<p>Later in this chapter we look at how to prevent a hostile <code>kubelet</code> relabeling itself, by using well-known labels from the <a href="https://oreil.ly/VOjYB"><code>NodeRestriction</code></a> admission plug-in.</p>
+</div>
+
+<p>The <a href="https://oreil.ly/TRNUq"><code>PodNodeSelector</code></a>
+admission controller can limit <a data-type="indexterm" data-primary="PodNodeSelector" id="idm45302811297648"/>which nodes can be targeted by selectors in a namespace, to prevent hostile tenants
+scheduling on other’s namespace-restricted nodes (edited to fit):</p>
+
+<pre data-type="programlisting" data-code-language="yaml"><code class="nt">apiVersion</code><code class="p">:</code> <code class="l-Scalar-Plain">v1</code>
+<code class="nt">kind</code><code class="p">:</code> <code class="l-Scalar-Plain">Namespace</code>
+<code class="nt">metadata</code><code class="p">:</code>
+  <code class="nt">annotations</code><code class="p">:</code>
+    <code class="nt">scheduler...io/node-selector</code><code class="p">:</code> <code class="l-Scalar-Plain">node-restriction.k...s.io/nodeclass=web-facing</code>
+  <code class="nt">name</code><code class="p">:</code> <code class="l-Scalar-Plain">my-web-facing-ns</code></pre>
+
+<p class="pagebreak-before">For hard multitenant <a data-type="indexterm" data-primary="hard multitenancy" data-secondary="admission controllers" id="idm45302811282832"/><a data-type="indexterm" data-primary="admission controllers" data-secondary="hard multitenancy" id="idm45302811281920"/>systems these values should be set by an admission controller based upon a property of the
+workload: its labels, who or where it was deployed from, or the image name. Or it may be that only
+an allowlist of fully qualified images with their digests may ever be deployed to high-risk or web-facing nodes.</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>A cluster’s <a data-type="indexterm" data-primary="clusters" data-secondary="security boundaries" id="idm45302811279552"/><a data-type="indexterm" data-primary="security boundaries" data-secondary="clusters" id="idm45302811278544"/>security boundary slides based upon its threat model and current scope, as <a href="https://oreil.ly/5YvCA">Mark Manning</a> demonstrates in
+<a href="https://oreil.ly/viBnl">“Command and KubeCTL: Real-World Kubernetes Security for Pentesters”</a>.</p>
+</div>
+
+<p>A Kubernetes system’s prime directive is to keep pods running. A pod’s tolerance to <a data-type="indexterm" data-primary="pods" data-secondary="infrastructure failure and" id="idm45302811275440"/>infrastructure failure relies upon
+an effective distribution of workloads across hardware. This availability-centric style rightly prioritises utilization
+above security isolation. Security is more expensive and requires dedicated nodes for each isolated workload
+classification.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Node Taints"><div class="sect2" id="idm45302811497808">
+<h2>Node Taints</h2>
+
+<p>By default, namespaces <a data-type="indexterm" data-primary="nodes" data-secondary="taints" id="nodtaint"/><a data-type="indexterm" data-primary="scheduler" data-secondary="node taints and" id="sched_nodtaint"/><a data-type="indexterm" data-primary="pods" data-secondary="node taints and" id="pod_nodtaint"/>share all nodes in a cluster. As illustrated here, a taint can be used to prevent the
+scheduler from placing pods on certain nodes in Kubernetes’ default configuration:</p>
+
+<pre data-type="programlisting" data-code-language="bash"><code class="nv">$ </code>kubectl taint nodes kube-node-2 <code class="nv">key1</code><code class="o">=</code>value1:NoSchedule</pre>
+
+<p>This works because a self-hosted control plane runs using filesystem-hosted static pod manifests in the <code>kubelet</code>’s
+<code>staticPodPath</code>, defaulted to <em>/etc/kubernetes/manifests</em>, which ignore these taints.</p>
+
+<p>Pods can be prevented from co-scheduling on the same node with  advanced scheduler hints, which isolate them on their
+own compute hardware (a virtual or bare-metal machine).</p>
+
+<p>This level of isolation is too expensive for most (it prevents
+“bin packing” workload by reducing the number of possible nodes for each workloads, and the under-utilization is likely
+to lead to unused compute), and so provides a consistent mechanism to traverse namespaces on default Kubernetes
+configurations.</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>An attacker who can compromise a <code>kubelet</code> can remain in-cluster in many ingenious ways, as detailed in the talk <a href="https://oreil.ly/1GvRP">“Advanced Persistence Threats”</a> by <a href="https://oreil.ly/gEIBb">Brad Geesaman</a> and <a href="https://oreil.ly/8nz0p">Ian Coldwater</a>.</p>
+</div>
+
+<p>Admission control <a data-type="indexterm" data-primary="admission controllers" data-secondary="container breakout and" id="idm45302811232688"/><a data-type="indexterm" data-primary="container breakouts" data-secondary="admission controllers and" id="idm45302811231680"/>prevents wide-open avenues of exploitation such as sharing host namespaces. You should mitigate potential container breakout to the host with secure pod configuration, image scanning, supply chain verification, admission control and policy for incoming pods and operators, and intrusion detection for when all else fails.</p>
+
+<p>If Captain Hashjack can’t easily break out of the container through vulnerable container runtime or kernel versions, they’ll pretty quickly start attacking the network. They may choose to attack other tenants on the cluster or other network-accessible services like the control plane and API server, compute nodes, cluster-external datastores, or anything else accessible on the same network segment.</p>
+
+<p>Attackers look <a data-type="indexterm" data-primary="attacks" data-secondary="multitenancy and" id="idm45302811228992"/>for the next weak link in the chain, or any overprivileged pod, so enforcing secure “hard” multitenancy between tenants hardens the cluster to this escalation. To give us a comparison, let’s first look <a data-type="indexterm" data-primary="nodes" data-secondary="taints" data-startref="nodtaint" id="idm45302811227632"/><a data-type="indexterm" data-primary="scheduler" data-secondary="node taints and" data-startref="sched_nodtaint" id="idm45302811226416"/><a data-type="indexterm" data-primary="pods" data-secondary="node taints and" data-startref="pod_nodtaint" id="idm45302811225200"/>at the goals
+of “soft” multitenancy.</p>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Soft Multitenancy"><div class="sect1" id="idm45302811532368">
+<h1>Soft Multitenancy</h1>
+
+<p>You should use a soft <a data-type="indexterm" data-primary="soft multitenancy" data-secondary="characteristics" id="softmulti_char"/><a data-type="indexterm" data-primary="networks" data-secondary="soft multitenancy" id="net_softmulti"/>multitenancy model to prevent avoidable accidents resulting from overprivileged tenants. It is much easier to build and run than hard multitenancy, which we will come to next, because its threat model doesn’t consider motivated threat actors like Dread Pirate Hashjack.</p>
+
+<p>Soft multitenancy <a data-type="indexterm" data-primary="tenants" data-secondary="soft multitenancy" id="idm45302811198112"/>is often a “tenant per namespace” model. Across the cluster, tenants are likely to have the best interests of the cluster or administrators at heart. Hostile tenants, however, can probably break out of this type of cluster.</p>
+
+<p>Examples of tenants include different projects in a team, or teams in a company, that are enforced by RBAC roles and bindings and grouped by namespaces. Resources in the namespace are limited, so tenants can’t exhaust a cluster’s resources.</p>
+
+<p>Namespaces are tools<a data-type="indexterm" data-primary="namespaces" data-secondary="soft multitenancy" id="idm45302811195808"/><a data-type="indexterm" data-primary="soft multitenancy" data-secondary="namespaces" id="idm45302811194800"/> used to build <a data-type="indexterm" data-primary="security boundaries" data-secondary="namespaces" id="idm45302811193728"/>security boundaries in your cluster, but they are not an enforcement point. They scope many security and policy features: admission control webhooks, RBAC and access control, network policy, resource quotas and LimitRanges, Pod Security Policy, pod anti-affinity, dedicated nodes with taints and tolerations, and more. So they are an abstraction grouping of other mechanisms and resources: your threat models should consider these trust
+boundaries as walls on the defensive landscape.</p>
+
+<p>Under the lenient soft multitenancy model, namespace isolation techniques may not be strictly enforced, permitting
+tenants visibility of each other’s DNS records, and possibly permitting network routing between them if network policy
+is absent. DNS enumeration and requests for malicious domains should be monitored. For Captain Hashjack, quietly
+scanning a network may be a more effective way to evade detection, although CNI and IDS tools should detect this
+anomalous behavior.</p>
+
+<p>Network policy <a data-type="indexterm" data-primary="network policies" data-secondary="soft multitenancy" id="idm45302811190608"/><a data-type="indexterm" data-primary="soft multitenancy" data-secondary="network policy" id="idm45302811189632"/>is strongly recommended for even soft multitenant deployments. Kubernetes nodes require a flat network space between their <code>kubelet</code>s, and the 
+<span class="keep-together"><code>kubelet</code>’s</span> CNI <a data-type="indexterm" data-primary="kubelet" data-secondary="tenant namespace separation" id="idm45302811186992"/><a data-type="indexterm" data-primary="CNI plug-in, tenant namespace separation" id="idm45302811186016"/>plug-in for pod networking is responsible for enforcing tenant namespace separation at OSI layers 2 (ARP), 3/4 (IP addresses and TCP/UDP ports), and 7 (application, and TLS/x509). Network traffic is encrypted to off-cluster snoopers by network plug-ins like Cilium, Weave, or Calico that route pod traffic over virtual overlay networks, or VPN tunnels for all traffic between nodes.</p>
+
+<p>The CNI protects data in transit, but must trust any workload Kubernetes has permitted to run. As malicious workloads are inside a CNI’s trust boundary, they are served trusted traffic. Your tolerance to the impact of that workload going rogue in its surrounding environment should guide your level <a data-type="indexterm" data-primary="soft multitenancy" data-secondary="characteristics" data-startref="softmulti_char" id="idm45302811184144"/><a data-type="indexterm" data-primary="networks" data-secondary="soft multitenancy" data-startref="net_softmulti" id="idm45302811182896"/>of security controls.</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>We go into depth on network policies in <a data-type="xref" href="ch05.xhtml#ch-networking">Chapter 5</a>.</p>
+</div>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Hard Multitenancy"><div class="sect1" id="idm45302811179456">
+<h1>Hard Multitenancy</h1>
+
+<p>In this model, cluster <a data-type="indexterm" data-primary="hard multitenancy" data-secondary="overview" id="idm45302811177952"/>tenants don’t trust each other, and namespace configurations are “secure by default.” Security guardrails in CI/CD <a data-type="indexterm" data-primary="CI/CD (Continuous Integration, Continuous Delivery)" data-secondary="hard multitenancy and" id="idm45302811176672"/>pipelines <a data-type="indexterm" data-primary="pipelines" data-secondary="CI/CD" data-tertiary="admission control policy" id="idm45302811175504"/><a data-type="indexterm" data-primary="security" data-secondary="pipelines" data-tertiary="admission control policy" id="idm45302811174288"/>and <a data-type="indexterm" data-primary="admission controllers" data-secondary="hard multitenancy" id="idm45302811172976"/>admission control enforce policy. This level of separation is required by sensitive and private workloads across industry and state sectors, public compute services, and regulatory and accrediting bodies.</p>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Hostile Tenants"><div class="sect2" id="idm45302811171520">
+<h2>Hostile Tenants</h2>
+
+<p>It helps to threat model all workloads in a <a data-type="indexterm" data-primary="threat modeling" data-secondary="hard multitenancy" id="thrtmod_hrdmulti"/><a data-type="indexterm" data-primary="hard multitenancy" data-secondary="threat modeling" id="hrdmulti_thrtmod"/><a data-type="indexterm" data-primary="tenants" data-secondary="hostile, threat modeling" id="ten_host_thrtmod"/><a data-type="indexterm" data-primary="hostile tenants, threat modeling" id="hostten_thrtmod"/>hard multitenant system as aggressively hostile. This explores more branches of an attack tree to inform an optimal balance of cluster security controls, which will help limit a workload’s potentially permissive cloud or cluster authorizations.</p>
+
+<p>It also covers unknown potential events, such<a data-type="indexterm" data-primary="CVEs (Common Vulnerabilities and Exposures)" data-secondary="hostile tenants" id="idm45302811164560"/><a data-type="indexterm" data-primary="security" data-secondary="CVEs" data-tertiary="hostile tenants" id="idm45302811163488"/> as a failure in the RBAC subsystem CVE-2019-11247 that leaked access to cluster-scoped resource for non–cluster-scoped roles, CVE-2018-1002105 and CVE-2019-1002100, which enabled API server DOS, or CVE-2018-1002105, a partially exploitable API authentication bypass (covered later in the chapter).</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>In 2019, all Kubernetes API servers were at grave risk of being honked. <a href="https://oreil.ly/Kf8cP">Rory McCune</a> discovered v1.13.7 was vulnerable to the Billion Laughs YAML deserialization attack, and
+<a href="https://oreil.ly/KaOWm">Brad Geesaman</a> weaponized it with <a href="https://oreil.ly/dB7CX">sig-honk</a>. For a malicious tenant with API server visibility,
+this would be trivial to exploit.</p>
+</div>
+
+<p>Admission controllers<a data-type="indexterm" data-primary="admission controllers" data-secondary="hostile tenants" id="idm45302811158096"/> are executed by the API server after authentication and authorization, and validate the inbound API server request with “deep payload inspection.” This additional step is more powerful than traditional RESTful API architectures as it inspects the content of the request with specific policies, which can catch misconfigurations and malicious YAML.</p>
+
+<p>Hard multitenant <a data-type="indexterm" data-primary="hard multitenancy" data-secondary="sandboxes" id="idm45302811155984"/><a data-type="indexterm" data-primary="zero-day attacks" data-secondary="hard multitenancy and" id="idm45302811155008"/>systems may use advanced sandboxes to isolate pods in a different way to <code>runc</code> containers and increase <a data-type="indexterm" data-primary="threat modeling" data-secondary="hard multitenancy" data-startref="thrtmod_hrdmulti" id="idm45302811153520"/><a data-type="indexterm" data-primary="hard multitenancy" data-secondary="threat modeling" data-startref="hrdmulti_thrtmod" id="idm45302811152272"/><a data-type="indexterm" data-primary="tenants" data-secondary="hostile" data-tertiary="threat modeling" data-startref="ten_host_thrtmod" id="idm45302811151056"/><a data-type="indexterm" data-primary="hostile tenants, threat modeling" data-startref="hostten_thrtmod" id="idm45302811149568"/>their resistance to zero-day attacks.</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>Advanced sandboxing techniques are covered in more depth in <a data-type="xref" href="ch03.xhtml#ch-container-runtime-isolation">Chapter 3</a>.</p>
+</div>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Sandboxing and Policy"><div class="sect2" id="idm45302811146512">
+<h2>Sandboxing and Policy</h2>
+
+<p>Sandboxes such <a data-type="indexterm" data-primary="sandboxes" data-secondary="multitenancy" id="idm45302811145008"/><a data-type="indexterm" data-primary="multitenancy" data-secondary="sandboxes" id="idm45302811144000"/>as gVisor, Firecracker, and Kata Containers ingeniously combine KVM with namespaces and LSMs to further abstract workloads from high-risk interfaces and trust boundaries like the kernel.</p>
+<div class="clear">
+<figure class="informal no-frame width-35"><div id="captain6" class="figure">
+<img src="Images/haku_0000.png" alt="captain" width="1086" height="1103"/>
+<h6/>
+</div></figure>
+<p>These sandboxes are designed to resist vulnerabilities in their system call, filesystem, and network subsystems. As with every project, they have had CVEs, but they are well maintained and quick to fix. Their threat models are well documented and architectures theoretically solid, but every security abstraction comes at the cost of system simplicity, workload debuggability, and filesystem and network performance.</p>
+<p>Sandboxing a pod or namespace is weighted against the additional resources required. Captain Hashjack’s potential cryptolocking ransom should be valued in the equation, against the sandboxing protect from unknown kernel and driver vulnerabilities.</p>
+</div>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>No sandbox is <a data-type="indexterm" data-primary="sandboxes" data-secondary="attacks and" id="idm45302811137408"/><a data-type="indexterm" data-primary="attacks" data-secondary="sandboxes and" id="idm45302811136400"/>inescapable, and sandboxing weighs the likelihood of simultaneous exploitable bugs being found in both the sandbox and the underlying Linux kernel. This is a reasonable approach and has analogies to browser sandboxing: Chromium uses the same namespaces, <code>cgroups</code>, and <code>seccomp</code> as containers do. Chromium breakouts have been demonstrated at Pwn2Own and the Tianfu Cup often, but the risk window for exploitation is a few days (very roughly) every 2–5 years.</p>
+</div>
+
+<p>Hard multitenant systems <a data-type="indexterm" data-primary="multitenancy" data-secondary="policy" id="idm45302811133488"/><a data-type="indexterm" data-primary="hard multitenancy" data-secondary="policy" id="hrdmtlten_polcy"/>should implement tools like OPA for complex and extensible admission control. OPA uses the Rego
+language to define policy and, like any code, policies may contain bugs. Security tools rarely “fail open” unless
+they’re misconfigured.</p>
+
+<p>Policy risks include <a data-type="indexterm" data-primary="policies" data-secondary="risks, multitenancy" id="idm45302811130528"/>permissive regexes and loose comparison of objects or values in admission controller policy. Many
+YAML properties such as image names, tags, and metadata are string values prone to comparison mistakes. Like all static
+analysis, policy engines are as robust as you configure them to be.</p>
+
+<p>Multitenancy also involves the monitoring of <a data-type="indexterm" data-primary="workloads" data-secondary="multitenancy, monitoring" id="idm45302811128704"/>workloads for potentially hostile behavior. Supporting intrusion detection
+and observability services sometimes require potentially dangerous eBPF privileges, and eBPF’s in-kernel execution has
+been a source of container breakouts. The <code>CAP_BPF</code> capability (since Linux 5.8) will reduce the impact of bugs in eBPF
+systems and require less usage of the “overloaded <code>CAP_SYS_ADMIN</code> capability” (says the manpage).</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>eBPF is covered further in Chapters <a data-type="xref" data-xrefstyle="select:labelnumber" href="ch05.xhtml#ch-networking">5</a> and
+<a data-type="xref" data-xrefstyle="select:labelnumber" href="ch09.xhtml#ch-intrusion-detection">9</a>.</p>
+</div>
+
+<p>Despite the runtime risks of running introspection and observability tooling with elevated privileges, it is safer to
+understand cluster risks in real time with these permissions, than to be unaware of them.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Public Cloud Multitenancy"><div class="sect2" id="idm45302811121856">
+<h2>Public Cloud Multitenancy</h2>
+
+<p>Public hard multitenancy <a data-type="indexterm" data-primary="public cloud" data-secondary="multitenancy" id="idm45302811120336"/><a data-type="indexterm" data-primary="multitenancy" data-secondary="public cloud, overview" id="idm45302811119360"/>services like Google Cloud Run do not trust their workloads. They naturally assume the tenant
+and their activity is malicious and build controls to restrict them to the container, pod, and namespace. The threat
+model considers that attackers will try every known attack in an attempt to break out.</p>
+
+<p>Privately run hard multitenancy pioneers include <a href="https://contained.af"><em class="hyperlink">https://contained.af</em></a>—a web page with a
+terminal, connected to a container secured with kernel primitives and LSMs. Adventurers are invited to break their way
+out of the container if their cunning and skill enables them. So far there have been no escapes, which is testament to
+the work Jess Frazelle, the site’s host, contributed to the <code>runc</code> runtime at Docker.</p>
+
+<p>Although a criminal might be motivated to use or sell a container breakout zero day, a prerequisite to most container
+escapes is absence of LSM and capability controls. Containers configured to security best-practice, as enforced by
+admission control, have these controls enabled and are at low risk of breakout.</p>
+
+<p>CTF or shared compute platforms such as <a href="https://ctf.af"><em class="hyperlink">https://ctf.af</em></a> should be considered compromised and regularly “repaved” (rebuilt
+from scratch with no infrastructure persisting) in the expectation of escalation. This makes an attacker’s persistence
+attacks difficult as they must regularly re-use the same point of entry, increasing the likelihood of detection.</p>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Control Plane"><div class="sect1" id="control_plane">
+<h1>Control Plane</h1>
+
+<p>Captain Hashjack wants<a data-type="indexterm" data-primary="control plane" data-secondary="multitenancy" id="cp_multiten"/><a data-type="indexterm" data-primary="multitenancy" data-secondary="control plane" id="multiten_contplne"/> to run code in your pods to poke around the rest of the system. Stealing service account authentication information from a pod (at <em>/var/run/secrets/kubernetes.io/serviceaccount/token</em>) enables an attacker to spoof your<a data-type="indexterm" data-primary="pods" data-secondary="identity spoofing" id="idm45302811107760"/><a data-type="indexterm" data-primary="identity spoofing, pods" id="idm45302811106816"/> pod’s identity to the API server and any cloud integrations, as in the following examples:</p>
+<div data-type="tip"><h6>Tip</h6>
+<p>Pod and machine identity credentials are like treasure to a pirate adversary. Only the service account token (a JWT) is
+needed to communicate with the API server as server certificate verification can be disabled with <code>--insecure</code>, although
+this is not recommended for legitimate use.</p>
+</div>
+
+<pre data-type="programlisting" data-code-language="bash"><code>user@pod:~</code><code> </code><code class="o">[</code><code>0</code><code class="o">]</code><code class="nv">$ </code><code>curl</code><code> </code><code>https://kubernetes.default/api/v1/namespaces/default/pods/</code><code> </code><code class="se">\
+</code><code>  </code><code>--header</code><code> </code><code class="s2">"</code><code class="s2">Authorization: Bearer </code><code class="si">${</code><code class="nv">TOKEN</code><code class="si">}</code><code class="s2">"</code><code> </code><code>--insecure</code><code> </code><a class="co" id="co_hard_multitenancy_CO1-1" href="#callout_hard_multitenancy_CO1-1"><img src="Images/1.png" alt="1" width="12" height="12"/></a><code>
+
+</code><code>user@pod:~</code><code> </code><code class="o">[</code><code>0</code><code class="o">]</code><code class="nv">$ </code><code>kubectl</code><code> </code><code>--token</code><code class="o">=</code><code class="s2">"</code><code class="k">$(</code><code>&lt;</code><code class="si">${</code><code class="nv">DIR</code><code class="si">}</code><code>/token</code><code class="k">)</code><code class="s2">"</code><code> </code><code class="se">\
+</code><code>  </code><code>--certificate-authority</code><code class="o">=</code><code class="s2">"</code><code class="si">${</code><code class="nv">DIR</code><code class="si">}</code><code class="s2">/ca.crt</code><code class="s2">"</code><code> </code><code>get</code><code> </code><code>pods</code><code> </code><a class="co" id="co_hard_multitenancy_CO1-2" href="#callout_hard_multitenancy_CO1-2"><img src="Images/2.png" alt="2" width="12" height="12"/></a><code>
+
+</code><code>user@pod:~</code><code> </code><code class="o">[</code><code>0</code><code class="o">]</code><code class="nv">$ </code><code>kubectl</code><code> </code><code>--token</code><code class="o">=</code><code class="s2">"</code><code class="k">$(</code><code>&lt;</code><code class="si">${</code><code class="nv">DIR</code><code class="si">}</code><code>/token</code><code class="k">)</code><code class="s2">"</code><code> </code><code class="se">\
+</code><code>  </code><code>--insecure-skip-tls-verify</code><code> </code><code>get</code><code> </code><code>pods</code><code> </code><a class="co" id="co_hard_multitenancy_CO1-3" href="#callout_hard_multitenancy_CO1-3"><img src="Images/3.png" alt="3" width="12" height="12"/></a><code>
+
+</code><code>user@pod:~</code><code> </code><code class="o">[</code><code>0</code><code class="o">]</code><code class="nv">$ </code><code>kubectl</code><code> </code><code>--token</code><code class="o">=</code><code class="s2">"</code><code class="k">$(</code><code>&lt;</code><code class="si">${</code><code class="nv">DIR</code><code class="si">}</code><code>/token</code><code class="k">)</code><code class="s2">"</code><code> </code><code>-k</code><code> </code><code class="se">\
+</code><code>  </code><code>get</code><code> </code><code>buckets</code><code> </code><code>ack-test-smoke-s3</code><code> </code><code>-o</code><code> </code><code>yaml</code><code> </code><a class="co" id="co_hard_multitenancy_CO1-4" href="#callout_hard_multitenancy_CO1-4"><img src="Images/4.png" alt="4" width="12" height="12"/></a></pre>
+<dl class="calloutlist">
+<dt><a class="co" id="callout_hard_multitenancy_CO1-1" href="#co_hard_multitenancy_CO1-1"><img src="Images/1.png" alt="1" width="12" height="12"/></a></dt>
+<dd><p><code>kubernetes.default</code> is the API server DNS name in the pod network.</p></dd>
+<dt><a class="co" id="callout_hard_multitenancy_CO1-2" href="#co_hard_multitenancy_CO1-2"><img src="Images/2.png" alt="2" width="12" height="12"/></a></dt>
+<dd><p><code>kubectl</code> defaults to <code>kubernetes.default</code> and credentials in <em>/run/secrets/kubernetes.io/serviceaccount</em>.</p></dd>
+<dt><a class="co" id="callout_hard_multitenancy_CO1-3" href="#co_hard_multitenancy_CO1-3"><img src="Images/3.png" alt="3" width="12" height="12"/></a></dt>
+<dd><p>With <code>kubectl</code> YOLO (no certificate authority verification of the API server).</p></dd>
+<dt><a class="co" id="callout_hard_multitenancy_CO1-4" href="#co_hard_multitenancy_CO1-4"><img src="Images/4.png" alt="4" width="12" height="12"/></a></dt>
+<dd><p>If the workload identity is able to access CRDs for cloud-managed resources, stealing a token could
+unlock access to S3 buckets and another connected 
+<span class="keep-together">infrastructure.</span></p></dd>
+</dl>
+
+<p class="pagebreak-before">Access to the API server<a data-type="indexterm" data-primary="API server" data-secondary="accessing" id="idm45302810963424"/> can also leak information through its SAN, revealing internal and external IP addresses,
+any other domains DNS records point to, as well as the standard internal domains stemming
+from <em>kubernetes.default.svc.cluster.local</em> (output edited):</p>
+
+<pre data-type="programlisting" data-code-language="bash">user@pod:~ <code class="o">[</code>0<code class="o">]</code><code class="nv">$ </code>openssl s_client -connect kubernetes.default:443 <code class="se">\</code>
+  &lt; /dev/null 2&gt;/dev/null <code class="p">|</code>
+  openssl x509 -noout -text <code class="p">|</code> grep -E <code class="s2">"DNS:|IP Address:"</code>
+
+DNS:kube-node-1, DNS:kubernetes, DNS:kubernetes.default,
+DNS:kubernetes.default.svc, DNS:kubernetes.default.svc.cluster.local,
+IP Address:10.96.0.1, IP Address:10.0.1.1, IP Address:167.99.95.202</pre>
+
+<p>There are many<a data-type="indexterm" data-primary="authentication" data-secondary="endpoints" id="idm45302810957552"/><a data-type="indexterm" data-primary="privilege escalation" data-secondary="stolen credentials and" id="idm45302810956704"/> authentication endpoints in a cluster in addition to the API server’s Kubernetes resource-level RBAC,
+each of which allows an attacker to use stolen credentials to attempt privilege escalation.</p>
+<div data-type="warning" epub:type="warning"><h6>Warning</h6>
+<p>By default unauthenticated<a data-type="indexterm" data-primary="unauthenticated users, system:anonymous group" id="idm45302810953504"/><a data-type="indexterm" data-primary="system:anonymous group, unauthenticated users" id="idm45302810952768"/> users are placed into the <code>system:anonymous</code> group and able to read the API server’s
+<code>/version</code> endpoint as seen here, and use any roles that have been accidentally bound to the group. Anonymous authentication should
+be disabled if possible for your use case:</p>
+
+<pre data-type="programlisting">root@pod:/ [60]# curl -k https://kubernetes.default:443/version
+{
+  "major": "1",
+  "minor": "22",
+  "gitVersion": "v1.22.0",
+# ...</pre>
+</div>
+
+<p>Each <code>kubelet</code> has its own locally exposed API port, which can allow unauthenticated access to read node-local pods.
+Historically this was due to <code>cAdvisor</code> (Container Advisor) requesting resource and performance statistics, and some
+observability tools still use this endpoint. If there’s no network policy to restrict pods from the node’s network, the
+<code>kubelet</code> can be attacked from a pod.</p>
+
+<p>By the same logic, the API server can be attacked from a pod with no network policy restrictions. Any admin interface
+should be restricted in as many ways as <a data-type="indexterm" data-primary="control plane" data-secondary="multitenancy" data-startref="cp_multiten" id="idm45302810947248"/><a data-type="indexterm" data-primary="multitenancy" data-secondary="control plane" data-startref="multiten_contplne" id="idm45302810946000"/>is practical.</p>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="API Server and etcd"><div class="sect2" id="idm45302810944528">
+<h2>API Server and etcd</h2>
+
+<p><code>etcd</code> is the <a data-type="indexterm" data-primary="etcd" data-secondary="overview" id="etcd_oview"/>robust distributed datastore backing every version of Kubernetes and many other cloud native projects. It
+may be deployed on a dedicated cluster, as 
+<span class="keep-together"><code>systemd</code></span> units on Kubernetes control plane nodes, or as self-hosted pods in a
+Kubernetes cluster.</p>
+
+<p>Hosting <code>etcd</code> as pods inside a Kubernetes cluster is the riskiest deployment option: it offers an attacker direct
+access to <code>etcd</code> on the CNI. An accidental Kubernetes RBAC misconfiguration could expose the whole cluster via <code>etcd</code>
+tampering.</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p><code>etcd</code>’s API has experienced<a data-type="indexterm" data-primary="CVEs (Common Vulnerabilities and Exposures)" data-secondary="etcd" id="idm45302810912048"/><a data-type="indexterm" data-primary="security" data-secondary="CVEs" data-tertiary="etcd" id="idm45302810910976"/> remotely exploitable CVEs. CVE-2020-15115 allows remote brute-force of user passwords,
+CVE-2020-15106 was a remote DoS. Historically CVE-2018-1098 also permitted cross-site request forgery, with a resulting
+elevation of privilege.</p>
+</div>
+
+<p><code>etcd</code> should be secured by firewalling it to the API server only, enabling all encryption methods, and finally
+integrating the API server with a KMS or Vault so sensitive values are encrypted<a data-type="indexterm" data-primary="etcd" data-secondary="overview" data-startref="etcd_oview" id="idm45302810908384"/> before reaching <code>etcd</code>. Guidance
+is published in the <a href="https://oreil.ly/stnc5"><code>etcd</code> Security model</a>.</p>
+
+<p>The API server<a data-type="indexterm" data-primary="API server" data-secondary="etcd and" id="API_etcd"/><a data-type="indexterm" data-primary="etcd" data-secondary="API server and" id="etcd_API"/> handles the system’s core logic and persists its state in <code>etcd</code>. Only the API server should ever need access, so <code>etcd</code> should not be accessible over the network in a Kubernetes cluster.</p>
+<div data-type="tip"><h6>Tip</h6>
+<p>It’s obvious that every software is vulnerable to bugs, so these sorts of attacks can be reduced when <code>etcd</code> is not generally available on the network. If Captain Hashjack can’t see the socket, they can’t attack it.</p>
+</div>
+
+<p>There’s a <a data-type="indexterm" data-primary="trust boundaries" data-secondary="API server and etcd" id="idm45302810899296"/>trust boundary encompassing the API server and <code>etcd</code>. Root access to <code>etcd</code> may compromise the API server’s
+data or allow injection of malicious workloads, so the API server holds an encryption key: if the key is compromised,
+<code>etcd</code> data can be read by an attacker. This means that if <code>etcd</code>’s memory and backups are partially encrypted to
+protect against theft, values of Secrets are encrypted<a data-type="indexterm" data-primary="encryption" data-secondary="keys, API server" id="idm45302810896064"/> with the API server’s symmetric key. That Secret key is passed to
+the API server in a configuration YAML at startup:</p>
+
+<pre data-type="programlisting">--encryption-provider-config=/etc/kubernetes/encryption.yaml</pre>
+
+<p>This file contains the symmetric keys<a data-type="indexterm" data-primary="symmetric keys, etcd" id="idm45302810893920"/><a data-type="indexterm" data-primary="etcd" data-secondary="symmetric keys" id="idm45302810893216"/> used to encrypt Secrets in <code>etcd</code>:</p>
+
+<pre data-type="programlisting" data-code-language="yaml"><code class="nt">apiVersion</code><code class="p">:</code> <code class="l-Scalar-Plain">apiserver.config.k8s.io/v1</code>
+<code class="nt">kind</code><code class="p">:</code> <code class="l-Scalar-Plain">EncryptionConfiguration</code>
+<code class="nt">resources</code><code class="p">:</code>
+  <code class="p-Indicator">-</code> <code class="nt">resources</code><code class="p">:</code>
+    <code class="p-Indicator">-</code> <code class="l-Scalar-Plain">secrets</code>
+    <code class="nt">providers</code><code class="p">:</code>
+    <code class="p-Indicator">-</code> <code class="nt">aescbc</code><code class="p">:</code>
+        <code class="nt">keys</code><code class="p">:</code>
+        <code class="p-Indicator">-</code> <code class="nt">name</code><code class="p">:</code> <code class="l-Scalar-Plain">key1</code>
+          <code class="nt">secret</code><code class="p">:</code> <code class="l-Scalar-Plain">&lt;BASE64 ENCODED SECRET ENCRYPTION KEY&gt;</code>
+    <code class="p-Indicator">-</code> <code class="nt">identity</code><code class="p">:</code> <code class="p-Indicator">{}</code></pre>
+
+<p>Base64 is encoding to simplify binary data over text links and, in ye olden days of Kubernetes yore, was the only way that secrets were “protected.” If Secret values are not encrypted at rest, then <code>etcd</code>’s memory can be dumped and Secret values read by an attacker, and backups can be plundered for Secrets.</p>
+
+<p>Containers are just processes, but the root user on the host is omniscient. They must be able to see everything in
+order to debug and maintain the system. As you can see, dumping the strings in a process’s memory space is trivial:</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>See <a data-type="xref" href="ch09.xhtml#container-forensics">“Container Forensics”</a> for a simple example of dumping process memory.</p>
+</div>
+
+<p>All memory is <a data-type="indexterm" data-primary="memory" data-secondary="protecting" id="idm45302810826608"/>readable by the root user, and so unencrypted values in a container’s memory are easy to discover. You
+must detect attackers that attempt this behavior.</p>
+
+<p>The hardest <a data-type="indexterm" data-primary="Secrets" data-secondary="protecting" id="idm45302810825072"/>Secrets for an attacker to steal are those hidden in managed provider-hosted <a data-type="indexterm" data-primary="KMS (Key Management Services)" id="idm45302810823936"/><a data-type="indexterm" data-primary="Key Management Services (KMS)" id="idm45302810823248"/>Key Management Services (KMS),
+which can perform cryptographic operations on a consumer’s behalf. Dedicated, physical hardware security modules
+(HSMs)<a data-type="indexterm" data-primary="hardware security modules (HSMs)" id="idm45302810822256"/><a data-type="indexterm" data-primary="HSMs (hardware security modules)" id="idm45302810821568"/> are used to minimize risk to the cloud KMS system. Applications such as HashiCorp Vault can be configured as a
+frontend for a KMS, and services must explicitly authenticate to retrieve these Secrets. They are not in-memory on the
+local host, they cannot be easily enumerated, and each request is logged for audit. An attacker that compromises a node
+has not yet stolen all the Secrets that node can access.</p>
+
+<p>KMS integration makes cloud Secrets much harder to steal from <code>etcd</code>. The API server uses a local proxy to interact with
+KMS, by which it decrypts values stored in <code>etcd</code>:</p>
+
+<pre data-type="programlisting" data-code-language="yaml"><code class="nt">apiVersion</code><code class="p">:</code> <code class="l-Scalar-Plain">apiserver.config.k8s.io/v1</code>
+<code class="nt">kind</code><code class="p">:</code> <code class="l-Scalar-Plain">EncryptionConfiguration</code>
+<code class="nt">resources</code><code class="p">:</code>
+  <code class="p-Indicator">-</code> <code class="nt">resources</code><code class="p">:</code>
+      <code class="p-Indicator">-</code> <code class="l-Scalar-Plain">secrets</code>
+    <code class="nt">providers</code><code class="p">:</code>
+      <code class="p-Indicator">-</code> <code class="nt">kms</code><code class="p">:</code>
+          <code class="nt">name </code><code class="p">:</code> <code class="l-Scalar-Plain">myKmsPlugin</code>
+          <code class="nt">endpoint</code><code class="p">:</code> <code class="l-Scalar-Plain">unix:///var/kms-plugin/socket.sock</code>
+          <code class="nt">cachesize</code><code class="p">:</code> <code class="l-Scalar-Plain">100</code></pre>
+
+<p>Let’s move on to other control plane<a data-type="indexterm" data-primary="API server" data-secondary="etcd and" data-startref="API_etcd" id="idm45302810817056"/><a data-type="indexterm" data-primary="etcd" data-secondary="API server and" data-startref="etcd_API" id="idm45302810794592"/> components.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Scheduler and Controller Manager"><div class="sect2" id="idm45302810943904">
+<h2>Scheduler and Controller Manager</h2>
+
+<p>Controller manager and scheduler components are hard to attack as they do not have a public network API.
+They can be
+manipulated by affecting data in <code>etcd</code> or tricking the API server, but do not accept network input.</p>
+
+<p>The controller<a data-type="indexterm" data-primary="controller manager" data-secondary="privilege escalation" id="idm45302810790592"/><a data-type="indexterm" data-primary="privilege escalation" data-secondary="controller managers" id="idm45302810757152"/> manager service accounts are exemplary implementations of “least privilege.” A single controller manager
+process actually runs many individual controllers. In the event of privilege escalation in the controller manager, the
+service accounts used are well segregated in case one of them is leaked:</p>
+
+<pre data-type="programlisting"># kubectl get -n kube-system -o wide serviceaccounts | grep controller
+attachdetach-controller              1         20m
+calico-kube-controllers              1         20m
+certificate-controller               1         20m
+clusterrole-aggregation-controller   1         20m
+cronjob-controller                   1         20m
+daemon-set-controller                1         20m
+deployment-controller                1         20m
+disruption-controller                1         20m
+endpoint-controller                  1         20m
+endpointslice-controller             1         20m
+endpointslicemirroring-controller    1         20m
+expand-controller                    1         20m
+job-controller                       1         20m
+namespace-controller                 1         20m
+node-controller                      1         20m
+pv-protection-controller             1         20m
+pvc-protection-controller            1         20m
+replicaset-controller                1         20m
+replication-controller               1         20m
+resourcequota-controller             1         20m
+service-account-controller           1         20m
+service-controller                   1         20m
+statefulset-controller               1         20m
+ttl-controller                       1         20m</pre>
+
+<p>However, that’s not the greatest risk to that service. As with most Linux attacks, a malicious user with root privileges can access everything: memory of running processes, files on disk, network adapters, and mounted devices.</p>
+
+<p>An attacker that compromises <a data-type="indexterm" data-primary="controller manager" data-secondary="compromised" id="idm45302810752912"/>the node running the controller manager can impersonate that component, as it shares essential key and authentication material with the API server, using the master node’s filesystem to share:</p>
+
+<pre data-type="programlisting" data-code-language="yaml">  <code class="p-Indicator">-</code> <code class="nt">command</code><code class="p">:</code>
+    <code class="p-Indicator">-</code> <code class="l-Scalar-Plain">kube-controller-manager</code>
+    <code class="p-Indicator">-</code> <code class="l-Scalar-Plain">--authentication-kubeconfig=/etc/kubernetes/controller-manager.conf</code>
+    <code class="p-Indicator">-</code> <code class="l-Scalar-Plain">--authorization-kubeconfig=/etc/kubernetes/controller-manager.conf</code>
+    <code class="p-Indicator">-</code> <code class="l-Scalar-Plain">--bind-address=127.0.0.1</code>
+    <code class="p-Indicator">-</code> <code class="l-Scalar-Plain">--client-ca-file=/etc/kubernetes/pki/ca.crt</code>
+    <code class="p-Indicator">-</code> <code class="l-Scalar-Plain">--cluster-name=kubernetes</code>
+    <code class="p-Indicator">-</code> <code class="l-Scalar-Plain">--cluster-signing-cert-file=/etc/kubernetes/pki/ca.crt</code>
+    <code class="p-Indicator">-</code> <code class="l-Scalar-Plain">--cluster-signing-key-file=/etc/kubernetes/pki/ca.key</code>
+    <code class="p-Indicator">-</code> <code class="l-Scalar-Plain">--controllers=*,bootstrapsigner,tokencleaner</code>
+    <code class="p-Indicator">-</code> <code class="l-Scalar-Plain">--kubeconfig=/etc/kubernetes/controller-manager.conf</code>
+    <code class="p-Indicator">-</code> <code class="l-Scalar-Plain">--leader-elect=true</code>
+    <code class="p-Indicator">-</code> <code class="l-Scalar-Plain">--port=0</code>
+    <code class="p-Indicator">-</code> <code class="l-Scalar-Plain">--requestheader-client-ca-file=/etc/kubernetes/pki/front-proxy-ca.crt</code>
+    <code class="p-Indicator">-</code> <code class="l-Scalar-Plain">--root-ca-file=/etc/kubernetes/pki/ca.crt</code>
+    <code class="p-Indicator">-</code> <code class="l-Scalar-Plain">--service-account-private-key-file=/etc/kubernetes/pki/sa.key</code>
+    <code class="p-Indicator">-</code> <code class="l-Scalar-Plain">--use-service-account-credentials=true</code>
+    <code class="nt">image</code><code class="p">:</code> <code class="l-Scalar-Plain">k8s.gcr.io/kube-controller-manager:v1.20.4</code>
+    <code class="nt">volumeMounts</code><code class="p">:</code>
+    <code class="p-Indicator">-</code> <code class="nt">mountPath</code><code class="p">:</code> <code class="l-Scalar-Plain">/etc/ssl/certs</code>
+      <code class="nt">name</code><code class="p">:</code> <code class="l-Scalar-Plain">ca-certs</code>
+      <code class="nt">readOnly</code><code class="p">:</code> <code class="l-Scalar-Plain">true</code>
+    <code class="p-Indicator">-</code> <code class="nt">mountPath</code><code class="p">:</code> <code class="l-Scalar-Plain">/etc/ca-certificates</code>
+      <code class="nt">name</code><code class="p">:</code> <code class="l-Scalar-Plain">etc-ca-certificates</code>
+      <code class="nt">readOnly</code><code class="p">:</code> <code class="l-Scalar-Plain">true</code>
+    <code class="p-Indicator">-</code> <code class="nt">mountPath</code><code class="p">:</code> <code class="l-Scalar-Plain">/usr/libexec/kubernetes/kubelet-plugins/volume/exec</code>
+      <code class="nt">name</code><code class="p">:</code> <code class="l-Scalar-Plain">flexvolume-dir</code>
+    <code class="p-Indicator">-</code> <code class="nt">mountPath</code><code class="p">:</code> <code class="l-Scalar-Plain">/etc/kubernetes/pki</code>
+      <code class="nt">name</code><code class="p">:</code> <code class="l-Scalar-Plain">k8s-certs</code>
+      <code class="nt">readOnly</code><code class="p">:</code> <code class="l-Scalar-Plain">true</code>
+    <code class="p-Indicator">-</code> <code class="nt">mountPath</code><code class="p">:</code> <code class="l-Scalar-Plain">/etc/kubernetes/controller-manager.conf</code>
+      <code class="nt">name</code><code class="p">:</code> <code class="l-Scalar-Plain">kubeconfig</code>
+      <code class="nt">readOnly</code><code class="p">:</code> <code class="l-Scalar-Plain">true</code>
+    <code class="p-Indicator">-</code> <code class="nt">mountPath</code><code class="p">:</code> <code class="l-Scalar-Plain">/usr/local/share/ca-certificates</code>
+      <code class="nt">name</code><code class="p">:</code> <code class="l-Scalar-Plain">usr-local-share-ca-certificates</code>
+      <code class="nt">readOnly</code><code class="p">:</code> <code class="l-Scalar-Plain">true</code>
+    <code class="p-Indicator">-</code> <code class="nt">mountPath</code><code class="p">:</code> <code class="l-Scalar-Plain">/usr/share/ca-certificates</code>
+      <code class="nt">name</code><code class="p">:</code> <code class="l-Scalar-Plain">usr-share-ca-certificates</code>
+      <code class="nt">readOnly</code><code class="p">:</code> <code class="l-Scalar-Plain">true</code></pre>
+
+<p>As root on the control plane host, examining<a data-type="indexterm" data-primary="controller manager" data-secondary="dumping container filesystem" id="idm45302810750080"/><a data-type="indexterm" data-primary="filesystem" data-secondary="dumping" id="idm45302810749184"/><a data-type="indexterm" data-primary="containers" data-secondary="filesystems" data-tertiary="dumping" id="idm45302810748272"/> the controller manager, we are able to dump the container’s filesystem and explore:</p>
+
+<pre data-type="programlisting"># find /proc/27386/root/etc/kubernetes/
+/proc/27386/root/etc/kubernetes/
+/proc/27386/root/etc/kubernetes/pki
+/proc/27386/root/etc/kubernetes/pki/apiserver.crt
+/proc/27386/root/etc/kubernetes/pki/front-proxy-client.key
+/proc/27386/root/etc/kubernetes/pki/ca.key
+/proc/27386/root/etc/kubernetes/pki/ca.crt
+/proc/27386/root/etc/kubernetes/pki/sa.key
+/proc/27386/root/etc/kubernetes/pki/sa.pub
+/proc/27386/root/etc/kubernetes/pki/front-proxy-client.crt
+/proc/27386/root/etc/kubernetes/pki/apiserver-kubelet-client.crt
+/proc/27386/root/etc/kubernetes/pki/front-proxy-ca.key
+/proc/27386/root/etc/kubernetes/pki/apiserver-kubelet-client.key
+/proc/27386/root/etc/kubernetes/pki/apiserver.key
+/proc/27386/root/etc/kubernetes/pki/front-proxy-ca.crt
+/proc/27386/root/etc/kubernetes/controller-manager.conf</pre>
+
+<p>The scheduler has <a data-type="indexterm" data-primary="scheduler" data-secondary="permissions and keys" id="idm45302810576432"/><a data-type="indexterm" data-primary="permissions" data-secondary="scheduler" id="idm45302810575424"/><a data-type="indexterm" data-primary="keys, scheduler" id="idm45302810574480"/>fewer permissions and keys than the controller manager:</p>
+
+<pre data-type="programlisting" data-code-language="yaml">  <code class="nt">containers</code><code class="p">:</code>
+  <code class="p-Indicator">-</code> <code class="nt">command</code><code class="p">:</code>
+    <code class="p-Indicator">-</code> <code class="l-Scalar-Plain">kube-scheduler</code>
+    <code class="p-Indicator">-</code> <code class="l-Scalar-Plain">--authentication-kubeconfig=/etc/kubernetes/scheduler.conf</code>
+    <code class="p-Indicator">-</code> <code class="l-Scalar-Plain">--authorization-kubeconfig=/etc/kubernetes/scheduler.conf</code>
+    <code class="p-Indicator">-</code> <code class="l-Scalar-Plain">--bind-address=127.0.0.1</code>
+    <code class="p-Indicator">-</code> <code class="l-Scalar-Plain">--kubeconfig=/etc/kubernetes/scheduler.conf</code>
+    <code class="p-Indicator">-</code> <code class="l-Scalar-Plain">--leader-elect=true</code>
+    <code class="p-Indicator">-</code> <code class="l-Scalar-Plain">--port=0</code>
+    <code class="nt">image</code><code class="p">:</code> <code class="l-Scalar-Plain">k8s.gcr.io/kube-scheduler:v1.20.4</code></pre>
+
+<p>These limited permissions give Kubernetes least privilege configuration within the cluster and make Dread Pirate Hashjack’s work harder.</p>
+
+<p>The <a data-type="indexterm" data-primary="RBAC (role-based access control)" data-secondary="ClusterRole" id="idm45302810552544"/><a data-type="indexterm" data-primary="ClusterRole" id="idm45302810551712"/>RBAC ClusterRole for the cloud controller manager is allowed to create <a data-type="indexterm" data-primary="service accounts" data-secondary="creating" id="idm45302810550912"/>service accounts, which can be used by
+attackers to pivot or persist access. It may also access cloud interaction to control computer nodes for autoscaling,
+cloud storage access, network routing (e.g., between nodes), and load balancer config (for routing internet or external
+traffic to the cluster).</p>
+
+<p>Historically, this controller was part of the API server, which means cluster compromise may be escalated to cloud
+account compromise. Segregating permissions like this makes an attacker’s life more difficult, and ensuring the control
+plane nodes are not compromised will protect these services.</p>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Data Plane"><div class="sect1" id="idm45302811112384">
+<h1>Data Plane</h1>
+
+<p>Kubernetes trusts<a data-type="indexterm" data-primary="data plane, multitenancy" id="dataplane_multen"/><a data-type="indexterm" data-primary="multitenancy" data-secondary="data plane" id="multen_dataplane"/> a worker once it’s joined the cluster. If your worker node is hacked, then the <code>kubelet</code> it hosts is
+compromised, as well as the pods and data the <code>kubelet</code> was running or has access to. All <code>kubelet</code> and workload
+credentials <a data-type="indexterm" data-primary="kubelet" data-secondary="compromised" id="idm45302810513568"/>fall under the attacker’s control.</p>
+
+<p>The <code>kubelet</code>’s kubeconfig, keys, and service account details are not IP-bound by default, and neither are default
+workload service accounts. These identities (service account JWTs) can be exfiltrated and used from anywhere the API
+server is accessible. Post-exploitation, Captain Hashjack can masquerade as the <code>kubelet</code>’s workloads everywhere that
+workload’s identity is accepted.
+API server, other clusters and <code>kubelet</code>s, cloud and datacenter integrations, and external systems.</p>
+
+<p>By default, the API server uses the NodeRestriction plug-in<a data-type="indexterm" data-primary="nodes" data-secondary="NodeRestriction plug-in" data-tertiary="protecting Secrets" id="idm45302810509872"/> and node authorization in the <a data-type="indexterm" data-primary="admission controllers" data-secondary="protecting Secrets" id="idm45302810508496"/>admission controller. These
+restrict a <code>kubelet</code>’s service account credentials (which must be in the <code>system:nodes</code> group) to only the pods that are
+scheduled on that <code>kubelet</code>. An attacker may only pull Secrets associated with a workload scheduled on the <code>kubelet</code>’s
+node, and those Secrets are already mounted from the host’s filesystem into the container, which root can read anyway.</p>
+
+<p>This makes Captain Hashjack’s tyrannical plans more difficult. A compromised <code>kubelet</code>’s blast radius is limited by this
+policy. Attackers may work around this by attempting to attract sensitive pods to schedule on it.</p>
+
+<p>This is not using the API server to reschedule the pods—the stolen <code>kubelet</code> credentials
+have no authorization in the <code>kube-system</code> namespace—but instead changing the <code>kubelet</code>’s
+labels to pretend to be a different host or an isolated workload type (frontend, database, etc.).</p>
+
+<p>A compromised <code>kubelet</code> is able to <a data-type="indexterm" data-primary="kubelet" data-secondary="relabeling" id="idm45302810501968"/><a data-type="indexterm" data-primary="labels" data-secondary="kubelets" id="idm45302810500960"/>relabel itself by updating its command-line flags and restarting. This may trick the
+API server into scheduling sensitive pods and Secrets on the node (output edited):</p>
+<pre data-type="programlisting" class="small no-indent">
+root@kube-node-2 # kubectl get secrets -n null <a class="co" id="comarker1" href="#c01"><img src="Images/1.png" alt="1" width="12" height="12"/></a>
+Error from server (Forbidden): secrets is forbidden: User "system:node:kube-node-2"
+cannot list resource "secrets" in API group "" in the namespace "null":
+No Object name found
+
+root@kube-node-2 # kubectl label --overwrite \
+    node kube-node-2 sublimino=was_here <a class="co" id="comarker2" href="#c02"><img src="Images/2.png" alt="2" width="12" height="12"/></a>
+node/kube-node-2 labeled
+</pre>
+
+<dl class="calloutlist">
+ <dt><a class="co" id="c01" href="#comarker1"><img src="Images/1.png" alt="1" width="12" height="12"/></a></dt>
+  <dd><p>Check user by making a failing API call, we’re the <code>kubelet</code> node <code>kube-node-2</code>.</p></dd>
+ <dt><a class="co" id="c02" href="#comarker2"><img src="Images/2.png" alt="2" width="12" height="12"/></a></dt>
+  <dd><p>Modify ourselves with a new label.</p></dd>
+</dl>
+
+<p>Admins may use labels <a data-type="indexterm" data-primary="labels" data-secondary="workloads, grouping" id="idm45302810487760"/>to assign specific workloads to certain matching <code>kubelet</code> nodes and namespaces, grouping workloads
+with similar data classifications together, or increasing performance by keeping network traffic in the same zone or
+datacenter. Attackers should not be able to jump between these sensitive and isolated namespaces or nodes.</p>
+
+<p>The NodeRestriction <a data-type="indexterm" data-primary="nodes" data-secondary="NodeRestriction plug-in" data-tertiary="node relabeling" id="idm45302810485472"/>admission plug-in defends against nodes relabeling themselves as part of these trusted node groups
+by enforcing an immutable label format. The documentation uses regulatory tags as examples
+(like <code>example.com.node-restriction.kubernetes.io/fips=true</code>):</p>
+
+<pre data-type="programlisting"># try to modify a restricted label
+root@kube-node-2 # kubectl label --overwrite \
+    node kube-node-2 example.com.node-restriction.kubernetes.io/fips=true
+Error from server (Forbidden): nodes "kube-node-2" is forbidden: is not allowed
+to modify labels: example.com.node-restriction.kubernetes.io/fips</pre>
+
+<p>Without this added control, a compromised <code>kubelet</code> could potentially compromise sensitive workloads and possibly even the
+cluster or cloud account. The plug-in still allows modifications to some less-sensitive labels.</p>
+<div data-type="tip"><h6>Tip</h6>
+<p>Any hard-multitenant <a data-type="indexterm" data-primary="hard multitenancy" data-secondary="transitive permissions" id="idm45302810480320"/><a data-type="indexterm" data-primary="transitive permissions, hard multitenancy and" id="idm45302810479312"/>system should consider the impact of transitive permissions for RBAC roles, as tools like
+<a href="https://oreil.ly/DTFz2">gcploit</a> show in GCP. It chains IAM policies assigned to service accounts, and uses
+their permissions to explore <a data-type="indexterm" data-primary="data plane, multitenancy" data-startref="dataplane_multen" id="idm45302810477520"/><a data-type="indexterm" data-primary="multitenancy" data-secondary="data plane" data-startref="multen_dataplane" id="idm45302810476480"/>the “transitive permissions” of the original service account.</p>
+</div>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Cluster Isolation Architecture"><div class="sect1" id="idm45302810548224">
+<h1>Cluster Isolation Architecture</h1>
+
+<p>When thinking <a data-type="indexterm" data-primary="clusters" data-secondary="isolation architecture considerations" id="clust_isoarch"/>about data classification, it helps to ask yourself, “what’s the worst that could happen?” and work
+backward from there. As <a data-type="xref" href="#multitenancy-4-cs">Figure 7-2</a> shows, code will try to escape its container, which might attack a
+cluster and could compromise the account. Don’t put high-value data where it can be accessed by breaching a low-value
+data system.</p>
+
+<figure><div id="multitenancy-4-cs" class="figure">
+<img src="Images/haku_0702.png" alt="The 4C's of Cloud Native Security" width="581" height="585"/>
+<h6><span class="label">Figure 7-2. </span>Kubernetes data flow diagram (source: <a href="https://oreil.ly/BI4lj">cncf/financial-user-group</a>)</h6>
+</div></figure>
+
+<p>Clusters should be <a data-type="indexterm" data-primary="clusters" data-secondary="segregating" id="idm45302810467904"/>segregated on data classification and impact of breach. Taken to the extreme, that’s a cluster per
+tenant, which is costly and creates management overhead for SRE and security teams. The art of delineating clusters is a
+balance of security and maintainability.</p>
+
+<p>Having many clusters<a data-type="indexterm" data-primary="clusters" data-secondary="isolating, performance considerations" id="idm45302810466112"/> isolated from each other is expensive to run and wastes much fallow compute, but this is sometimes
+necessary for sensitive workloads. Each cluster must have consistent policy applied, and the hierarchical namespace
+controller offers a measured path to rolling out similar configurations.</p>
+<div data-type="tip"><h6>Tip</h6>
+<p>Uniform configuration <a data-type="indexterm" data-primary="configuration" data-secondary="clusters, performance considerations" id="idm45302810463632"/>is needed to sync Kubernetes resources to subordinate clusters and apply consistent admission control and network policy.</p>
+</div>
+
+<p>In <a data-type="xref" href="#multitenancy-hierarchical-ns">Figure 7-3</a> we see how policy objects can be propagated
+between namespaces to provide uniform
+enforcement of security requirements like RBAC, network policy, and team-specific Secrets.</p>
+
+<figure><div id="multitenancy-hierarchical-ns" class="figure">
+<img src="Images/haku_0703.png" alt="haku 0703" width="983" height="952"/>
+<h6><span class="label">Figure 7-3. </span>Kubernetes hierarchical namespace controller (source: <a href="https://oreil.ly/7E2e2">Kubernetes Multitenancy Working Group: Deep Dive</a>)</h6>
+</div></figure>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Cluster Support Services and Tooling Environments"><div class="sect1" id="idm45302810457920">
+<h1>Cluster Support Services and Tooling Environments</h1>
+
+<p>Shared tooling <a data-type="indexterm" data-primary="clusters" data-secondary="tooling environments" id="idm45302810456560"/><a data-type="indexterm" data-primary="tooling environments, clusters" id="idm45302810455552"/>environments that are connected to clusters of different sensitivities can offer a chance for attackers
+to pivot between environments or harvest leaked data.</p>
+<div data-type="warning" epub:type="warning"><h6>Warning</h6>
+<p>Tooling environments are a prime candidate for attack, especially the supply chain of registries and internal packages,
+and logging and observability systems.</p>
+
+<p>CVE-2019-11250 is a side-channel information <a data-type="indexterm" data-primary="CVEs (Common Vulnerabilities and Exposures)" data-secondary="tooling environments" id="idm45302810452976"/><a data-type="indexterm" data-primary="security" data-secondary="CVEs" data-tertiary="tooling environments" id="idm45302810451904"/>disclosure, leaking HTTP authentication headers. This sensitive data is
+logged by default in Kubernetes components running the client-go library. Excess logging of headers and environment
+variables is a frequent issue in any system and highlights the need for separation in sensitive systems.</p>
+</div>
+
+<p class="pagebreak-before">Tooling environments that can route traffic back to their client clusters may be able to reach administrative interfaces and datastores with credentials from CI/CD systems. Or, without direct network access, Captain Hashjack might poison container images, compromise source code, pillage monitoring systems, access security and scanning services, and drop<a data-type="indexterm" data-primary="clusters" data-secondary="isolation architecture considerations" data-startref="clust_isoarch" id="idm45302810449104"/> backdoors.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Security Monitoring and Visibility"><div class="sect1" id="idm45302810447456">
+<h1>Security Monitoring and Visibility</h1>
+
+<p>Large organizations run Security Operations Centers (SOC)<a data-type="indexterm" data-primary="Security Operations Center (SOC)" id="idm45302810445984"/><a data-type="indexterm" data-primary="SOC (Security Operations Center)" id="idm45302810445136"/> and Security Information and Event Management (SIEM)<a data-type="indexterm" data-primary="Security Information and Event Management (SIEM)" id="idm45302810444320"/><a data-type="indexterm" data-primary="SIEM (Security Information and Event Management)" id="idm45302810443552"/>
+technology to support compliance, threat detection, and security management. Your clusters emit <a data-type="indexterm" data-primary="clusters" data-secondary="security monitoring" id="idm45302810442608"/><a data-type="indexterm" data-primary="security monitoring, clusters" id="idm45302810441664"/>events, audit, log, and
+observability data to these systems where they are monitored and reacted to.</p>
+
+<p>Overloading these systems with data, exceeding rate limits, or increased event latency (adding a delay to audit, event, or container logs) may overwhelm an SOC or SIEM’s capacity to respond.</p>
+
+<p>As stateless applications prefer to store their data in somebody else’s database, <a data-type="indexterm" data-primary="cloud" data-secondary="datastores, security considerations" id="idm45302810439728"/>cloud datastores accessible from Kubernetes are a prime target. The workloads that can read or write to these are juicy, and service account credentials and workload identities are easy to harvest data with. Your SOC and SIEM should correlate cloud events with their
+calling Kubernetes workload identities to understand how your systems are being used, and how they may be attacked.</p>
+
+<p>We will go into greater detail on this topic in <a data-type="xref" href="ch09.xhtml#ch-intrusion-detection">Chapter 9</a>.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Conclusion"><div class="sect1" id="idm45302810436864">
+<h1>Conclusion</h1>
+
+<p>Segregating workloads is hard and requires you to invest in testing your own security. Validate your configuration files
+with static analysis, and revalidate clusters at runtime with tests to ensure they’re still
+configured correctly.</p>
+
+<p>The API server and <code>etcd</code> are the brains and memory of Kubernetes, and must be isolated from hostile tenants. Some
+multitenancy options run many control planes in a larger Kubernetes cluster.</p>
+
+<p>The hierarchical namespace controller brings distributed management to multicluster policy.</p>
+</div></section>
+
+
+
+
+
+
+
+</div></section></div></body></html>

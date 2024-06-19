@@ -1,0 +1,987 @@
+<html><head></head><body>
+<div id="sbo-rt-content"><section data-pdf-bookmark="Chapter 4. Kustomize" data-type="chapter" epub:type="chapter"><div class="chapter" id="ch_Kustomize">
+<h1><span class="label">Chapter 4. </span>Kustomize</h1>
+<p>Deploying to a Kubernetes cluster is, in summary, applying some <a data-primary="YAML" data-type="indexterm" id="idm45120846129440"/>YAML files and checking the result.</p>
+<p>The hard part is developing the initial YAML files version; after that, usually, they suffer only small changes such as updating the container image tag version, the number of replicas, or a new configuration value.
+One option is to make these changes directly in the YAML files—it works, but any error in this version (modification of the wrong line, deleting something by mistake, putting in the wrong whitespace) might be catastrophic.</p>
+<p>For this reason, some tools let you define base Kubernetes manifests (which change infrequently) and specific files (maybe one for each environment) for setting the parameters that change more frequently.
+One of these tools is Kustomize.</p>
+<p>In this chapter, you’ll learn how to use <a data-primary="Kustomize" data-type="indexterm" id="idm45120846127552"/>Kustomize to manage Kubernetes resource files in a template-free way without using any DSL.</p>
+<p>The first step is to create a Kustomize project and deploy it to a Kubernetes cluster (see <a data-type="xref" href="#recipe_4_1">Recipe 4.1</a>).</p>
+<p>After the first deployment, the application is automatically updated with a new container image, a new configuration value, or any other field, such as the replica number (see Recipes <a data-type="xref" data-xrefstyle="select:labelnumber" href="#recipe_4_2">4.2</a> and
+<a data-type="xref" data-xrefstyle="select:labelnumber" href="#recipe_4_3">4.3</a>).</p>
+<p>If you’ve got several running environments (i.e., staging, production, etc.), you need to manage them similarly. Still, with its particularities, Kustomize lets you define a set of custom values per environment (see <a data-type="xref" href="#recipe_4_4">Recipe 4.4</a>).</p>
+<p>Application <a data-primary="applications" data-secondary="configuration values" data-type="indexterm" id="idm45120846121120"/>configuration values are properties usually mapped as a <a data-primary="Kubernetes" data-secondary="ConfigMap" data-type="indexterm" id="idm45120846119984"/><a data-primary="ConfigMap" data-type="indexterm" id="idm45120846119040"/>Kubernetes <code>ConfigMap</code>.
+Any change (and its consequent update on the cluster) on a <code>ConfigMap</code> doesn’t trigger a rolling update of the application, which means that the application will run with the previous version until you manually restart it.</p>
+<p>Kustomize provides some functions to automatically execute a rolling update when the <code>ConfigMap</code> of an application changes (see <a data-type="xref" href="#recipe_4_5">Recipe 4.5</a>).</p>
+<section data-pdf-bookmark="4.1 Using Kustomize to Deploy Kubernetes Resources" data-type="sect1"><div class="sect1" id="recipe_4_1">
+<h1>4.1 Using Kustomize to Deploy Kubernetes Resources</h1>
+<section data-pdf-bookmark="Problem" data-type="sect2"><div class="sect2" id="idm45120846113984">
+<h2>Problem</h2>
+<p>You want to deploy <a data-primary="Kubernetes" data-secondary="resources, deploying with Kustomize" data-type="indexterm" id="K_resources_deploy"/><a data-primary="resources" data-secondary="deploying with Kustomize" data-type="indexterm" id="resources_dep_Kustom"/><a data-primary="Kustomize" data-secondary="Kubernetes resources, deploying" data-type="indexterm" id="Kustom_Kr_deploy"/>several Kubernetes resources at once.</p>
+</div></section>
+<section data-pdf-bookmark="Solution" data-type="sect2"><div class="sect2" id="idm45120846108656">
+<h2>Solution</h2>
+<p>Use <a href="https://kustomize.io">Kustomize</a> to configure which resources to deploy.</p>
+<p>Deploying an application to a Kubernetes cluster isn’t as trivial as just applying one YAML/JSON file containing a Kubernetes <code>Deployment</code> object.
+Usually, other Kubernetes objects must be defined like <code>Service</code>, <code>Ingress</code>, <code>ConfigMaps</code>, etc., which makes things a bit more complicated in terms of managing and updating these resources (the more resources to maintain, the more chance to update the wrong one) as well as applying them to a cluster (should we run multiple <code>kubectl</code> commands?).</p>
+<p>Kustomize is a CLI tool, integrated within <a data-primary="kubectl" data-secondary="Kustomize" data-type="indexterm" id="idm45120846102784"/>the <code>kubectl</code> tool to manage, customize, and apply Kubernetes resources in a <em>template-less</em> way.</p>
+<p>With Kustomize, you need to set a base <a data-primary="base directory files, Kustomize" data-type="indexterm" id="idm45120846100064"/><a data-primary="Kustomize" data-secondary="base directory files" data-type="indexterm" id="idm45120846099392"/>directory with standard Kubernetes resource files (no placeholders are required) and create<a data-primary="kustomization.yaml" data-type="indexterm" id="idm45120846098208"/><a data-primary="YAML" data-secondary="kustomization.yaml" data-type="indexterm" id="idm45120846097536"/> a <em>kustomization.yaml</em> file where resources and customizations are declared, as you can see in <a data-type="xref" href="#fig-411">Figure 4-1</a>.</p>
+<figure><div class="figure" id="fig-411">
+<img alt="Kustomize layout" height="354" src="assets/gocb_0402.png" width="1428"/>
+<h6><span class="label">Figure 4-1. </span>Kustomize layout</h6>
+</div></figure>
+<p>Let’s deploy a simple<a data-primary="web pages, deploying with Kustomize" data-type="indexterm" id="webpg_Kustom"/><a data-primary="Kustomize" data-secondary="web pages, deploying" data-type="indexterm" id="Kustom_webpg_deploy"/> web page with HTML, JavaScript, and CSS files.</p>
+<p>First, open a terminal window and create a directory named <em>pacman</em>, then create three Kubernetes resource <a data-primary="resource files (Kubernetes), creating" data-type="indexterm" id="resource_K_creat"/><a data-primary="Kubernetes" data-secondary="resource files, creating" data-type="indexterm" id="K_resource_creat"/>files to create a <code>Namespace</code>, a <code>Deployment</code>, and a <code>Service</code> with the following content.</p>
+<p>The namespace at <em>pacman/namespace.yaml</em>:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Namespace</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman</code><code class="w"/></pre>
+<p>The deployment file at <em>pacman/deployment.yaml</em>:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">apps/v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Deployment</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman</code><code class="w"/>
+<code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">replicas</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">1</code><code class="w"/>
+<code class="w">  </code><code class="nt">selector</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">matchLabels</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="w">  </code><code class="nt">template</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="w">    </code><code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">containers</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">lordofthejars/pacman-kikd:1.0.0</code><code class="w"/>
+<code class="w">            </code><code class="nt">imagePullPolicy</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Always</code><code class="w"/>
+<code class="w">            </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="w">            </code><code class="nt">ports</code><code class="p">:</code><code class="w"/>
+<code class="w">              </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">containerPort</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">8080</code><code class="w"/>
+<code class="w">                </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">http</code><code class="w"/>
+<code class="w">                </code><code class="nt">protocol</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">TCP</code><code class="w"/></pre>
+<p>The service file at <em>pacman/service.yaml</em>:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Service</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">ports</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">http</code><code class="w"/>
+<code class="w">      </code><code class="nt">port</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">8080</code><code class="w"/>
+<code class="w">      </code><code class="nt">targetPort</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">8080</code><code class="w"/>
+<code class="w">  </code><code class="nt">selector</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/></pre>
+<p>Notice <a data-primary="resource files (Kubernetes), creating" data-startref="resource_K_creat" data-type="indexterm" id="idm45120845758528"/><a data-primary="Kubernetes" data-secondary="resource files, creating" data-startref="K_resource_creat" data-type="indexterm" id="idm45120845757680"/>that these files are Kubernetes files that you could apply to a Kubernetes cluster without any problem as no special characters or placeholders are used.</p>
+<p>The second thing is to <a data-primary="kustomization.yaml" data-secondary="creating" data-type="indexterm" id="idm45120845787040"/>create the <em>kustomization.yaml</em> file in the <em>pacman</em> directory containing the list of resources that belongs to the application and are applied when running Kustomize:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kustomize.config.k8s.io/v1beta1</code><code class="w">
+</code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Kustomization</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO1-1" id="co_kustomize_CO1-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code class="w">
+</code><code class="nt">resources</code><code class="p">:</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO1-2" id="co_kustomize_CO1-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">./namespace.yaml</code><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">./deployment.yaml</code><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">./service.yaml</code></pre>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_kustomize_CO1-1" id="callout_kustomize_CO1-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>Kustomization file</p></dd>
+<dt><a class="co" href="#co_kustomize_CO1-2" id="callout_kustomize_CO1-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a></dt>
+<dd><p>Resources belonging to the application processed in depth-first order</p></dd>
+</dl>
+<p>At this point, <a data-primary="kubectl" data-secondary="apply command" data-type="indexterm" id="idm45120845734416"/>we can apply the kustomization file into a running cluster by running the following command:</p>
+<pre data-code-language="bash" data-type="programlisting"><code>kubectl</code><code> </code><code>apply</code><code> </code><code>--dry-run</code><code class="o">=</code><code>client</code><code> </code><code>-o</code><code> </code><code>yaml</code><code> </code><code class="se">\ </code><a class="co" href="#callout_kustomize_CO2-1" id="co_kustomize_CO2-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code>
+              </code><code>-k</code><code> </code><code>./</code><code> </code><a class="co" href="#callout_kustomize_CO2-2" id="co_kustomize_CO2-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a><code> </code><a class="co" href="#callout_kustomize_CO2-3" id="co_kustomize_CO2-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a></pre>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_kustomize_CO2-1" id="callout_kustomize_CO2-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>Prints the result of the kustomization run, without sending the result to the cluster</p></dd>
+<dt><a class="co" href="#co_kustomize_CO2-2" id="callout_kustomize_CO2-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a></dt>
+<dd><p>With <code>-k</code> option sets <code>kubectl</code> to use the kustomization file</p></dd>
+<dt><a class="co" href="#co_kustomize_CO2-3" id="callout_kustomize_CO2-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a></dt>
+<dd><p>Directory with parent <em>kustomization.yaml</em> file</p></dd>
+</dl>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>We assume you’ve already started a  <em>Minikube</em> cluster as shown in <a data-type="xref" href="ch02.xhtml#recipe_2_3">Recipe 2.3</a>.</p>
+</div>
+<p>The output is the YAML file that would be sent to the server if the <code>dry-run</code> option was not used:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w">
+</code><code class="nt">items</code><code class="p">:</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO3-1" id="co_kustomize_CO3-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w">
+</code><code class="w">  </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Namespace</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO3-2" id="co_kustomize_CO3-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a><code class="w">
+</code><code class="w">  </code><code class="nt">metadata</code><code class="p">:</code><code class="w">
+</code><code class="w">    </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman</code><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w">
+</code><code class="w">  </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Service</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO3-3" id="co_kustomize_CO3-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a><code class="w">
+</code><code class="w">  </code><code class="nt">metadata</code><code class="p">:</code><code class="w">
+</code><code class="w">    </code><code class="nt">labels</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">    </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">    </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman</code><code class="w">
+</code><code class="w">  </code><code class="nt">spec</code><code class="p">:</code><code class="w">
+</code><code class="w">    </code><code class="nt">ports</code><code class="p">:</code><code class="w">
+</code><code class="w">    </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">http</code><code class="w">
+</code><code class="w">      </code><code class="nt">port</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">8080</code><code class="w">
+</code><code class="w">      </code><code class="nt">targetPort</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">8080</code><code class="w">
+</code><code class="w">    </code><code class="nt">selector</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">apps/v1</code><code class="w">
+</code><code class="w">  </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Deployment</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO3-4" id="co_kustomize_CO3-4"><img alt="4" height="12" src="assets/4.png" width="12"/></a><code class="w">
+</code><code class="w">  </code><code class="nt">metadata</code><code class="p">:</code><code class="w">
+</code><code class="w">    </code><code class="nt">labels</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">    </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">    </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman</code><code class="w">
+</code><code class="w">  </code><code class="nt">spec</code><code class="p">:</code><code class="w">
+</code><code class="w">    </code><code class="nt">replicas</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">1</code><code class="w">
+</code><code class="w">    </code><code class="nt">selector</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="nt">matchLabels</code><code class="p">:</code><code class="w">
+</code><code class="w">        </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">    </code><code class="nt">template</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="nt">metadata</code><code class="p">:</code><code class="w">
+</code><code class="w">        </code><code class="nt">labels</code><code class="p">:</code><code class="w">
+</code><code class="w">          </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">      </code><code class="nt">spec</code><code class="p">:</code><code class="w">
+</code><code class="w">        </code><code class="nt">containers</code><code class="p">:</code><code class="w">
+</code><code class="w">        </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">lordofthejars/pacman-kikd:1.0.0</code><code class="w">
+</code><code class="w">          </code><code class="nt">imagePullPolicy</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Always</code><code class="w">
+</code><code class="w">          </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">          </code><code class="nt">ports</code><code class="p">:</code><code class="w">
+</code><code class="w">          </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">containerPort</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">8080</code><code class="w">
+</code><code class="w">            </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">http</code><code class="w">
+</code><code class="w">            </code><code class="nt">protocol</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">TCP</code><code class="w">
+</code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">List</code><code class="w">
+</code><code class="nt">metadata</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">{</code><code class="p-Indicator">}</code></pre>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_kustomize_CO3-1" id="callout_kustomize_CO3-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>List of all Kubernetes objects defined in <em>kustomization.yaml</em> to apply</p></dd>
+<dt><a class="co" href="#co_kustomize_CO3-2" id="callout_kustomize_CO3-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a></dt>
+<dd><p>The namespace document</p></dd>
+<dt><a class="co" href="#co_kustomize_CO3-3" id="callout_kustomize_CO3-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a></dt>
+<dd><p>The service document</p></dd>
+<dt><a class="co" href="#co_kustomize_CO3-4" id="callout_kustomize_CO3-4"><img alt="4" height="12" src="assets/4.png" width="12"/></a></dt>
+<dd><p>The deployment <a data-primary="web pages, deploying with Kustomize" data-startref="webpg_Kustom" data-type="indexterm" id="idm45120845420576"/><a data-primary="Kustomize" data-secondary="web pages, deploying" data-startref="Kustom_webpg_deploy" data-type="indexterm" id="idm45120845419600"/>document</p></dd>
+</dl>
+</div></section>
+<section data-pdf-bookmark="Discussion" data-type="sect2"><div class="sect2" id="idm45120846107744">
+<h2>Discussion</h2>
+<p>The <code>resources</code> section supports different inputs in addition to directly setting the YAML files.</p>
+<p>For example, you can set a base directory with its <a data-primary="kustomization.yaml" data-secondary="referencing from another kustomization.yaml file" data-type="indexterm" id="idm45120845415792"/>own <em>kustomization.yaml</em> and Kubernetes resources files and refer it from another <em>kustomization.yaml</em> file placed in another directory.</p>
+<p>Given the following directory layout:</p>
+<pre data-code-language="bash" data-type="programlisting">.
+├── base
+│   ├── kustomization.yaml
+│   └── deployment.yaml
+├── kustomization.yaml
+├── configmap.yaml</pre>
+<p>And the Kustomization definitions in the <em>base</em> directory:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kustomize.config.k8s.io/v1beta1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Kustomization</code><code class="w"/>
+<code class="nt">resources</code><code class="p">:</code><code class="w"/>
+<code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">./deployment.yaml</code><code class="w"/></pre>
+<p>You’ll see that the root directory has a link to the <em>base</em> directory and a <code>ConfigMap</code> definition:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kustomize.config.k8s.io/v1beta1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Kustomization</code><code class="w"/>
+<code class="nt">resources</code><code class="p">:</code><code class="w"/>
+<code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">./base</code><code class="w"/>
+<code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">./configmap.yaml</code><code class="w"/></pre>
+<p>So, applying the root kustomization file will automatically apply the resources defined in the base <a data-primary="kustomization.yaml" data-secondary="referencing external assets" data-type="indexterm" id="kustomyaml_ref_assets"/>kustomization file.</p>
+<p>Also, <code>resources</code> can reference external assets from a URL following the <a href="https://oreil.ly/lbeQC">HashiCorp URL</a> format.
+For example, we refer to a GitHub repository by setting the URL:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">resources</code><code class="p">:</code><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">github.com/lordofthejars/mysql</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO4-1" id="co_kustomize_CO4-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">github.com/lordofthejars/mysql?ref=test</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO4-2" id="co_kustomize_CO4-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a></pre>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_kustomize_CO4-1" id="callout_kustomize_CO4-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>Repository with a root-level <em>kustomization.yaml</em> file</p></dd>
+<dt><a class="co" href="#co_kustomize_CO4-2" id="callout_kustomize_CO4-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a></dt>
+<dd><p>Repository with a root-level <em>kustomization.yaml</em> file on branch test</p></dd>
+</dl>
+<p>You’ve seen the application of a Kustomize file using <code>kubectl</code>, but Kustomize also comes with its own CLI tool offering a set of commands to interact with Kustomize resources.</p>
+<p>The equivalent command to build Kustomize resources <a data-primary="kustomize command, building resources" data-type="indexterm" id="kustcom_resource"/>using <code>kustomize</code> instead of <code>kubectl</code> is:</p>
+<pre data-code-language="bash" data-type="programlisting">kustomize build</pre>
+<p class="pagebreak-before less_space">And the output is:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Namespace</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman</code><code class="w"/>
+<code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Service</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">ports</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">http</code><code class="w"/>
+<code class="w">    </code><code class="nt">port</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">8080</code><code class="w"/>
+<code class="w">    </code><code class="nt">targetPort</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">8080</code><code class="w"/>
+<code class="w">  </code><code class="nt">selector</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">apps/v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Deployment</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">replicas</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">1</code><code class="w"/>
+<code class="w">  </code><code class="nt">selector</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">matchLabels</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="w">  </code><code class="nt">template</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="w">    </code><code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">containers</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">lordofthejars/pacman-kikd:1.0.0</code><code class="w"/>
+<code class="w">        </code><code class="nt">imagePullPolicy</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Always</code><code class="w"/>
+<code class="w">        </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="w">        </code><code class="nt">ports</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">containerPort</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">8080</code><code class="w"/>
+<code class="w">          </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">http</code><code class="w"/>
+<code class="w">          </code><code class="nt">protocol</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">TCP</code><code class="w"/></pre>
+<p>If <a data-primary="kustomization.yaml" data-secondary="referencing external assets" data-startref="kustomyaml_ref_assets" data-type="indexterm" id="idm45120844845504"/><a data-primary="Kubernetes" data-secondary="resources, deploying with Kustomize" data-startref="K_resources_deploy" data-type="indexterm" id="idm45120844844416"/><a data-primary="resources" data-secondary="deploying with Kustomize" data-startref="resources_dep_Kustom" data-type="indexterm" id="idm45120844982288"/><a data-primary="Kustomize" data-secondary="Kubernetes resources, deploying" data-startref="Kustom_Kr_deploy" data-type="indexterm" id="idm45120844981104"/><a data-primary="kustomize command, building resources" data-startref="kustcom_resource" data-type="indexterm" id="idm45120844979920"/>you want to apply this output generated by <code>kustomize</code> to the cluster, run the following command:</p>
+<pre data-code-language="bash" data-type="programlisting">kustomize build . <code class="p">|</code> kubectl apply -f -</pre>
+</div></section>
+<section data-pdf-bookmark="See Also" data-type="sect2"><div class="sect2" id="idm45120845417344">
+<h2>See Also</h2>
+<ul>
+<li>
+<p><a href="https://kustomize.io">Kustomize</a></p>
+</li>
+<li>
+<p><a href="https://oreil.ly/h2yNd">kustomize/v4.4.1 on GitHub</a></p>
+</li>
+<li>
+<p><a href="https://oreil.ly/n7jwr">HashiCorp URL format</a></p>
+</li>
+</ul>
+</div></section>
+</div></section>
+<section data-pdf-bookmark="4.2 Updating the Container Image in Kustomize" data-type="sect1"><div class="sect1" id="recipe_4_2">
+<h1>4.2 Updating the Container Image in Kustomize</h1>
+<section data-pdf-bookmark="Problem" data-type="sect2"><div class="sect2" id="idm45120844972128">
+<h2>Problem</h2>
+<p>You want to update the <a data-primary="container images" data-secondary="updating" data-tertiary="Kustomize" data-type="indexterm" id="contimg_updat_Kust"/><a data-primary="Kustomize" data-secondary="container images, updating" data-type="indexterm" id="Kust_contimg_updat"/>container image from a deployment file using Kustomize.</p>
+</div></section>
+<section data-pdf-bookmark="Solution" data-type="sect2"><div class="sect2" id="idm45120844964032">
+<h2>Solution</h2>
+<p>Use the <code>images</code> section <a data-primary="deployment" data-secondary="updating" data-tertiary="container images" data-type="indexterm" id="depfil_imgsec_contimg"/>to update the container image.</p>
+<p>One of the most important and most-used operations in software development is updating the application to a newer version either with a bug fix or with a new feature.
+In Kubernetes, this means that you need to create a new container image, and name it accordingly using the <code>tag</code> section (<code>&lt;registry&gt;/&lt;username&gt;/&lt;project&gt;:&lt;tag&gt;</code>).</p>
+<p>Given the following partial deployment file:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">spec</code><code class="p">:</code><code class="w">
+</code><code class="w">    </code><code class="nt">containers</code><code class="p">:</code><code class="w">
+</code><code class="w">        </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">lordofthejars/pacman-kikd:1.0.0</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO5-1" id="co_kustomize_CO5-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code class="w">
+</code><code class="w">        </code><code class="nt">imagePullPolicy</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Always</code><code class="w">
+</code><code class="w">        </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code></pre>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_kustomize_CO5-1" id="callout_kustomize_CO5-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>Service 1.0.0 is deployed</p></dd>
+</dl>
+<p>We can update the<a data-primary="container images" data-secondary="version tag, updating" data-type="indexterm" id="contimg_vertag"/> version tag to 1.0.1 by using the <code>images</code> section <a data-primary="kustomization.yaml" data-secondary="container images, updating" data-type="indexterm" id="idm45120844797888"/>in the <em>kustomization.yaml</em> file:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kustomize.config.k8s.io/v1beta1</code><code class="w">
+</code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Kustomization</code><code class="w">
+</code><code class="nt">resources</code><code class="p">:</code><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">./namespace.yaml</code><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">./deployment.yaml</code><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">./service.yaml</code><code class="w">
+</code><code class="nt">images</code><code class="p">:</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO6-1" id="co_kustomize_CO6-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">lordofthejars/pacman-kikd</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO6-2" id="co_kustomize_CO6-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a><code class="w">
+</code><code class="w">  </code><code class="nt">newTag</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">1.0.1</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO6-3" id="co_kustomize_CO6-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a></pre>
+<dl class="calloutlist less_space pagebreak-before">
+<dt><a class="co" href="#co_kustomize_CO6-1" id="callout_kustomize_CO6-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p><code>images</code> section</p></dd>
+<dt><a class="co" href="#co_kustomize_CO6-2" id="callout_kustomize_CO6-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a></dt>
+<dd><p>Sets the name of the image to <em>update</em></p></dd>
+<dt><a class="co" href="#co_kustomize_CO6-3" id="callout_kustomize_CO6-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a></dt>
+<dd><p>Sets the new tag value for<a data-primary="deployment" data-secondary="updating" data-startref="depfil_imgsec_contimg" data-tertiary="container images" data-type="indexterm" id="idm45120844722576"/> the image</p></dd>
+</dl>
+<p>Finally, use <code>kubectl</code> in <code>dry-run</code> or <code>kustomize</code> to validate that the output of the deployment file contains the new tag version.
+In a terminal window, run the <a data-primary="kustomize build command" data-type="indexterm" id="idm45120844683648"/>following command:</p>
+<pre data-code-language="bash" data-type="programlisting">kustomize build</pre>
+<p>The output of the preceding command is:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="p">...</code><code class="w">
+</code><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">apps/v1</code><code class="w">
+</code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Deployment</code><code class="w">
+</code><code class="nt">metadata</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w">
+</code><code class="w">    </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman</code><code class="w">
+</code><code class="nt">spec</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="nt">replicas</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">1</code><code class="w">
+</code><code class="w">  </code><code class="nt">selector</code><code class="p">:</code><code class="w">
+</code><code class="w">    </code><code class="nt">matchLabels</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">  </code><code class="nt">template</code><code class="p">:</code><code class="w">
+</code><code class="w">    </code><code class="nt">metadata</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="nt">labels</code><code class="p">:</code><code class="w">
+</code><code class="w">        </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">    </code><code class="nt">spec</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="nt">containers</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">lordofthejars/pacman-kikd:1.0.1</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO7-1" id="co_kustomize_CO7-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code class="w">
+</code><code class="w">        </code><code class="nt">imagePullPolicy</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Always</code><code class="w">
+</code><code class="w">        </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">        </code><code class="nt">ports</code><code class="p">:</code><code class="w">
+</code><code class="w">        </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">containerPort</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">8080</code><code class="w">
+</code><code class="w">          </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">http</code><code class="w">
+</code><code class="w">          </code><code class="nt">protocol</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">TCP</code></pre>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_kustomize_CO7-1" id="callout_kustomize_CO7-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>Version set in the <code>kustomize.yaml</code> file</p></dd>
+</dl>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>Kustomize is not intrusive, which means that the original <em>deployment.yaml</em> file still contains the original tag (<code>1.0.0</code>).</p>
+</div>
+</div></section>
+<section data-pdf-bookmark="Discussion" data-type="sect2"><div class="sect2" id="idm45120844963440">
+<h2>Discussion</h2>
+<p>One way to <a data-primary="newTag field, updating" data-type="indexterm" id="idm45120844548768"/>update the <code>newTag</code> field is by editing the <em>kustomization.yaml</em> file, but you can also use the <code>kustomize</code> tool for this purpose.</p>
+<p>Run the following command in the same directory as the <em>kustomization.yaml</em> file:</p>
+<pre data-code-language="bash" data-type="programlisting">kustomize edit <code class="nb">set</code> image lordofthejars/pacman-kikd:1.0.2</pre>
+<p>Check <a data-primary="container images" data-secondary="version tag, updating" data-startref="contimg_vertag" data-type="indexterm" id="idm45120844544032"/>the content of the <em>kustomization.yaml</em> file to see that the <code>newTag</code> field has been<a data-primary="container images" data-secondary="updating" data-startref="contimg_updat_Kust" data-tertiary="Kustomize" data-type="indexterm" id="idm45120844485584"/><a data-primary="Kustomize" data-secondary="container images, updating" data-startref="Kust_contimg_updat" data-type="indexterm" id="idm45120844484064"/> updated:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="p">...</code><code class="w"/>
+<code class="nt">images</code><code class="p">:</code><code class="w"/>
+<code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">lordofthejars/pacman-kikd</code><code class="w"/>
+<code class="w">  </code><code class="nt">newTag</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">1.0.2</code><code class="w"/></pre>
+</div></section>
+</div></section>
+<section data-pdf-bookmark="4.3 Updating Any Kubernetes Field in Kustomize" data-type="sect1"><div class="sect1" id="recipe_4_3">
+<h1>4.3 Updating Any Kubernetes Field in Kustomize</h1>
+<section data-pdf-bookmark="Problem" data-type="sect2"><div class="sect2" id="idm45120844478800">
+<h2>Problem</h2>
+<p>You want to <a data-primary="Kubernetes" data-secondary="fields" data-tertiary="updating with Kustomize" data-type="indexterm" id="K_field_updat"/><a data-primary="Kustomize" data-secondary="Kubernetes, updating fields" data-type="indexterm" id="Kust_K_updat"/>update a field (i.e., number of replicas) using Kustomize.</p>
+</div></section>
+<section data-pdf-bookmark="Solution" data-type="sect2"><div class="sect2" id="idm45120844440512">
+<h2>Solution</h2>
+<p>Use the <code>patches</code> section to specify a change using the <a data-primary="JSON Patch, updating container image fields" data-type="indexterm" id="JSON_P_upfield"/>JSON Patch specification.</p>
+<p>In the previous recipe, you saw how to update the container image tag, but sometimes you might change other parameters like the number of replicas or add annotations, labels, limits, etc.</p>
+<p>To cover these scenarios, Kustomize supports the use of JSON Patch to modify any Kubernetes resource defined as a Kustomize resource.
+To use it, you need to specify the JSON Patch expression to apply and which resource to apply the patch to.</p>
+<p>For example, we can modify the number of replicas in the following partial deployment file from one to three:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">apps/v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Deployment</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman</code><code class="w"/>
+<code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">replicas</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">1</code><code class="w"/>
+<code class="w">  </code><code class="nt">selector</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">matchLabels</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="w">  </code><code class="nt">template</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="w">    </code><code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">containers</code><code class="p">:</code><code class="w"/>
+<code class="p">...</code><code class="w"/></pre>
+<p>First, let’s update the <em>kustomization.yaml</em> file to modify the number of replicas defined in the deployment file:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kustomize.config.k8s.io/v1beta1</code><code class="w">
+</code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Kustomization</code><code class="w">
+</code><code class="nt">resources</code><code class="p">:</code><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">./deployment.yaml</code><code class="w">
+</code><code class="nt">patches</code><code class="p">:</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO8-1" id="co_kustomize_CO8-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code class="w">
+</code><code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">target</code><code class="p">:</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO8-2" id="co_kustomize_CO8-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a><code class="w">
+</code><code class="w">      </code><code class="nt">version</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w">
+</code><code class="w">      </code><code class="nt">group</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">apps</code><code class="w">
+</code><code class="w">      </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Deployment</code><code class="w">
+</code><code class="w">      </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">      </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman</code><code class="w">
+</code><code class="w">    </code><code class="nt">patch</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">|</code><code class="p-Indicator">-</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO8-3" id="co_kustomize_CO8-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a><code class="w">
+</code><code class="w">      </code><code class="no">- op: replace </code><a class="co" href="#callout_kustomize_CO8-4" id="co_kustomize_CO8-4"><img alt="4" height="12" src="assets/4.png" width="12"/></a><code class="w">
+</code><code class="w">        </code><code class="no">path: /spec/replicas </code><a class="co" href="#callout_kustomize_CO8-5" id="co_kustomize_CO8-5"><img alt="5" height="12" src="assets/5.png" width="12"/></a><code class="w">
+</code><code class="w">        </code><code class="no">value: 3 </code><a class="co" href="#callout_kustomize_CO8-6" id="co_kustomize_CO8-6"><img alt="6" height="12" src="assets/6.png" width="12"/></a></pre>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_kustomize_CO8-1" id="callout_kustomize_CO8-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>Patch resource.</p></dd>
+<dt><a class="co" href="#co_kustomize_CO8-2" id="callout_kustomize_CO8-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a></dt>
+<dd><p><code>target</code> section sets which Kubernetes object needs to be changed. These values match the deployment file created previously.</p></dd>
+<dt><a class="co" href="#co_kustomize_CO8-3" id="callout_kustomize_CO8-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a></dt>
+<dd><p>Patch expression.</p></dd>
+<dt><a class="co" href="#co_kustomize_CO8-4" id="callout_kustomize_CO8-4"><img alt="4" height="12" src="assets/4.png" width="12"/></a></dt>
+<dd><p>Modification of a value.</p></dd>
+<dt><a class="co" href="#co_kustomize_CO8-5" id="callout_kustomize_CO8-5"><img alt="5" height="12" src="assets/5.png" width="12"/></a></dt>
+<dd><p>Path to the field to modify.</p></dd>
+<dt><a class="co" href="#co_kustomize_CO8-6" id="callout_kustomize_CO8-6"><img alt="6" height="12" src="assets/6.png" width="12"/></a></dt>
+<dd><p>New value.</p></dd>
+</dl>
+<p>Finally, use <code>kubectl</code> in <code>dry-run</code> or <code>kustomize</code> to validate that the output of the deployment file contains the new tag version.
+In a terminal window, run the following command:</p>
+<pre data-code-language="bash" data-type="programlisting">kustomize build</pre>
+<p>The output of the preceding command is:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">apps/v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Deployment</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">replicas</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">3</code><code class="w"/>
+<code class="w">  </code><code class="nt">selector</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">matchLabels</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="p">...</code><code class="w"/></pre>
+<div data-type="tip"><h6>Tip</h6>
+<p>The <em>replicas</em> value can also be updated using the <code>replicas</code> field in the <em>kustomization.yaml</em> file.</p>
+<p>The equivalent Kustomize file using the <code>replicas</code> field is shown in the following snippet:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kustomize.config.k8s.io/v1beta1</code><code class="w">
+</code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Kustomization</code><code class="w">
+</code><code class="nt">replicas</code><code class="p">:</code><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO9-1" id="co_kustomize_CO9-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code class="w">
+</code><code class="w">  </code><code class="nt">count</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">3</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO9-2" id="co_kustomize_CO9-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a><code class="w">
+</code><code class="nt">resources</code><code class="p">:</code><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">deployment.yaml</code></pre>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_kustomize_CO9-1" id="callout_kustomize_CO9-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>Deployment to update the replicas</p></dd>
+<dt><a class="co" href="#co_kustomize_CO9-2" id="callout_kustomize_CO9-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a></dt>
+<dd><p>New <code>replicas</code> value</p></dd>
+</dl>
+</div>
+<p>Kustomize lets <a data-primary="Kubernetes" data-secondary="fields" data-tertiary="adding with Kustomize" data-type="indexterm" id="idm45120844015616"/><a data-primary="Kustomize" data-secondary="Kubernetes adding fields" data-type="indexterm" id="idm45120844014336"/>you add (or delete) values, in addition to modifying a value.
+Let’s see how to add a new label:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="p">...</code><code class="w">
+</code><code class="nt">patches</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">target</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="nt">version</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w">
+</code><code class="w">      </code><code class="nt">group</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">apps</code><code class="w">
+</code><code class="w">      </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Deployment</code><code class="w">
+</code><code class="w">      </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">      </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman</code><code class="w">
+</code><code class="w">    </code><code class="nt">patch</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">|</code><code class="p-Indicator">-</code><code class="w">
+</code><code class="w">      </code><code class="no">- op: replace</code><code class="w">
+</code><code class="w">        </code><code class="no">path: /spec/replicas</code><code class="w">
+</code><code class="w">        </code><code class="no">value: 3</code><code class="w">
+</code><code class="w">      </code><code class="no">- op: add </code><a class="co" href="#callout_kustomize_CO10-1" id="co_kustomize_CO10-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code class="w">
+</code><code class="w">        </code><code class="no">path: /metadata/labels/testkey </code><a class="co" href="#callout_kustomize_CO10-2" id="co_kustomize_CO10-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a><code class="w">
+</code><code class="w">        </code><code class="no">value: testvalue </code><a class="co" href="#callout_kustomize_CO10-3" id="co_kustomize_CO10-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a></pre>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_kustomize_CO10-1" id="callout_kustomize_CO10-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>Adds a new field with value</p></dd>
+<dt><a class="co" href="#co_kustomize_CO10-2" id="callout_kustomize_CO10-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a></dt>
+<dd><p>Path with the field to add</p></dd>
+<dt><a class="co" href="#co_kustomize_CO10-3" id="callout_kustomize_CO10-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a></dt>
+<dd><p>The value to set</p></dd>
+</dl>
+<p>The result of applying the file is:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">apps/v1</code><code class="w">
+</code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Deployment</code><code class="w">
+</code><code class="nt">metadata</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w">
+</code><code class="w">    </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">    </code><code class="nt">testkey</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">testvalue</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO11-1" id="co_kustomize_CO11-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code class="w">
+</code><code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman</code><code class="w">
+</code><code class="nt">spec</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="nt">replicas</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">3</code><code class="w">
+</code><code class="w">  </code><code class="nt">selector</code><code class="p">:</code><code class="w">
+</code><code class="p">...</code></pre>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_kustomize_CO11-1" id="callout_kustomize_CO11-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>Added<a data-primary="JSON Patch, updating container image fields" data-startref="JSON_P_upfield" data-type="indexterm" id="idm45120843827536"/> label</p></dd>
+</dl>
+</div></section>
+<section data-pdf-bookmark="Discussion" data-type="sect2"><div class="sect2" id="idm45120844439600">
+<h2>Discussion</h2>
+<p>Instead of embedding a JSON Patch expression, you <a data-primary="YAML" data-secondary="Patch expressions" data-type="indexterm" id="idm45120843824944"/><a data-primary="Patch expressions, modifying Kubernetes resources" data-type="indexterm" id="idm45120843823968"/>can create a YAML file with a Patch expression and refer to it using the <code>path</code> field instead of <code>patch</code>.</p>
+<p>Create an external <a data-primary="patch files, creating" data-type="indexterm" id="idm45120843821920"/>patch file named <em>external_patch</em> containing the JSON Patch expression:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">op</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">replace</code><code class="w"/>
+<code class="w">  </code><code class="nt">path</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">/spec/replicas</code><code class="w"/>
+<code class="w">  </code><code class="nt">value</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">3</code><code class="w"/>
+<code class="p-Indicator">-</code><code class="w"> </code><code class="nt">op</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">add</code><code class="w"/>
+<code class="w">  </code><code class="nt">path</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">/metadata/labels/testkey</code><code class="w"/>
+<code class="w">  </code><code class="nt">value</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">testvalue</code><code class="w"/></pre>
+<p>And change the <code>patch</code> field to <code>path</code> pointing to the patch file:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="p">...</code><code class="w">
+</code><code class="nt">patches</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">target</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="nt">version</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w">
+</code><code class="w">      </code><code class="nt">group</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">apps</code><code class="w">
+</code><code class="w">      </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Deployment</code><code class="w">
+</code><code class="w">      </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">      </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman</code><code class="w">
+</code><code class="w">    </code><code class="nt">path</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">external_patch.yaml</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO12-1" id="co_kustomize_CO12-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></pre>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_kustomize_CO12-1" id="callout_kustomize_CO12-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>Path to external patch file</p></dd>
+</dl>
+<p>In addition to the JSON Patch expression, Kustomize <a data-primary="Strategic Merge Patch" data-type="indexterm" id="idm45120843678784"/>also supports <a href="https://oreil.ly/vr3e3">Strategic Merge Patch</a> to modify Kubernetes resources.
+In summary, a Strategic Merge Patch (or <em>SMP</em>) is an incomplete YAML file that is merged against a completed YAML file.</p>
+<p>Only a minimal deployment file with container name information is required to update a container image:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kustomize.config.k8s.io/v1beta1</code><code class="w">
+</code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Kustomization</code><code class="w">
+</code><code class="nt">resources</code><code class="p">:</code><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">./deployment.yaml</code><code class="w">
+</code><code class="nt">patches</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">target</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="nt">labelSelector</code><code class="p">:</code><code class="w"> </code><code class="s">"</code><code class="s">app.kubernetes.io/name=pacman-kikd</code><code class="s">"</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO13-1" id="co_kustomize_CO13-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code class="w">
+</code><code class="w">    </code><code class="nt">patch</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">|</code><code class="p-Indicator">-</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO13-2" id="co_kustomize_CO13-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a><code class="w">
+</code><code class="w">      </code><code class="no">apiVersion: apps/v1 </code><a class="co" href="#callout_kustomize_CO13-3" id="co_kustomize_CO13-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a><code class="w">
+</code><code class="w">      </code><code class="no">kind: Deployment</code><code class="w">
+</code><code class="w">      </code><code class="no">metadata:</code><code class="w">
+</code><code class="w">        </code><code class="no">name: pacman-kikd</code><code class="w">
+</code><code class="w">      </code><code class="no">spec:</code><code class="w">
+</code><code class="w">        </code><code class="no">template:</code><code class="w">
+</code><code class="w">          </code><code class="no">spec:</code><code class="w">
+</code><code class="w">            </code><code class="no">containers:</code><code class="w">
+</code><code class="w">              </code><code class="no">- name: pacman-kikd</code><code class="w">
+</code><code class="w">                </code><code class="no">image: lordofthejars/pacman-kikd:1.2.0 </code><a class="co" href="#callout_kustomize_CO13-4" id="co_kustomize_CO13-4"><img alt="4" height="12" src="assets/4.png" width="12"/></a></pre>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_kustomize_CO13-1" id="callout_kustomize_CO13-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>Target is selected using label</p></dd>
+<dt><a class="co" href="#co_kustomize_CO13-2" id="callout_kustomize_CO13-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a></dt>
+<dd><p>Patch is smart enough to detect if it is an SMP or JSON Patch</p></dd>
+<dt><a class="co" href="#co_kustomize_CO13-3" id="callout_kustomize_CO13-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a></dt>
+<dd><p>This is a minimal deployment file</p></dd>
+<dt><a class="co" href="#co_kustomize_CO13-4" id="callout_kustomize_CO13-4"><img alt="4" height="12" src="assets/4.png" width="12"/></a></dt>
+<dd><p>Sets only the field to change, the rest is left as is</p></dd>
+</dl>
+<p>The generated output is the original <em>deployment.yaml</em> file but with the new container<a data-primary="Kubernetes" data-secondary="fields" data-startref="K_field_updat" data-tertiary="updating with Kustomize" data-type="indexterm" id="idm45120843522960"/><a data-primary="Kustomize" data-secondary="Kubernetes, updating fields" data-startref="Kust_K_updat" data-type="indexterm" id="idm45120843521504"/> image:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">apps/v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Deployment</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">replicas</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">1</code><code class="w"/>
+<code class="w">  </code><code class="nt">selector</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">matchLabels</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="w">  </code><code class="nt">template</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="w">    </code><code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">containers</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">lordofthejars/pacman-kikd:1.2.0</code><code class="w"/>
+<code class="w">        </code><code class="nt">imagePullPolicy</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Always</code><code class="w"/>
+<code class="p">...</code><code class="w"/></pre>
+<div data-type="tip"><h6>Tip</h6>
+<p><code>path</code> is supported as well.</p>
+</div>
+</div></section>
+<section data-pdf-bookmark="See Also" data-type="sect2"><div class="sect2" id="idm45120843826048">
+<h2>See Also</h2>
+<ul>
+<li>
+<p><a href="https://oreil.ly/gDn1A">RFC 6902: JavaScript Object Notation (JSON) Patch</a></p>
+</li>
+<li>
+<p><a href="https://oreil.ly/vr3e3">Strategic Merge Patch</a></p>
+</li>
+</ul>
+</div></section>
+</div></section>
+<section data-pdf-bookmark="4.4 Deploying to Multiple Environments" data-type="sect1"><div class="sect1" id="recipe_4_4">
+<h1>4.4 Deploying to Multiple Environments</h1>
+<section data-pdf-bookmark="Problem" data-type="sect2"><div class="sect2" id="idm45120843463568">
+<h2>Problem</h2>
+<p>You want to deploy the<a data-primary="Kustomize" data-secondary="deployment, multiple namespaces" data-type="indexterm" id="Kust_deploy_multiname"/><a data-primary="namespaces" data-secondary="deploying to multiple" data-type="indexterm" id="namespac_deploy"/><a data-primary="environments, deploying to multiple" data-type="indexterm" id="environ_deploy"/> same application in different namespaces using Kustomize.</p>
+</div></section>
+<section data-pdf-bookmark="Solution" data-type="sect2"><div class="sect2" id="idm45120843458480">
+<h2>Solution</h2>
+<p>Use the <code>namespace</code> field <a data-primary="namespace field, deploying applications" data-type="indexterm" id="namespfld_deploy_app"/><a data-primary="applications" data-secondary="deployment" data-tertiary="to multiple namespaces" data-tertiary-sortas="multiple namespaces" data-type="indexterm" id="apps_deploy_multiname"/>to set the target namespace.</p>
+<p>In some circumstances, it’s good to have the application deployed in different namespaces; for example, one namespace can be used as a <em>staging</em> environment, and another one as the <em>production</em> namespace.
+In both cases, the base Kubernetes files are the same, with minimal changes like the namespace deployed, some configuration parameters, or container version, to mention a few. <a data-type="xref" href="#fig-441">Figure 4-2</a> shows an example.</p>
+<figure><div class="figure" id="fig-441">
+<img alt="Kustomize layout" height="354" src="assets/gocb_0402.png" width="1428"/>
+<h6><span class="label">Figure 4-2. </span>Kustomize layout</h6>
+</div></figure>
+<p><code>kustomize</code> lets you define multiple changes with a different namespace, as overlays on a common base using the <code>namespace</code> field.
+For this example, all base Kubernetes resources are put in the <code>base</code> directory and a new directory is created for customizations of each environment:</p>
+<pre data-code-language="bash" data-type="programlisting"><code>.</code><code>
+</code><code>├──</code><code> </code><code>base</code><code> </code><a class="co" href="#callout_kustomize_CO14-1" id="co_kustomize_CO14-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code>
+</code><code>│</code><code>  </code><code>├──</code><code> </code><code>deployment.yaml</code><code>
+</code><code>│</code><code>  </code><code>└──</code><code> </code><code>kustomization.yaml</code><code>
+</code><code>├──</code><code> </code><code>production</code><code>
+</code><code>│</code><code>   </code><code>└──</code><code> </code><code>kustomization.yaml</code><code> </code><a class="co" href="#callout_kustomize_CO14-2" id="co_kustomize_CO14-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a><code>
+</code><code>└──</code><code> </code><code>staging</code><code>
+    </code><code>└──</code><code> </code><code>kustomization.yaml</code><code> </code><a class="co" href="#callout_kustomize_CO14-3" id="co_kustomize_CO14-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a></pre>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_kustomize_CO14-1" id="callout_kustomize_CO14-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>Base files</p></dd>
+<dt><a class="co" href="#co_kustomize_CO14-2" id="callout_kustomize_CO14-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a></dt>
+<dd><p>Changes specific to production environment</p></dd>
+<dt><a class="co" href="#co_kustomize_CO14-3" id="callout_kustomize_CO14-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a></dt>
+<dd><p>Changes specific to staging environment</p></dd>
+</dl>
+<p>The base kustomization file contains a reference to its resources:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kustomize.config.k8s.io/v1beta1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Kustomization</code><code class="w"/>
+<code class="nt">resources</code><code class="p">:</code><code class="w"/>
+<code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">./deployment.yaml</code><code class="w"/></pre>
+<p>There is a kustomization file with some parameters set for each environment directory.
+These reference the <em>base</em> directory, the namespace to inject into Kubernetes resources, and finally, the image to deploy, which in production is <em>1.1.0</em> but in staging is <em>1.2.0-beta</em>.</p>
+<p>For the staging environment, <em>kustomization.yaml</em> content is shown in the following listing:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kustomize.config.k8s.io/v1beta1</code><code class="w">
+</code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Kustomization</code><code class="w">
+</code><code class="nt">resources</code><code class="p">:</code><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">../base</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO15-1" id="co_kustomize_CO15-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code class="w">
+</code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">staging</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO15-2" id="co_kustomize_CO15-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a><code class="w">
+</code><code class="nt">images</code><code class="p">:</code><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">lordofthejars/pacman-kikd</code><code class="w">
+</code><code class="w">  </code><code class="nt">newTag</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">1.2.0-beta</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO15-3" id="co_kustomize_CO15-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a></pre>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_kustomize_CO15-1" id="callout_kustomize_CO15-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>References to <em>base</em> directory</p></dd>
+<dt><a class="co" href="#co_kustomize_CO15-2" id="callout_kustomize_CO15-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a></dt>
+<dd><p>Sets namespace to <em>staging</em></p></dd>
+<dt><a class="co" href="#co_kustomize_CO15-3" id="callout_kustomize_CO15-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a></dt>
+<dd><p>Sets the container tag for the <em>staging</em> environment</p></dd>
+</dl>
+<p>The kustomization file for production is similar to the staging one, but changes the namespace and the tag:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kustomize.config.k8s.io/v1beta1</code><code class="w">
+</code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Kustomization</code><code class="w">
+</code><code class="nt">resources</code><code class="p">:</code><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">../base</code><code class="w">
+</code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">prod</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO16-1" id="co_kustomize_CO16-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code class="w">
+</code><code class="nt">images</code><code class="p">:</code><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">lordofthejars/pacman-kikd</code><code class="w">
+</code><code class="w">  </code><code class="nt">newTag</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">1.1.0</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO16-2" id="co_kustomize_CO16-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a></pre>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_kustomize_CO16-1" id="callout_kustomize_CO16-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>Sets namespace for <em>production</em></p></dd>
+<dt><a class="co" href="#co_kustomize_CO16-2" id="callout_kustomize_CO16-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a></dt>
+<dd><p>Sets the container tag for the <em>production</em> environment</p></dd>
+</dl>
+<p>Running <code>kustomize</code> produces different output depending on the directory where it is run; for example, running <code>kustomize build</code> in the <em>staging</em> directory produces:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">apps/v1</code><code class="w">
+</code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Deployment</code><code class="w">
+</code><code class="nt">metadata</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w">
+</code><code class="w">    </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">staging</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO17-1" id="co_kustomize_CO17-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code class="w">
+</code><code class="nt">spec</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="nt">replicas</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">1</code><code class="w">
+</code><code class="p">...</code><code class="w">
+</code><code class="w">  </code><code class="nt">template</code><code class="p">:</code><code class="w">
+</code><code class="w">    </code><code class="nt">metadata</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="nt">labels</code><code class="p">:</code><code class="w">
+</code><code class="w">        </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">    </code><code class="nt">spec</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="nt">containers</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">lordofthejars/pacman-kikd:1.2.0-beta</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO17-2" id="co_kustomize_CO17-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a><code class="w">
+</code><code class="p">...</code></pre>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_kustomize_CO17-1" id="callout_kustomize_CO17-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>Namespace value is injected</p></dd>
+<dt><a class="co" href="#co_kustomize_CO17-2" id="callout_kustomize_CO17-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a></dt>
+<dd><p>Container tag for the <em>staging</em> environment is injected</p></dd>
+</dl>
+<p>But if you run it in the <em>production</em> directory, the output is adapted to the production configuration:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">apps/v1</code><code class="w">
+</code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Deployment</code><code class="w">
+</code><code class="nt">metadata</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w">
+</code><code class="w">    </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">prod</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO18-1" id="co_kustomize_CO18-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code class="w">
+</code><code class="nt">spec</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="nt">replicas</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">1</code><code class="w">
+</code><code class="p">...</code><code class="w">
+</code><code class="w">    </code><code class="nt">spec</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="nt">containers</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">lordofthejars/pacman-kikd:1.1.0</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO18-2" id="co_kustomize_CO18-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a><code class="w">
+</code><code class="p">...</code></pre>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_kustomize_CO18-1" id="callout_kustomize_CO18-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>Injects the <em>production</em> namespace</p></dd>
+<dt><a class="co" href="#co_kustomize_CO18-2" id="callout_kustomize_CO18-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a></dt>
+<dd><p>Container tag for the <em>production</em> environment</p></dd>
+</dl>
+</div></section>
+<section data-pdf-bookmark="Discussion" data-type="sect2"><div class="sect2" id="idm45120843457568">
+<h2>Discussion</h2>
+<p>Kustomize can <a data-primary="Kustomize" data-secondary="preappend/append values to resources" data-type="indexterm" id="idm45120842923872"/>preappend/append a value to the names of all resources and references.
+This is useful when a different name in the resource is required depending on the environment, or to set the version deployed in the name:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kustomize.config.k8s.io/v1beta1</code><code class="w">
+</code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Kustomization</code><code class="w">
+</code><code class="nt">resources</code><code class="p">:</code><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">../base</code><code class="w">
+</code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">staging</code><code class="w">
+</code><code class="nt">namePrefix</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">staging-</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO19-1" id="co_kustomize_CO19-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code class="w">
+</code><code class="nt">nameSuffix</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">-v1-2-0</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO19-2" id="co_kustomize_CO19-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a><code class="w">
+</code><code class="nt">images</code><code class="p">:</code><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">lordofthejars/pacman-kikd</code><code class="w">
+</code><code class="w">  </code><code class="nt">newTag</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">1.2.0-beta</code></pre>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_kustomize_CO19-1" id="callout_kustomize_CO19-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>Prefix to preappend</p></dd>
+<dt><a class="co" href="#co_kustomize_CO19-2" id="callout_kustomize_CO19-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a></dt>
+<dd><p>Suffix to append</p></dd>
+</dl>
+<p>And the resulting output is as follows:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">apps/v1</code><code class="w">
+</code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Deployment</code><code class="w">
+</code><code class="nt">metadata</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w">
+</code><code class="w">    </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">staging-pacman-kikd-v1-2-0</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO20-1" id="co_kustomize_CO20-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code class="w">
+</code><code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">staging</code><code class="w">
+</code><code class="nt">spec</code><code class="p">:</code><code class="w">
+</code><code class="p">...</code></pre>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_kustomize_CO20-1" id="callout_kustomize_CO20-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>New name of<a data-primary="Kustomize" data-secondary="deployment, multiple namespaces" data-startref="Kust_deploy_multiname" data-type="indexterm" id="idm45120842763200"/><a data-primary="namespaces" data-secondary="deploying to multiple" data-startref="namespac_deploy" data-type="indexterm" id="idm45120842761952"/><a data-primary="environments, deploying to multiple" data-startref="environ_deploy" data-type="indexterm" id="idm45120842760736"/><a data-primary="namespace field, deploying applications" data-startref="namespfld_deploy_app" data-type="indexterm" id="idm45120842759824"/><a data-primary="applications" data-secondary="deployment" data-startref="apps_deploy_multiname" data-tertiary="to multiple namespaces" data-tertiary-sortas="multiple namespaces" data-type="indexterm" id="idm45120842758912"/> the deployment file</p></dd>
+</dl>
+</div></section>
+</div></section>
+<section data-pdf-bookmark="4.5 Generating ConfigMaps in Kustomize" data-type="sect1"><div class="sect1" id="recipe_4_5">
+<h1>4.5 Generating ConfigMaps in Kustomize</h1>
+<section data-pdf-bookmark="Problem" data-type="sect2"><div class="sect2" id="idm45120842723904">
+<h2>Problem</h2>
+<p>You want to generate <a data-primary="Kubernetes" data-secondary="ConfigMap, generating with Kustomize" data-type="indexterm" id="K_ConfigMap_gen"/><a data-primary="ConfigMap" data-secondary="generating, Kustomize" data-type="indexterm" id="ConfigMap_gen_Kust"/><a data-primary="Kustomize" data-secondary="ConfigMap, generating" data-type="indexterm" id="Kust_ConfigMap_gen"/>Kubernetes <code>ConfigMap</code>s using Kustomize.</p>
+</div></section>
+<section data-pdf-bookmark="Solution" data-type="sect2"><div class="sect2" id="idm45120842718144">
+<h2>Solution</h2>
+<p>Use the <code>ConfigMapGenerator</code> feature field to generate a Kubernetes <code>ConfigMap</code> resource on the fly.</p>
+<p>Kustomize provides two ways of adding a <code>ConfigMap</code> as a Kustomize resource: either by declaring a <code>ConfigMap</code> as any other resource or declaring a <code>ConfigMap</code> from a <code>ConfigMapGenerator</code>.</p>
+<p>While using <code>ConfigMap</code> as a resource offers no other advantage than populating Kubernetes resources as any other resource, <code>ConfigMapGenerator</code> automatically appends a hash to the <code>ConfigMap</code> metadata name and also modifies the deployment file with the new hash.
+This minimal change has a deep impact on the application’s lifecycle, as we’ll see soon in the example.</p>
+<p>Let’s consider an application running in Kubernetes and configured using a <code>ConfigMap</code>—for example, a database timeout connection parameter.
+We decided to increase this number at some point, so the <code>ConfigMap</code> file is changed to this new value, and we deploy the application again.
+Since the <code>ConfigMap</code> is the only changed file, no rolling update of the application is done.
+A manual rolling update of the application needs to be triggered to propagate the change to the application.
+<a data-type="xref" href="#fig-451">Figure 4-3</a> shows what is changed when a <code>ConfigMap</code> object is updated.</p>
+<figure><div class="figure" id="fig-451">
+<img alt="A change on the ConfigMap object" height="500" src="assets/gocb_0403.png" width="1399"/>
+<h6><span class="label">Figure 4-3. </span>Change of a <code>ConfigMap</code></h6>
+</div></figure>
+<p>But, <a data-primary="ConfigMapGenerator" data-type="indexterm" id="ConfigMapGenerator"/><a data-primary="resources" data-secondary="ConfigMapGenerator" data-type="indexterm" id="resourc_gen_ConfigMapGen"/>if <code>ConfigMapGenerator</code> manages the <code>ConfigMap</code>, any change on the configuration file also changes the deployment Kubernetes resource.
+Since the deployment file has changed too, an automatic rolling update is triggered when the resources are applied, as shown in <a data-type="xref" href="#fig-452">Figure 4-4</a>.</p>
+<p>Moreover, when using <code>ConfigMapGenerator</code>, multiple configuration datafiles can be combined into a single <code>ConfigMap</code>, making a perfect use case when every environment has different configuration files.</p>
+<figure><div class="figure" id="fig-452">
+<img alt="Change of a ConfigMap using ConfigMapGenerator" height="547" src="assets/gocb_0404.png" width="1328"/>
+<h6><span class="label">Figure 4-4. </span>Change of a <code>ConfigMap</code> using <code>ConfigMapGenerator</code></h6>
+</div></figure>
+<p>Let’s start with a simple example, adding<a data-primary="kustomization.yaml" data-secondary="ConfigMapGenerator" data-type="indexterm" id="idm45120842696464"/> the <code>ConfigMapGenerator</code> section in the <em>kustomization.yaml</em> file.</p>
+<p>The deployment file is similar to the one used in previous sections of this chapter but includes the <code>volumes</code> section:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">apps/v1</code><code class="w">
+</code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Deployment</code><code class="w">
+</code><code class="nt">metadata</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="nt">spec</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="nt">replicas</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">1</code><code class="w">
+</code><code class="w">  </code><code class="nt">selector</code><code class="p">:</code><code class="w">
+</code><code class="w">    </code><code class="nt">matchLabels</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">  </code><code class="nt">template</code><code class="p">:</code><code class="w">
+</code><code class="w">    </code><code class="nt">metadata</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="nt">labels</code><code class="p">:</code><code class="w">
+</code><code class="w">        </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">    </code><code class="nt">spec</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="nt">containers</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">lordofthejars/pacman-kikd:1.0.0</code><code class="w">
+</code><code class="w">        </code><code class="nt">imagePullPolicy</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Always</code><code class="w">
+</code><code class="w">        </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">        </code><code class="nt">volumeMounts</code><code class="p">:</code><code class="w">
+</code><code class="w">        </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">config</code><code class="w">
+</code><code class="w">          </code><code class="nt">mountPath</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">/config</code><code class="w">
+</code><code class="w">      </code><code class="nt">volumes</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">config</code><code class="w">
+</code><code class="w">        </code><code class="nt">configMap</code><code class="p">:</code><code class="w">
+</code><code class="w">          </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-configmap</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO21-1" id="co_kustomize_CO21-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></pre>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_kustomize_CO21-1" id="callout_kustomize_CO21-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p><code>ConfigMap</code> name is used in the <em>kustomization.yaml</em> file</p></dd>
+</dl>
+<p>The configuration properties are embedded within the <em>kustomization.yaml</em> file.
+Notice that the <code>ConfigMap</code> object is created on the fly when the kustomization file is built:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kustomize.config.k8s.io/v1beta1</code><code class="w">
+</code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Kustomization</code><code class="w">
+</code><code class="nt">resources</code><code class="p">:</code><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">./deployment.yaml</code><code class="w">
+</code><code class="nt">configMapGenerator</code><code class="p">:</code><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-configmap</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO22-1" id="co_kustomize_CO22-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code class="w">
+</code><code class="w">  </code><code class="l-Scalar-Plain">literals</code><code class="err">:</code><code class="err">	</code><a class="co" href="#callout_kustomize_CO22-2" id="co_kustomize_CO22-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a><code class="w">
+</code><code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">db-timeout=2000</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO22-3" id="co_kustomize_CO22-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a><code class="w">
+</code><code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">db-username=Ada</code></pre>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_kustomize_CO22-1" id="callout_kustomize_CO22-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>Name of the <code>ConfigMap</code> set in the deployment file</p></dd>
+<dt><a class="co" href="#co_kustomize_CO22-2" id="callout_kustomize_CO22-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a></dt>
+<dd><p>Embeds configuration values in the file</p></dd>
+<dt><a class="co" href="#co_kustomize_CO22-3" id="callout_kustomize_CO22-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a></dt>
+<dd><p>Sets a key/value pair for the properties</p></dd>
+</dl>
+<p id="image">Finally, use <code>kubectl</code> in <code>dry-run</code> or <code>kustomize</code> to validate that the output of the deployment file contains the new tag version.
+In a terminal window, run the following command:</p>
+<pre data-code-language="bash" data-type="programlisting">kustomize build</pre>
+<p>The output of the preceding command is a new <code>ConfigMap</code> with the configuration values set in <em>kustomization.yaml</em>.
+Moreover, the name of the <code>ConfigMap</code> is updated by appending a hash in both the generated <code>ConfigMap</code> and deployment:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w">
+</code><code class="nt">data</code><code class="p">:</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO23-1" id="co_kustomize_CO23-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code class="w">
+</code><code class="w">  </code><code class="nt">db-timeout</code><code class="p">:</code><code class="w"> </code><code class="s">"</code><code class="s">2000</code><code class="s">"</code><code class="w">
+</code><code class="w">  </code><code class="nt">db-username</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Ada</code><code class="w">
+</code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">ConfigMap</code><code class="w">
+</code><code class="nt">metadata</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-configmap-96kb69b6t4</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO23-2" id="co_kustomize_CO23-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a><code class="w">
+</code><code class="nn">---</code><code class="w">
+</code><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">apps/v1</code><code class="w">
+</code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Deployment</code><code class="w">
+</code><code class="nt">metadata</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w">
+</code><code class="w">    </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="nt">spec</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="nt">replicas</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">1</code><code class="w">
+</code><code class="w">  </code><code class="nt">selector</code><code class="p">:</code><code class="w">
+</code><code class="w">    </code><code class="nt">matchLabels</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">  </code><code class="nt">template</code><code class="p">:</code><code class="w">
+</code><code class="w">    </code><code class="nt">metadata</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="nt">labels</code><code class="p">:</code><code class="w">
+</code><code class="w">        </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">    </code><code class="nt">spec</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="nt">containers</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">lordofthejars/pacman-kikd:1.0.0</code><code class="w">
+</code><code class="w">        </code><code class="nt">imagePullPolicy</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Always</code><code class="w">
+</code><code class="w">        </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">        </code><code class="nt">volumeMounts</code><code class="p">:</code><code class="w">
+</code><code class="w">        </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">mountPath</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">/config</code><code class="w">
+</code><code class="w">          </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">config</code><code class="w">
+</code><code class="w">      </code><code class="nt">volumes</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">configMap</code><code class="p">:</code><code class="w">
+</code><code class="w">          </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-configmap-96kb69b6t4</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO23-3" id="co_kustomize_CO23-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a><code class="w">
+</code><code class="w">        </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">config</code></pre>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_kustomize_CO23-1" id="callout_kustomize_CO23-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p><code>ConfigMap</code> with properties</p></dd>
+<dt><a class="co" href="#co_kustomize_CO23-2" id="callout_kustomize_CO23-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a></dt>
+<dd><p>Name with hash</p></dd>
+<dt><a class="co" href="#co_kustomize_CO23-3" id="callout_kustomize_CO23-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a></dt>
+<dd><p>Name field is updated to the one with the hash triggering a rolling update</p></dd>
+</dl>
+<p>Since the hash is calculated for any change in the <a data-primary="configuration properties" data-secondary="hashes" data-type="indexterm" id="idm45120842247120"/><a data-primary="hashes, configuration properties" data-type="indexterm" id="idm45120842246288"/>configuration properties, a change on them provokes a change on the output triggering a rolling update of the application.
+Open the <em>kustomization.yaml</em> file and update the <code>db-timeout</code> literal from 2000 to 1000 and run <code>kustomize build</code> again.
+Notice the change in the <code>ConfigMap</code> name using a new hashed value:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w">
+</code><code class="nt">data</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="nt">db-timeout</code><code class="p">:</code><code class="w"> </code><code class="s">"</code><code class="s">1000</code><code class="s">"</code><code class="w">
+</code><code class="w">  </code><code class="nt">db-username</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Ada</code><code class="w">
+</code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">ConfigMap</code><code class="w">
+</code><code class="nt">metadata</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-configmap-6952t58tb4</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO24-1" id="co_kustomize_CO24-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code class="w">
+</code><code class="nn">---</code><code class="w">
+</code><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">apps/v1</code><code class="w">
+</code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Deployment</code><code class="w">
+</code><code class="p">...</code><code class="w">
+</code><code class="w">    </code><code class="nt">volumes</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">configMap</code><code class="p">:</code><code class="w">
+</code><code class="w">          </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-configmap-6952t58tb4</code><code class="w">
+</code><code class="w">        </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">config</code></pre>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_kustomize_CO24-1" id="callout_kustomize_CO24-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>New hashed value</p></dd>
+</dl>
+</div></section>
+<section data-pdf-bookmark="Discussion" data-type="sect2"><div class="sect2" id="idm45120842717168">
+<h2>Discussion</h2>
+<p><code>ConfigMapGenerator</code> also supports merging <a data-primary="configuration properties" data-secondary="merging" data-type="indexterm" id="idm45120842128016"/>configuration properties from different sources.</p>
+<p>Create a new <em>kustomization.yaml</em> file in the <em>dev_literals</em> directory, setting it as the previous directory and overriding the <code>db-username</code> value:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kustomize.config.k8s.io/v1beta1</code><code class="w">
+</code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Kustomization</code><code class="w">
+</code><code class="nt">resources</code><code class="p">:</code><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">../literals</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO25-1" id="co_kustomize_CO25-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code class="w">
+</code><code class="nt">configMapGenerator</code><code class="p">:</code><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-configmap</code><code class="w">
+</code><code class="w">  </code><code class="nt">behavior</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">merge</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO25-2" id="co_kustomize_CO25-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a><code class="w">
+</code><code class="w">  </code><code class="nt">literals</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">db-username=Alexandra</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO25-3" id="co_kustomize_CO25-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a></pre>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_kustomize_CO25-1" id="callout_kustomize_CO25-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>Base directory</p></dd>
+<dt><a class="co" href="#co_kustomize_CO25-2" id="callout_kustomize_CO25-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a></dt>
+<dd><p>Merge properties (can be <code>create</code> or <code>replace</code> too)</p></dd>
+<dt><a class="co" href="#co_kustomize_CO25-3" id="callout_kustomize_CO25-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a></dt>
+<dd><p>Overridden value</p></dd>
+</dl>
+<p>Running the <code>kustomize build</code> command produces a <code>ConfigMap</code> containing a merge of both configuration properties:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w">
+</code><code class="nt">data</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="nt">db-timeout</code><code class="p">:</code><code class="w"> </code><code class="s">"</code><code class="s">1000</code><code class="s">"</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO26-1" id="co_kustomize_CO26-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code class="w">
+</code><code class="w">  </code><code class="nt">db-username</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Alexandra</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO26-2" id="co_kustomize_CO26-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a><code class="w">
+</code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">ConfigMap</code><code class="w">
+</code><code class="nt">metadata</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-configmap-ttfdfdk5t8</code><code class="w">
+</code><code class="nn">---</code><code class="w">
+</code><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">apps/v1</code><code class="w">
+</code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Deployment</code><code class="w">
+</code><code class="nt">metadata</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w">
+</code><code class="w">    </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w">
+</code><code class="p">...</code></pre>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_kustomize_CO26-1" id="callout_kustomize_CO26-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>Inherits from base</p></dd>
+<dt><a class="co" href="#co_kustomize_CO26-2" id="callout_kustomize_CO26-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a></dt>
+<dd><p>Overrides value</p></dd>
+</dl>
+<p>In <a data-primary="ConfigMapGenerator" data-startref="ConfigMapGenerator" data-type="indexterm" id="idm45120841936080"/><a data-primary="resources" data-secondary="ConfigMapGenerator" data-startref="resourc_gen_ConfigMapGen" data-type="indexterm" id="idm45120841935072"/>addition to setting <a data-primary=".properties files" data-primary-sortas="properties files" data-type="indexterm" id="idm45120841933760"/>configuration properties as literals, Kustomize supports defining them as <em>.properties</em> files.</p>
+<p>Create a <em>connection.properties</em> file with two properties inside:</p>
+<pre data-code-language="properties" data-type="programlisting"><code class="na">db-url</code><code class="o">=</code><code class="s">prod:4321/db</code><code class="w"/>
+<code class="na">db-username</code><code class="o">=</code><code class="s">ada</code><code class="w"/></pre>
+<p>The <em>kustomization.yaml</em> file uses the <code>files</code> field instead of <code>literals</code>:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kustomize.config.k8s.io/v1beta1</code><code class="w">
+</code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Kustomization</code><code class="w">
+</code><code class="nt">resources</code><code class="p">:</code><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">./deployment.yaml</code><code class="w">
+</code><code class="nt">configMapGenerator</code><code class="p">:</code><code class="w">
+</code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-configmap</code><code class="w">
+</code><code class="w">  </code><code class="nt">files</code><code class="p">:</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO27-1" id="co_kustomize_CO27-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code class="w">
+</code><code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">./connection.properties</code><code class="w"> </code><a class="co" href="#callout_kustomize_CO27-2" id="co_kustomize_CO27-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a></pre>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_kustomize_CO27-1" id="callout_kustomize_CO27-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>Sets a list of files to read</p></dd>
+<dt><a class="co" href="#co_kustomize_CO27-2" id="callout_kustomize_CO27-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a></dt>
+<dd><p>Path to the properties file</p></dd>
+</dl>
+<p>Running<a data-primary="Kubernetes" data-secondary="ConfigMap, generating with Kustomize" data-startref="K_ConfigMap_gen" data-type="indexterm" id="idm45120841820784"/><a data-primary="ConfigMap" data-secondary="generating, Kustomize" data-startref="ConfigMap_gen_Kust" data-type="indexterm" id="idm45120841819536"/><a data-primary="Kustomize" data-secondary="ConfigMap, generating" data-startref="Kust_ConfigMap_gen" data-type="indexterm" id="idm45120841818320"/> the <code>kustomize build</code> command produces a <code>ConfigMap</code> containing the name of the file as a key, and the value as the content of the file:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">data</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">connection.properties</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">|-</code><code class="w"/>
+<code class="w">    </code><code class="no">db-url=prod:4321/db</code><code class="w"/>
+<code class="w">    </code><code class="no">db-username=ada</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">ConfigMap</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-configmap-g9dm2gtt77</code><code class="w"/>
+<code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">apps/v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Deployment</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">app.kubernetes.io/name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pacman-kikd</code><code class="w"/>
+<code class="p">...</code><code class="w"/></pre>
+</div></section>
+<section data-pdf-bookmark="See Also" data-type="sect2"><div class="sect2" id="idm45120842129408">
+<h2>See Also</h2>
+<p>Kustomize offers a similar way to deal with Kubernetes Secrets.
+But as we’ll see in <a data-type="xref" href="ch08.xhtml#ch_Advanced_Topics">Chapter 8</a>, the best way to deal with Kubernetes Secrets is using Sealed Secrets.</p>
+</div></section>
+</div></section>
+<section data-pdf-bookmark="4.6 Final Thoughts" data-type="sect1"><div class="sect1" id="idm45120841737184">
+<h1>4.6 Final Thoughts</h1>
+<p>Kustomize is a simple tool, using template-less technology that allows you to define plain YAML files and override values either using a merge strategy or using JSON Patch expressions. The structure of a project is free as you define the directory layout you feel most comfortable with; the only requirement is the presence of a <em>kustomization.yaml</em> file.</p>
+<p>But there is another well-known tool to manage Kubernetes resources files, that in our opinion, is a bit more complicated but more powerful, especially when the application/service to deploy has several dependencies such as databases, mail servers, caches, etc.
+This tool is Helm, and we’ll cover it in <a data-type="xref" href="ch05.xhtml#ch_Helm">Chapter 5</a>.</p>
+</div></section>
+</div></section></div></body></html>

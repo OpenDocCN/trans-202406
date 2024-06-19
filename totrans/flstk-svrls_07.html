@@ -1,0 +1,1002 @@
+<html><head></head><body><div id="sbo-rt-content"><section data-type="chapter" epub:type="chapter" data-pdf-bookmark="Chapter 7. Serverless Functions In-Depth: Part 2"><div class="chapter" id="ch7">
+<h1><span class="label">Chapter 7. </span>Serverless Functions In-Depth: Part 2</h1>
+
+
+<p><a data-type="indexterm" data-primary="serverless functions" data-secondary="about" id="idm45364347188248"/>So far, we have covered quite a bit of functionality that can be achieved using a Lambda function. In this chapter, we’ll continue learning how to use Lambda functions in different ways to implement common functionality you’ll find useful when building applications. We’ll get into how to create and integrate into our app a fully functional backend complete with an API, authentication, a database, and authorization rules.</p>
+
+<p>With Amplify, there are two main ways to create APIs: GraphQL and REST. We’ll continue to cover GraphQL in <a data-type="xref" href="ch08.xhtml#ch8">Chapter 8</a>, but here, we’ll learn how to do this with a REST API running in a Lambda function.</p>
+
+<p>The database we will use is Amazon DynamoDB, a NoSQL database. We will be invoking the Lambda function from an HTTP request routed through an API gateway endpoint. The Lambda function will take the HTTP request and then route it to different paths as the function will be running an Express web server.</p>
+
+<p>This will allow us to have different routes available within a single function. We will then map different HTTP methods, like <code>post</code> and <code>delete</code>, to the routes to perform different actions on the database.</p>
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="What We’ll Build"><div class="sect1" id="idm45364347183096">
+<h1>What We’ll Build</h1>
+
+<p><a data-type="indexterm" data-primary="ecommerce" data-secondary="about" id="idm45364347181640"/>We’ll be building a basic ecommerce app that allows users to view products, and administrators to create and delete products. The building blocks of this app will lay the groundwork for building almost any type of CRUD+L (create, read, update, delete, and list) application, which is the backbone of many real-world projects.</p>
+
+<p>We will be using what we learned in Chapters <a data-type="xref" data-xrefstyle="select:labelnumber" href="ch02.xhtml#ch2">2</a> and <a data-type="xref" data-xrefstyle="select:labelnumber" href="ch06.xhtml#ch6">6</a> and building upon those ideas in this chapter.</p>
+
+<p>The services and features we’ll be needing are the following:</p>
+<dl>
+<dt>Lambda function</dt>
+<dd>
+<p><a data-type="indexterm" data-primary="Lambda" data-secondary="functions for ecommerce app" id="idm45364347174936"/>The main application logic will reside in a Lambda function that will be running an Express server. The server will have routes for the different HTTP methods we will need to work with: <code>get</code>, <code>post</code>, and <code>delete</code>.</p>
+</dd>
+<dt>API</dt>
+<dd>
+<p><a data-type="indexterm" data-primary="APIs" data-secondary="for ecommerce app" id="idm45364347171160"/>In order to interact with the main Lambda function, we will need to be able to invoke it using HTTP requests, sending <code>get</code>, <code>post</code>, and <code>delete</code> requests to interact with the API and the database.</p>
+</dd>
+<dt>DynamoDB NoSQL Database</dt>
+<dd>
+<p><a data-type="indexterm" data-primary="DynamoDB NoSQL database" data-secondary="for ecommerce app" id="idm45364347167400"/>This is the database that will hold all of the data for the application.</p>
+</dd>
+<dt>Authentication</dt>
+<dd>
+<p><a data-type="indexterm" data-primary="authentication" data-secondary="for ecommerce app" id="idm45364347165144"/>We will need a way to authenticate users in order to configure and enable administrator access.</p>
+</dd>
+<dt>Another Lambda function</dt>
+<dd>
+<p>We will need a Lambda trigger to place administrators into an Admin group, so there will be another Lambda function (post-confirmation trigger) associated with the authentication flow.</p>
+</dd>
+</dl>
+
+<p>Like in previous chapters, we will need to integrate navigation into the client application for linking between routes. When a user is signed in, we will access the user’s groups to determine the state of the app based on the user’s permissions. These permissions might include determining whether or not to show the Admin navigation link or to allow users to view the buttons to delete items based on whether they are an administrator or not.</p>
+
+<p>We will also have some authorization guards on the server to make sure that if a user performs an action, that they are indeed authorized to perform that action.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Getting Started"><div class="sect1" id="idm45364347160904">
+<h1>Getting Started</h1>
+
+<p>The first thing we will need to do to get started is to create a new React application and install the necessary dependencies:</p>
+
+<pre data-type="programlisting">~ npx create-react-app ecommerceapp
+
+~ cd ecommerceapp
+
+~ npm install aws-amplify @aws-amplify/ui-react react-router-dom antd</pre>
+
+<p>Next, we will initialize a new Amplify project and begin adding the services we’ll need for this application:</p>
+
+<pre data-type="programlisting">~ amplify init
+
+# Follow the steps to give the project a name, environment name, and
+  set the default text editor.
+# Accept defaults for everything else and choose your AWS Profile.</pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Adding Authentication and Group Privileges"><div class="sect1" id="idm45364347156872">
+<h1>Adding Authentication and Group Privileges</h1>
+
+<p><a data-type="indexterm" data-primary="ecommerce" data-secondary="adding authentication" id="idm45364347155464"/><a data-type="indexterm" data-primary="ecommerce" data-secondary="adding group privileges" id="idm45364347154488"/><a data-type="indexterm" data-primary="serverless functions" data-secondary="adding authentication" id="idm45364347153544"/><a data-type="indexterm" data-primary="serverless functions" data-secondary="adding group privileges" id="idm45364347152600"/><a data-type="indexterm" data-primary="adding" data-secondary="authentication" id="idm45364347151656"/><a data-type="indexterm" data-primary="authentication" data-secondary="adding" id="idm45364347150712"/><a data-type="indexterm" data-primary="adding" data-secondary="group privileges" id="idm45364347149768"/><a data-type="indexterm" data-primary="group privileges, adding" id="idm45364347148824"/>The first service we’ll create is the authentication service. We need to be sure to also create the Lambda trigger in order to add users to the Admin group that we will be creating:</p>
+
+<pre data-type="programlisting">~ amplify add auth
+
+? Do you want to use the default authentication and security configuration?
+  Default configuration
+? How do you want users to be able to sign in? Username
+? Do you want to configure advanced settings? Yes
+? What attributes are required for signing up? Email
+? Do you want to enable any of the following capabilities? Add User to Group
+? Enter the name of the group to which users will be added. Admin
+? Do you want to edit your add-to-group function now? Y</pre>
+
+<p>Update the function with the following code and configure the <code>adminEmails</code> array:</p>
+
+<pre data-type="programlisting">// amplify/backend/function/&lt;function_name&gt;/src/add-to-group.js
+const aws = require('aws-sdk');
+
+exports.handler = async (event, context, callback) =&gt; {
+  const cognitoProvider = new
+  aws.CognitoIdentityServiceProvider({
+    apiVersion: '2016-04-18'
+  });
+
+  let isAdmin = false
+  // Update this array to include any admin emails you would like to enable
+  const adminEmails = ['dabit3@gmail.com']
+
+  // If the user is one of the admins, set the isAdmin variable to true
+  if (adminEmails.indexOf(event.request.userAttributes.email) !== -1) {
+    isAdmin = true
+  }
+
+  if (isAdmin) {
+    const groupParams = {
+      UserPoolId: event.userPoolId,
+      GroupName: 'Admin'
+    }
+    const userParams = {
+      UserPoolId: event.userPoolId,
+      Username: event.userName,
+      GroupName: 'Admin'
+    }
+
+    // First check to see if the group exists, and if not create the group
+    try {
+      await cognitoProvider.getGroup(groupParams).promise();
+    } catch (e) {
+      await cognitoProvider.createGroup(groupParams).promise();
+    }
+    // The user is an administrator, place them in the Admin group
+    try {
+      await cognitoProvider.adminAddUserToGroup(userParams).promise();
+      callback(null, event);
+    } catch (e) { callback(e); }
+  } else {
+    // If the user is in neither group, proceed with no action
+    callback(null, event)
+  }
+}</pre>
+
+<p>In this function, we set an array of admin emails and an <code>isAdmin</code> variable. If the confirmed user is an admin, we first check to see if the Admin group has already created in the service. If it has not yet been created, we create it.</p>
+
+<p>We then add the user to the group by calling <code>cognitoProvider.adminAddUserToGroup</code>, passing in the parameters.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Adding the Database"><div class="sect1" id="idm45364347141544">
+<h1>Adding the Database</h1>
+
+<p><a data-type="indexterm" data-primary="adding" data-secondary="DynamoDB NoSQL database" id="idm45364347140168"/><a data-type="indexterm" data-primary="DynamoDB NoSQL database" data-secondary="adding" id="idm45364347139192"/><a data-type="indexterm" data-primary="ecommerce" data-secondary="adding DynamoDB NoSQL database" id="idm45364347138248"/><a data-type="indexterm" data-primary="serverless functions" data-secondary="adding DynamoDB NoSQL database" id="idm45364347137336"/>Next, we will create the DynamoDB NoSQL database for the project. To add the database, we can use the <code>Storage</code> category:</p>
+
+<pre data-type="programlisting">~ amplify add storage
+
+? Please select from one of the below mentioned services: NoSQL Database
+? Please provide a friendly name for your resource that will be used to label
+  this category in the project: producttable
+? Please provide table name: producttable
+? What would you like to name this column: id
+? Please choose the data type: string
+? Would you like to add another column? N
+? Please choose partition key for the table: id
+? Do you want to add a sort key to your table? N
+? Do you want to add global secondary indexes to your table? N
+? Do you want to add a Lambda Trigger for your Table? N</pre>
+
+<p><a data-type="indexterm" data-primary="unique identifier" id="idm45364347134168"/><a data-type="indexterm" data-primary="unique primary key" id="idm45364347133240"/><a data-type="indexterm" data-primary="primary key" id="idm45364347132568"/><a data-type="indexterm" data-primary="sort key" id="idm45364347131896"/>When working with DynamoDB, you have to have either a unique <em>primary key</em> or a unique combination of primary and <em>sort key</em> to uniquely identify individual items in the database. In our database, we have a primary key of <code>id</code> that will be the unique identifier for the items in the database.</p>
+
+<p><a data-type="indexterm" data-primary="GSIs (global secondary indexes)" id="idm45364347129416"/>There is also an option on the table to create <em>global secondary indexes</em> (GSIs). These allow us to add additional indexes that can be used to query our table and enable additional data access patterns. One of the most powerful features of DynamoDB and NoSQL databases in general is the idea of having other indexes (up to 20 GSIs for DynamoDB) that enable a multitude of access patterns. We will not be utilizing any secondary indexes hre, but I encourage you to look into how this works to further your knowledge of how to maximize the power and flexibility of DynamoDB.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Adding the API"><div class="sect1" id="idm45364347127496">
+<h1>Adding the API</h1>
+
+<p><a data-type="indexterm" data-primary="adding" data-secondary="API" id="add_api"/><a data-type="indexterm" data-primary="APIs" data-secondary="adding" id="api_add"/><a data-type="indexterm" data-primary="serverless functions" data-secondary="adding API" id="sf_aapi"/><a data-type="indexterm" data-primary="ecommerce" data-secondary="adding API" id="ec_aapi"/>Now that the database has been created, we’ll now create an API and another Lambda function that will interact with the database:</p>
+
+<pre data-type="programlisting">~ amplify add api
+
+? Please select from one of the below mentioned services: REST
+? Provide a friendly name for your resource to be used as a label for this
+  category in the project: ecommerceapi
+? Provide a path: /products
+? Choose a Lambda source: Create a new Lambda function
+? Provide a friendly name for your resource to be used as a label for this
+  category in the project: ecommercefunction
+? Provide the AWS Lambda function name: ecommercefunction
+? Choose the function runtime that you want to use: NodeJS
+? Choose the function template that you want to use: Serverless express
+  function (Integration with Amazon API Gateway)
+? Do you want to access other resources created in this project from your
+  Lambda function? Y
+? Select the category: storage, auth
+? Select the operations you want to permit for &lt;app_name&gt;: create, read, update,
+  delete
+? Select the operations you want to permit for producttable: create, read,
+  update, delete
+? Do you want to invoke this function on a recurring schedule? N
+? Do you want to configure Lambda layers for this function? N
+? Do you want to edit the local Lambda function now? N
+? Restrict API access: Y
+? Who should have access? Authenticated and Guest users
+? What kind of access do you want for Authenticated users? create, read,
+  update, delete
+? What kind of access do you want for Guest users? read
+? Do you want to add another path? N</pre>
+
+<p>Now we’ve created an API Gateway endpoint as well as a new Lambda function and integrated the function to be triggered from the API Gateway event. The CLI walks us through the setup, and allows us to set some base authorization rules around the API by restricting API access based on whether the user is authenticated or not. We’ve also set up a path that we will now be able to work with: <code>/products</code>.</p>
+
+<p><a data-type="indexterm" data-primary="delete method" id="idm45364347117000"/><a data-type="indexterm" data-primary="get method" id="idm45364347116072"/><a data-type="indexterm" data-primary="post method" id="idm45364347115400"/><a data-type="indexterm" data-primary="put method" id="idm45364347114728"/>The Lambda function includes an Express server as part of the boilerplate the CLI created for us. If you haven’t used Express before, it is a minimal Node.js web framework that provides a nice set of built-in features to develop web and mobile applications. For our purposes, we will be using it to more easily provide routing that will map to the endpoint(s) that we create in API Gateway. We’ll now be able to have <code>get</code>, <code>put</code>, <code>post</code>, and <code>delete</code> methods that we can call on the <code>/products</code> endpoint that will be handled by the Express framework.</p>
+
+<p><a data-type="indexterm" data-primary="Express framework" id="idm45364347111144"/>If we wanted to add additional endpoints, we could update the <code>api</code> category by running <code>amplify update api</code> and then adding whatever new endpoints we’d created directly into the Express server code.</p>
+
+<p>Next, we will go ahead and update the code in the Lambda function that is running the Express server to handle the interactions with the database that we’d like to enable.</p>
+
+<p>The first thing we need to do is update the imports for the function:</p>
+
+<pre data-type="programlisting">/* amplify/backend/function/ecommercefunction/src/app.js */
+
+/* Below the last existing `require` import, add the following
+   imports variables */
+const AWS = require('aws-sdk')
+const { v4: uuid } = require('uuid')
+
+/* Cognito SDK */
+const cognito = new
+AWS.CognitoIdentityServiceProvider({
+  apiVersion: '2016-04-18'
+})
+
+/* Cognito User Pool ID
+*  This User Pool ID variable will be given to you by the CLI output after
+   adding the category
+*  This will also be available in the file itself, commented out at the top
+*/
+var userpoolId = process.env.&lt;your_app_id&gt;
+
+// DynamoDB configuration
+const region = process.env.REGION
+const ddb_table_name = process.env.STORAGE_PRODUCTTABLE_NAME
+const docClient = new AWS.DynamoDB.DocumentClient({region})</pre>
+
+<p>Next, we’ll create a couple of functions that will allow us to perform authorization checks on the API call. We want only users in the Admin group to be able to perform certain actions (while leaving open the potential to allow other groups in future).</p>
+
+<p>To do this, we will create two functions: <code>getGroupsForUser</code> and <code>canPerformAction</code>:</p>
+<dl class="less_space pagebreak-before">
+<dt><code>getGroupsForUser</code></dt>
+<dd>
+<p><a data-type="indexterm" data-primary="pass in" id="idm45364347102792"/><a data-type="indexterm" data-primary="getGroupsForUser function" id="idm45364347102088"/>This will allow us to pass in the event coming in from the API call to determine what groups the user making the call is currently associated with.</p>
+</dd>
+<dt><code>canPerformAction</code></dt>
+<dd>
+<p><a data-type="indexterm" data-primary="canPerformAction function" id="idm45364347099832"/>This first checks to see if the user is authenticated at all, and if not, will reject the request. It will then check to see if the user is part of the group passed in as the second argument, and if so, will allow the action to happen. If not, it will reject the action.</p>
+</dd>
+</dl>
+
+<p>Create the functions with the following code:</p>
+
+<pre data-type="programlisting">// amplify/backend/function/ecommercefunction/src/app.js
+async function getGroupsForUser(event) {
+  let userSub =
+    event
+      .requestContext
+      .identity
+      .cognitoAuthenticationProvider
+      .split(':CognitoSignIn:')[1]
+  let userParams = {
+    UserPoolId: userpoolId,
+    Filter: `sub = "${userSub}"`,
+  }
+  let userData = await cognito.listUsers(userParams).promise()
+  const user = userData.Users[0]
+  var groupParams = {
+    UserPoolId: userpoolId,
+    Username: user.Username
+  }
+  const groupData = await cognito.adminListGroupsForUser(groupParams).promise()
+  return groupData
+}
+
+async function canPerformAction(event, group) {
+  return new Promise(async (resolve, reject) =&gt; {
+    if (!event.requestContext.identity.cognitoAuthenticationProvider) {
+      return reject()
+    }
+    const groupData = await getGroupsForUser(event)
+    const groupsForUser = groupData.Groups.map(group =&gt; group.GroupName)
+    if (groupsForUser.includes(group)) {
+      resolve()
+    } else {
+      reject('user not in group, cannot perform action..')
+    }
+  })
+}</pre>
+
+<p><a data-type="indexterm" data-primary="get method" id="idm45364347095960"/><a data-type="indexterm" data-primary="post method" id="idm45364347095352"/><a data-type="indexterm" data-primary="delete method" id="idm45364347094744"/>Next, we will update the HTTP methods of <code>get</code>, <code>post</code>, and <code>delete</code> to interact with the database.</p>
+
+<p>Let’s first update <code>app.get</code> for <code>/products</code>:</p>
+
+<pre data-type="programlisting">// amplify/backend/function/ecommercefunction/src/app.js
+app.get('/products', async function(req, res) {
+  try {
+    const data = await getItems()
+    res.json({ data: data })
+  } catch (err) {
+    res.json({ error: err })
+  }
+})
+
+async function getItems(){
+  var params = { TableName: ddb_table_name }
+  try {
+    const data = await docClient.scan(params).promise()
+    return data
+  } catch (err) {
+    return err
+  }
+}</pre>
+
+<p><a data-type="indexterm" data-primary="Amazon DynamoDB tables" id="idm45364347089752"/><a data-type="indexterm" data-primary="getItems function" id="idm45364347089048"/>This method calls a new function that we create named <code>getItems</code> that fetches the items from the DynamoDB table using a scan operation (<code>docClient.scan</code>). If the scan operation succeeds, we return the items in the response. If the operation fails, we return the error message.</p>
+
+<p>Next, let’s update <code>app.post</code> for <code>/products</code> to see how to create a new item in <span class="keep-together">DynamoDB:</span></p>
+
+<pre data-type="programlisting">// amplify/backend/function/ecommercefunction/src/app.js
+app.post('/products', async function(req, res) {
+  const { body } = req
+  const { event } = req.apiGateway
+  try {
+    await canPerformAction(event, 'Admin')
+    const input = { ...body, id: uuid() }
+    var params = {
+      TableName: ddb_table_name,
+      Item: input
+    }
+    await docClient.put(params).promise()
+    res.json({ success: 'item saved to database..' })
+  } catch (err) {
+    res.json({ error: err })
+  }
+});</pre>
+
+<p>This call is a little different than the <code>get</code> call. You can see that we retrieve the <code>body</code> from the event using the <code>req</code> object and then get event data from the <code>req.apiGateway</code> object.</p>
+
+<p>We first call <code>canPerformAction</code> to see if the caller is an admin. If this succeeds, we continue on to create an input object using the <code>body</code> argument and appending a unique ID onto the object.</p>
+
+<p><a data-type="indexterm" data-primary="DynamoDB Document Client" id="idm45364347079928"/>We then create a new <code>params</code> variable that contains the input along with the table name. Finally, we call the <code>put</code> method using the DynamoDB Document Client to create a new item.</p>
+
+<p><a data-type="indexterm" data-primary="app.delete method" id="idm45364347077736"/>Next, let’s look at how to delete an item by updating the <code>app.delete</code> method for <span class="keep-together"><code>/products</code>:</span></p>
+
+<pre data-type="programlisting">// amplify/backend/function/ecommercefunction/src/app.js
+app.delete('/products', async function(req, res) {
+  const { event } = req.apiGateway
+  try {
+    await canPerformAction(event, 'Admin')
+    var params = {
+      TableName : ddb_table_name,
+      Key: { id: req.body.id }
+    }
+    await docClient.delete(params).promise()
+    res.json({ success: 'successfully deleted item' })
+  } catch (err) {
+    res.json({ error: err })
+  }
+});</pre>
+
+<p><a data-type="indexterm" data-primary="delete method" id="idm45364347074040"/>The <code>delete</code> method, like the <code>post</code> method, requires an admin to perform the action. To implement this, we first check if they are an admin by calling <code>canPerformAction</code>. We then call the <code>delete</code> method using the DynamoDB Document Client to delete an item by passing in the primary key of <code>id</code>.</p>
+
+<p><a data-type="indexterm" data-primary="UUID (universally unique identifier)" id="idm45364347070440"/>Finally, because we used the <code>uuid</code> library in our function, we will need to add it as a dependency to the function’s <em>package.json</em> file. In <em>amplify/backend/function/ecommercefunction/src/package.json</em>, add <code>uuid</code> as a dependency:</p>
+
+<pre data-type="programlisting">{
+  ...
+  "dependencies": {
+    "aws-serverless-express": "^3.3.5",
+    "body-parser": "^1.17.1",
+    "express": "^4.15.2",
+    "uuid": "^8.0.0" &lt;- New dependency
+  },
+  ...
+}</pre>
+
+<p>Now, the backend has been set up and we can deploy it to AWS<a data-type="indexterm" data-primary="" data-startref="add_api" id="idm45364347066536"/><a data-type="indexterm" data-primary="" data-startref="api_add" id="idm45364347065480"/><a data-type="indexterm" data-primary="" data-startref="sf_aapi" id="idm45364347064536"/><a data-type="indexterm" data-primary="" data-startref="ec_aapi" id="idm45364347063592"/>:</p>
+
+<pre data-type="programlisting">~ amplify push</pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Creating the Frontend"><div class="sect1" id="idm45364347126584">
+<h1>Creating the Frontend</h1>
+
+<p><a data-type="indexterm" data-primary="creating" data-secondary="frontend" id="cre_fro"/><a data-type="indexterm" data-primary="ecommerce" data-secondary="creating frontend" id="ec_cre"/><a data-type="indexterm" data-primary="frontend" id="fro_ab"/><a data-type="indexterm" data-primary="serverless functions" data-secondary="creating frontend" id="sf_fro"/><a data-type="indexterm" data-primary="Nav.js file" id="idm45364347055816"/><a data-type="indexterm" data-primary="Profile.js file" id="idm45364347055144"/><a data-type="indexterm" data-primary="Router.js file" id="idm45364347054472"/><a data-type="indexterm" data-primary="checkUser.js file" id="idm45364347053800"/><a data-type="indexterm" data-primary="Admin.js file" id="idm45364347053128"/><a data-type="indexterm" data-primary="Container.js file" id="idm45364347052456"/><a data-type="indexterm" data-primary="Main.js file" id="idm45364347051784"/>The first thing we’ll do on the frontend is create the files we’ll need to work with:</p>
+<dl>
+<dt><em>Admin.js</em></dt>
+<dd>
+<p>This component will hold the Admin dashboard to create new items.</p>
+</dd>
+<dt><em>Container.js</em></dt>
+<dd>
+<p>This will be a reusable layout component.</p>
+</dd>
+<dt><em>Main.js</em></dt>
+<dd>
+<p>This holds the main view of the app that will list the items that are for sale being pulled from the API and database.</p>
+</dd>
+<dt><em>Nav.js</em></dt>
+<dd>
+<p>This will hold the navigation component.</p>
+</dd>
+<dt><em>Profile.js</em></dt>
+<dd>
+<p>This will be a basic profile component that will allow users to sign out.</p>
+</dd>
+<dt><em>Router.js</em></dt>
+<dd>
+<p>This component will hold the router.</p>
+</dd>
+<dt><em>checkUser.js</em></dt>
+<dd>
+<p>This will hold a function that will retrieve the user’s profile and determine whether the user is an admin.</p>
+</dd>
+</dl>
+
+<p>Let’s next go ahead and change into the <em>src</em> directory and create these components:</p>
+
+<pre data-type="programlisting">~ cd src
+~ touch Admin.js Container.js Main.js Nav.js Profile.js Router.js checkUser.js
+~ cd ..</pre>
+
+<p>Next, open <em>src/index.js</em> and update it with the following code to import the Router, the Amplify library, and the CSS from Ant Design:</p>
+
+<pre data-type="programlisting">import React from 'react'
+import ReactDOM from 'react-dom'
+import Router from './Router'
+
+import 'antd/dist/antd.css'
+import Amplify from 'aws-amplify'
+import config from './aws-exports'
+Amplify.configure(config)
+
+ReactDOM.render(&lt;Router /&gt;, document.getElementById('root'))</pre>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Container Component"><div class="sect2" id="idm45364347036056">
+<h2>Container Component</h2>
+
+<p><a data-type="indexterm" data-primary="Container component" id="idm45364347034856"/>The <code>Container</code> component will provide a basic layout with a fixed width and center the components in a consistent way:</p>
+
+<pre data-type="programlisting">import React from 'react'
+
+export default function Container({ children }) {
+  return (
+    &lt;div style={containerStyle}&gt;
+      {children}
+    &lt;/div&gt;
+  )
+}
+
+const containerStyle = {
+  width: 900,
+  margin: '0 auto',
+  padding: '20px 0px'
+}</pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="checkUser Function"><div class="sect2" id="idm45364347032184">
+<h2>checkUser Function</h2>
+
+<p><a data-type="indexterm" data-primary="checkUser function" id="idm45364347030984"/><a data-type="indexterm" data-primary="updateUser function" id="idm45364347030280"/>This function will check the current user’s information and then call the <code>updateUser</code> callback function to update the user. If there is no user, it returns with an empty object.</p>
+
+<p><a data-type="indexterm" data-primary="Cognito groups" id="idm45364347028600"/>If there is a user, it will check to see if there are any Cognito groups associated with the user, and if so, check if the user is in the <code>Admin</code> group. If the user is in the <code>Admin</code> group, then the <code>isAuthorized</code> Boolean will be set to <code>true</code>; if not, the Boolean will be set to <code>false</code>:</p>
+
+<pre data-type="programlisting">/* src/checkUser.js */
+import { Auth } from 'aws-amplify'
+
+async function checkUser(updateUser) {
+  const userData = await Auth
+    .currentSession()
+    .catch(err =&gt; console.log('error: ', err)
+  )
+  if (!userData) {
+    console.log('userData: ', userData)
+    updateUser({})
+    return
+  }
+  const { idToken: { payload }} = userData
+  const isAuthorized =
+    payload['cognito:groups'] &amp;&amp;
+  payload['cognito:groups'].includes('Admin')
+  updateUser({
+    username: payload['cognito:username'],
+    isAuthorized
+  })
+}
+
+export default checkUser</pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Nav Component"><div class="sect2" id="idm45364347023896">
+<h2>Nav Component</h2>
+
+<p><a data-type="indexterm" data-primary="Nav component" id="idm45364347022520"/>The <code>Nav</code> component will hold to main links (<code>Home</code> and <code>Profile</code>), and another admin link that will only be visible if you are signed in as an admin user:</p>
+
+<pre data-type="programlisting">/* src/Nav.js */
+import React, { useState, useEffect } from 'react'
+import { Link } from 'react-router-dom'
+import { Menu } from 'antd'
+import { HomeOutlined, UserOutlined, ProfileOutlined } from '@ant-design/icons'
+import { Hub } from 'aws-amplify'
+import checkUser from './checkUser'
+
+const Nav = (props) =&gt; {
+  const { current } = props
+  const [user, updateUser] = useState({})
+  useEffect(() =&gt; {
+    checkUser(updateUser)
+    Hub.listen('auth', (data) =&gt; {
+      const { payload: { event } } = data;
+      console.log('event: ', event)
+      if (event === 'signIn' || event === 'signOut') checkUser(updateUser)
+    })
+  }, [])
+
+  return (
+    &lt;div&gt;
+      &lt;Menu selectedKeys={[current]} mode="horizontal"&gt;
+        &lt;Menu.Item key='home'&gt;
+          &lt;Link to={`/`}&gt;
+            &lt;HomeOutlined /&gt;Home
+          &lt;/Link&gt;
+        &lt;/Menu.Item&gt;
+        &lt;Menu.Item key='profile'&gt;
+          &lt;Link to='/profile'&gt;
+            &lt;UserOutlined /&gt;Profile
+          &lt;/Link&gt;
+        &lt;/Menu.Item&gt;
+        {
+          user.isAuthorized &amp;&amp; (
+            &lt;Menu.Item key='admin'&gt;
+              &lt;Link to='/admin'&gt;
+                &lt;ProfileOutlined /&gt;Admin
+              &lt;/Link&gt;
+            &lt;/Menu.Item&gt;
+          )
+        }
+      &lt;/Menu&gt;
+    &lt;/div&gt;
+  )
+}
+
+export default Nav</pre>
+
+<p><a data-type="indexterm" data-primary="useEffect hook" id="idm45364347018088"/>In this component, we use the <code>useEffect</code> hook to call the <code>checkUser</code> function when the component loads. This will set the component state with the user information if there is a signed-in user.</p>
+
+<p><a data-type="indexterm" data-primary="Listener" id="idm45364347016056"/>We also set up a listener, using the <code>Hub</code> component, to listen to <code>auth</code> events (like signing up, signing in, and signing out). When a user signs in or signs out, we again will invoke the <code>checkUser</code> function to keep the navigation state up to date.</p>
+
+<p>In the user interface, we then decide to only show the <code>Admin</code> link if the user is an authorized admin user.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Profile Component"><div class="sect2" id="idm45364347012632">
+<h2>Profile Component</h2>
+
+<p><a data-type="indexterm" data-primary="Profile component" id="idm45364347011432"/><a data-type="indexterm" data-primary="withAuthenticator component" id="idm45364347010728"/>This component is pretty basic. If a user is signed in, we will render the component and a sign-out button. If they are not signed in, the <code>withAuthenticator</code> component will render sign-up and sign-in flows for a user:</p>
+
+<pre data-type="programlisting">/* src/Profile.js */
+import React from 'react'
+import './App.css'
+
+import { withAuthenticator, AmplifySignOut } from '@aws-amplify/ui-react'
+
+function Profile() {
+  return (
+    &lt;div style={containerStyle}&gt;
+      &lt;AmplifySignOut /&gt;
+    &lt;/div&gt;
+  );
+}
+
+const containerStyle = {
+  width: 400,
+  margin: '20px auto'
+}
+
+export default withAuthenticator(Profile)</pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" class="less_space pagebreak-before" data-pdf-bookmark="Router Component"><div class="sect2" id="idm45364347007880">
+<h2>Router Component</h2>
+
+<p><a data-type="indexterm" data-primary="Router component" id="idm45364347006216"/>This component configures three main components and routes: <code>Main</code> (<code>/</code>), <code>Admin</code> <span class="keep-together">(<code>/admin</code>),</span> and <code>Profile</code> (<code>/profile</code>).</p>
+
+<p><a data-type="indexterm" data-primary="useEffect hook" id="idm45364347001576"/><a data-type="indexterm" data-primary="setRoute function" id="idm45364347000872"/>In the <code>useEffect</code> hook, we first call the <code>setRoute</code> function. This function will get the current window location and set the current route information to be passed down to the <code>Nav</code> component:</p>
+
+<pre data-type="programlisting">/* src/Router.js */
+import React, {useState, useEffect} from 'react'
+import { HashRouter, Route, Switch } from 'react-router-dom'
+
+import Nav from './Nav'
+import Admin from './Admin'
+import Main from './Main'
+import Profile from './Profile'
+
+export default function Router() {
+  const [current, setCurrent] = useState('home')
+  useEffect(() =&gt; {
+    setRoute()
+    window.addEventListener('hashchange', setRoute)
+    return () =&gt;  window.removeEventListener('hashchange', setRoute)
+  }, [])
+  function setRoute() {
+    const location = window.location.href.split('/')
+    const pathname = location[location.length-1]
+    console.log('pathname: ', pathname)
+    setCurrent(pathname ? pathname : 'home')
+  }
+  return (
+    &lt;HashRouter&gt;
+      &lt;Nav current={current} /&gt;
+      &lt;Switch&gt;
+        &lt;Route exact path='/' component={Main} /&gt;
+        &lt;Route path='/admin' component={Admin} /&gt;
+        &lt;Route path='/profile' component={Profile} /&gt;
+        &lt;Route component={Main} /&gt;
+      &lt;/Switch&gt;
+    &lt;/HashRouter&gt;
+  )
+}</pre>
+
+<p><a data-type="indexterm" data-primary="Listener" id="idm45364346996648"/>We also set up a listener to listen when the route changes (<code>hashchange</code>), and when it does, we will call <code>setRoute</code> to set the current route information to be passed down to the <code>Nav</code> component.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" class="less_space pagebreak-before" data-pdf-bookmark="Admin Component"><div class="sect2" id="idm45364346994376">
+<h2>Admin Component</h2>
+
+<p><a data-type="indexterm" data-primary="Admin component" id="idm45364346992712"/>The <code>Admin</code> component contains a form that will allow us to create new items in the inventory:</p>
+
+<pre data-type="programlisting">/* src/Admin.js */
+import React, { useState } from 'react'
+import './App.css'
+import { Input, Button } from 'antd'
+
+import { API } from 'aws-amplify'
+import { withAuthenticator } from '@aws-amplify/ui-react'
+
+const initialState = {
+  name: '', price: ''
+}
+
+function Admin() {
+  const [itemInfo, updateItemInfo] = useState(initialState)
+  function updateForm(e) {
+    const formData = {
+      ...itemInfo, [e.target.name]: e.target.value
+    }
+    updateItemInfo(formData)
+  }
+  async function addItem() {
+    try {
+      const data = {
+        body: { ...itemInfo, price: parseInt(itemInfo.price) }
+      }
+      updateItemInfo(initialState)
+      await API.post('ecommerceapi', '/products', data)
+    } catch (err) {
+      console.log('error adding item...')
+    }
+  }
+  return (
+    &lt;div style={containerStyle}&gt;
+      &lt;Input
+        name='name'
+        onChange={updateForm}
+        value={itemInfo.name}
+        placeholder='Item name'
+        style={inputStyle}
+      /&gt;
+      &lt;Input
+        name='price'
+        onChange={updateForm}
+        value={itemInfo.price}
+        style={inputStyle}
+        placeholder='item price'
+      /&gt;
+      &lt;Button
+        style={buttonStyle}
+        onClick={addItem}
+      &gt;Add Product&lt;/Button&gt;
+    &lt;/div&gt;
+  )
+}
+
+const containerStyle = { width: 400, margin: '20px auto' }
+const inputStyle = { marginTop: 10 }
+const buttonStyle = { marginTop: 10 }
+
+export default withAuthenticator(Admin)</pre>
+
+<p><a data-type="indexterm" data-primary="addItem function" id="idm45364346989080"/>The main thing happening in this component is the <code>addItem</code> function.</p>
+
+<p><a data-type="indexterm" data-primary="get method" id="idm45364346987352"/><a data-type="indexterm" data-primary="put method" id="idm45364346986424"/><a data-type="indexterm" data-primary="post method" id="idm45364346985752"/><a data-type="indexterm" data-primary="delete method" id="idm45364346985144"/>This function uses the <code>API</code> category to interact with the REST API we created. When we set up this API, we named it <code>ecommerceapi</code>. Using the API name, as well as the path (<code>/products</code>), we can make requests against it, like <code>get</code>, <code>put</code>, <code>post</code>, and <code>delete</code>.</p>
+
+<p>In our component, we called <code>API.post</code>, passing in an object containing the data we wanted to send in the body:</p>
+
+<pre data-type="programlisting">/* Create the object to send with the request */
+const data = {
+  body: { ...itemInfo, price: parseInt(itemInfo.price) }
+}
+/* Update the local state with the initial state to clear the form */
+updateItemInfo(initialState)
+/* Post to the API */
+await API.post('ecommerceapi', '/products', data)</pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Main Component"><div class="sect2" id="idm45364346979192">
+<h2>Main Component</h2>
+
+<p><a data-type="indexterm" data-primary="Main component" id="idm45364346977816"/>The last component is the <code>Main</code> component, which is the main view that renders the list of inventory items.</p>
+
+<p>There are two main functions in this component, <code>getProducts</code> and <code>deleteItem</code>:</p>
+<dl>
+<dt><code>getProducts</code></dt>
+<dd>
+<p><a data-type="indexterm" data-primary="getProducts function" id="idm45364346973432"/>Calls the <code>get</code> method on the API. When the data is returned, the state is updated, setting the products array to the data returned from the API.</p>
+</dd>
+<dt><code>deleteItem</code></dt>
+<dd>
+<ol>
+<li>
+<p><a data-type="indexterm" data-primary="deleteItem function" id="idm45364346969896"/>The <code>id</code> of the item to be deleted is used create a filtered list of the products array by removing the item to be deleted.</p>
+</li>
+<li>
+<p>The filtered products array is used to update the local state, creating an optimistic response in the UI by deleting the item in the view and showing the new list of products immediately.</p>
+</li>
+<li>
+<p>We use the <code>API</code> category to make a <code>delete</code> request, passing in the <code>id</code> of the<a data-type="indexterm" data-primary="" data-startref="cre_fro" id="idm45364346964952"/><a data-type="indexterm" data-primary="" data-startref="ec_cre" id="idm45364346963944"/><a data-type="indexterm" data-primary="" data-startref="fro_ab" id="idm45364346963000"/><a data-type="indexterm" data-primary="" data-startref="sf_fro" id="idm45364346962056"/> <span class="keep-together">product:</span></p>
+</li>
+
+</ol>
+</dd>
+</dl>
+
+<pre data-type="programlisting">/* src/Main.js */
+import React, { useState, useEffect } from 'react'
+import Container from './Container'
+import { API } from 'aws-amplify'
+import { List } from 'antd'
+import checkUser from './checkUser'
+
+function Main() {
+  const [state, setState] = useState({products: [], loading: true})
+  const [user, updateUser] = useState({})
+  let didCancel = false
+  useEffect(() =&gt; {
+    getProducts()
+    checkUser(updateUser)
+    return () =&gt; didCancel = true
+  }, [])
+  async function getProducts() {
+    const data = await API.get('ecommerceapi', '/products')
+    console.log('data: ', data)
+    if (didCancel) return
+    setState({
+      products: data.data.Items, loading: false
+    })
+  }
+  async function deleteItem(id) {
+    try {
+      const products = state.products.filter(p =&gt; p.id !== id)
+      setState({ ...state, products })
+      await API.del('ecommerceapi', '/products', { body: { id } })
+      console.log('successfully deleted item')
+    } catch (err) {
+      console.log('error: ', err)
+    }
+  }
+  return (
+    &lt;Container&gt;
+      &lt;List
+        itemLayout="horizontal"
+        dataSource={state.products}
+        loading={state.loading}
+        renderItem={item =&gt; (
+          &lt;List.Item
+            actions={user.isAuthorized ?
+              [&lt;p onClick={() =&gt; deleteItem(item.id)}
+              key={item.id}&gt;delete&lt;/p&gt;] : null}
+          &gt;
+            &lt;List.Item.Meta
+              title={item.name}
+              description={item.price}
+            /&gt;
+          &lt;/List.Item&gt;
+        )}
+      /&gt;
+    &lt;/Container&gt;
+  )
+}
+
+export default Main</pre>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Testing It Out"><div class="sect1" id="idm45364347061576">
+<h1>Testing It Out</h1>
+
+<p><a data-type="indexterm" data-primary="serverless functions" data-secondary="testing apps" id="idm45364346956776"/><a data-type="indexterm" data-primary="applications" data-secondary="testing" id="idm45364346955928"/><a data-type="indexterm" data-primary="testing" data-secondary="applications" id="idm45364346955080"/>Now, we should be able to run the app and test it out:</p>
+
+<pre data-type="programlisting">~ npm start</pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Summary"><div class="sect1" id="idm45364346953064">
+<h1>Summary</h1>
+
+<p><a data-type="indexterm" data-primary="Express server" id="idm45364346951832"/><a data-type="indexterm" data-primary="Lambda" data-secondary="invoking functions" id="idm45364346951128"/><a data-type="indexterm" data-primary="API category" id="idm45364346950184"/><a data-type="indexterm" data-primary="DynamoDB" id="idm45364346949512"/><a data-type="indexterm" data-primary="DynamoDB Document Client" id="idm45364346948840"/>Congratulations, you’ve now successfully deployed a full stack serverless CRUD+ List app.</p>
+
+<p>Here are a few things to keep in mind from this chapter:</p>
+
+<ul>
+<li>
+<p>Lambda functions can be invoked from many different event types, including API calls, image uploads, database operations, and authentication events. In this chapter, we’ve enabled <code>Function</code> invocations from both HTTP events as well as authentication events.</p>
+</li>
+<li>
+<p>Running an Express server in a Lambda function is a great way to extend the functionality of a single function.</p>
+</li>
+<li>
+<p>The <code>API</code> category takes in two required arguments when working with REST APIs: the API name and the path. It also takes in an optional third argument, an object that can contain any arguments you may want to send in a POST request.</p>
+</li>
+<li>
+<p>When interacting with DynamoDB from a Node.js Lambda function, use the DynamoDB document client, as it offers an easy-to-use API for creating, updating, deleting, and querying items from a DynamoDB database.</p>
+</li>
+</ul>
+</div></section>
+
+
+
+
+
+
+
+</div></section></div>
+
+
+
+  </body></html>
