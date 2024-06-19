@@ -1,0 +1,801 @@
+<html><head></head><body><div id="sbo-rt-content"><section data-type="chapter" epub:type="chapter" data-pdf-bookmark="Chapter 15. Load Balancing MySQL"><div class="chapter" id="CH15_LOAD_BAlANCERS">
+<h1><span class="label">Chapter 15. </span>Load Balancing MySQL</h1>
+
+
+<p>There are different ways to connect to MySQL. For example, to<a data-type="indexterm" data-primary="load balancing" data-secondary="about" id="idm46177446663112"/><a data-type="indexterm" data-primary="connections" data-secondary="connection pools" id="idm46177446662056"/> perform a write test, a connection is created, the statement is executed, and then the connection is closed. To avoid the cost of opening a connection every time it is needed, the concept of the <em>connection pool</em> was developed. Connection pooling is a technique of creating and managing a pool of connections that are ready for use by any thread of the 
+<span class="keep-together">application.</span></p>
+
+<p>Extending the concept of high availability discussed in <a data-type="xref" href="ch13.xhtml#CH13_HA">Chapter 13</a> to <a data-type="indexterm" data-primary="high availability" data-secondary="load balancers for" id="idm46177446658344"/>connections in order to improve a production system’s resilience, it is possible to use <em>load balancers</em> to connect to a database cluster. With load balancing and MySQL high availability, it is possible to keep the application running without interruption (or with only minor downtime). Basically, if the source server or one of the nodes of the database cluster fails, the client just needs to connect to another database node and it can continue to serve requests.</p>
+
+<p>Load balancers were built to provide transparency for clients when connecting to MySQL infrastructure. In this way, the application does not need to be aware of the MySQL topology; whether you’re using a classic replication, Group Replication, or Galera Cluster does not matter. The load balancer will provide an online node where it will be possible to read and write queries. Having a robust MySQL architecture and a proper load balancer in place can help DBAs avoid sleepless nights.</p>
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Load Balancing with Application Drivers"><div class="sect1" id="idm46177446655304">
+<h1>Load Balancing with Application Drivers</h1>
+
+<p>To connect an application to MySQL, you need a driver. A<a data-type="indexterm" data-primary="load balancing" data-secondary="application drivers for" id="idm46177446653928"/><a data-type="indexterm" data-primary="driver definition" id="idm46177446652872"/> <em>driver</em> is an adapter used to connect the application to a different system type. It is similar to connecting a video card to your computer; you may need to download and install a driver for it to work with your application.</p>
+
+<p>Modern MySQL drivers from commonly used programming<a data-type="indexterm" data-primary="JDBC driver for MySQL" id="idm46177446650840"/><a data-type="indexterm" data-primary="PDO_MYSQL driver" id="idm46177446650136"/><a data-type="indexterm" data-primary="PHP driver" id="idm46177446649464"/> languages support connection pooling, load balancing, and failover. Examples include the <a href="https://oreil.ly/kaAXI">JDBC driver for MySQL (MySQL Connector/J)</a> and the <a href="https://oreil.ly/xbC7B">PDO_MYSQL</a> driver, which implements the PHP Data Objects (PDO) interface to enable access from PHP to MySQL databases.</p>
+
+<p>The database drivers we’ve mentioned are built to provide transparency for clients when connecting to standalone MySQL Server or MySQL replication setups. We won’t show you how to use them in code because that would be outside the scope of this book; however, you should be aware that adding a driver library facilitates code development, since the driver abstracts away a substantial amount of work for the developer.</p>
+
+<p>But for other topologies, such as a clustering setup like Galera Cluster for MySQL or MariaDB, the JDBC and PHP drivers are not aware of internal Galera state information. For instance, a Galera donor node might be in read-only mode while it is helping another node resynchronize (if the SST method is <code>mysqldump</code> or <code>rsync</code>), or it could be up in non-primary state if split-brain happens. Another solution is to use a load balancer between the clients and the database cluster.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="ProxySQL Load Balancer"><div class="sect1" id="idm46177446644264">
+<h1>ProxySQL Load Balancer</h1>
+
+<p>ProxySQL is a SQL proxy. ProxySQL implements the MySQL protocol, and because of this, it can do things that other proxies cannot do. Here are some of its advantages:<a data-type="indexterm" data-primary="load balancing" data-secondary="ProxySQL load balancer" id="ch15-pro"/><a data-type="indexterm" data-primary="ProxySQL load balancer" id="ch15-pro2"/></p>
+
+<ul>
+<li>
+<p>It provides “intelligent” load balancing of application requests to multiple 
+<span class="keep-together">databases.</span></p>
+</li>
+<li>
+<p>It understands the MySQL traffic that passes through it and can split reads from writes. Understanding the MySQL protocol is especially useful in a source/replica replication setup, where writes should only go to the source and reads to the replicas, or in the case of Galera Cluster for distributing the read queries evenly (linear read scaling).</p>
+</li>
+<li>
+<p>It understands the underlying database topology, including whether the instances are up or down, and therefore can route requests to healthy databases.</p>
+</li>
+<li>
+<p>It provides query workload analytics and a query cache, which is useful for analyzing and improving performance.</p>
+</li>
+<li>
+<p>It provides administrators with robust, rich query rule definitions to efficiently distribute queries and cache data to maximize the database service’s efficiency.</p>
+</li>
+</ul>
+
+<p>ProxySQL runs as a daemon watched by a monitoring process. The process monitors the daemon and restarts it in case of a crash to minimize downtime. The daemon accepts incoming traffic from MySQL clients and forwards it to backend MySQL servers.</p>
+
+<p>The proxy is designed to run continuously without needing to be restarted. Most configurations can be done at runtime using queries similar to SQL statements in the ProxySQL admin interface. These include runtime parameters, server grouping, and traffic-related settings.</p>
+
+<p>While it is common to install ProxySQL on a standalone node between the application and the database, this can affect query performance due to the additional latency from network hops. <a data-type="xref" href="#FIG-PROXYSQL1">Figure 15-1</a> shows ProxySQL as a middle layer.</p>
+
+<figure><div id="FIG-PROXYSQL1" class="figure">
+<img src="Images/lm2e_1501.png" alt="lm2e 1501" width="718" height="1006"/>
+<h6><span class="label">Figure 15-1. </span>ProxySQL between the application and MySQL</h6>
+</div></figure>
+
+<p>To reduce the impact on performance (and avoid the additional network hop), another architecture option is installing ProxySQL on the application servers. The application then connects to ProxySQL (acting as a MySQL server) on localhost using a Unix domain socket, avoiding extra latency. It uses its routing rules to reach out and talk to the actual MySQL servers with their connection pooling. The application doesn’t have any idea what happens beyond its connection to ProxySQL. <a data-type="xref" href="#FIG-PROXYSQL2">Figure 15-2</a> shows ProxySQL on the same server as the application.</p>
+
+<figure><div id="FIG-PROXYSQL2" class="figure">
+<img src="Images/lm2e_1502.png" alt="lm2e 1502" width="1230" height="598"/>
+<h6><span class="label">Figure 15-2. </span>ProxySQL on the same server as the application</h6>
+</div></figure>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Installing and Configuring ProxySQL"><div class="sect2" id="idm46177446625048">
+<h2>Installing and Configuring ProxySQL</h2>
+
+<p>Let’s take a look at how to deploy ProxySQL for a source/replica configuration.</p>
+
+<p>The tool’s developers provide official packages for a variety of Linux distributions for all ProxySQL releases on their <a href="https://oreil.ly/2EFKJ">GitHub releases page</a>, so we’ll download the latest package version from there and install it.</p>
+
+<p>Before installing, the following instances are the ones we will use in this process:</p>
+
+<pre data-type="programlisting">+---------------------------------------+----------------------+
+| vinicius-grippa-default(mysql)        | 10.124.33.5 (eth0)   |
++---------------------------------------+----------------------+
+| vinicius-grippa-node1(mysql)          | 10.124.33.169 (eth0) |
++---------------------------------------+----------------------+
+| vinicius-grippa-node2(mysql)          | 10.124.33.130 (eth0) |
++---------------------------------------+----------------------+
+| vinicius-grippa-node3(proxysql)       | 10.124.33.170 (eth0) |
++---------------------------------------+----------------------+</pre>
+
+<p>To begin, find the proper distribution for your operating system. In this example, we will then install for CentOS 7. First, we will become root, install the MySQL client to connect to ProxySQL, and install ProxySQL itself. We get the URL from the downloads page and refer it to <code>yum</code>:</p>
+
+<pre data-type="programlisting">$ <strong>sudo su - root</strong>
+# <strong>yum -y install https://repo.percona.com/yum/percona-release-latest.noarch.rpm</strong>
+# <strong>yum -y install Percona-Server-client-57</strong>
+# <strong>yum install -y https://github.com/sysown/proxysql/releases/download/v2.0.15/ \
+     proxysql-2.0.15-1-centos7.x86_64.rpm</strong></pre>
+
+<p>We have all the requirements to run ProxySQL, but the service doesn’t automatically start after installation, so we start it manually:</p>
+
+<pre data-type="programlisting"># <strong>sudo systemctl start proxysql</strong></pre>
+
+<p>ProxySQL should now be running with its default configuration in place. We can check it by running this command:</p>
+
+<pre data-type="programlisting"># <strong>systemctl status proxysql</strong></pre>
+
+<p>The output of the ProxySQL process in the active state should be similar to the 
+<span class="keep-together">following:</span></p>
+
+<pre data-type="programlisting"> proxysql.service - High Performance Advanced Proxy for MySQL
+   Loaded: loaded (/etc/systemd/system/proxysql.service; enabled; vendor...
+   Active: active (running) since Sun 2021-05-23 18:50:28 UTC; 15s ago
+  Process: 1422 ExecStart=/usr/bin/proxysql --idle-threads -c /etc/proxysql...
+ Main PID: 1425 (proxysql)
+   CGroup: /system.slice/proxysql.service
+           ├─1425 /usr/bin/proxysql --idle-threads -c /etc/proxysql.cnf
+           └─1426 /usr/bin/proxysql --idle-threads -c /etc/proxysql.cnf
+
+May 23 18:50:27 vinicius-grippa-node3 systemd[1]: Starting High Performance...
+May 23 18:50:27 vinicius-grippa-node3 proxysql[1422]: 2021-05-23 18:50:27...
+May 23 18:50:27 vinicius-grippa-node3 proxysql[1422]: 2021-05-23 18:50:27...
+May 23 18:50:27 vinicius-grippa-node3 proxysql[1422]: 2021-05-23 18:50:27...
+May 23 18:50:28 vinicius-grippa-node3 systemd[1]: Started High Performance...</pre>
+
+<p>ProxySQL splits the application interface from the admin interface. This means that ProxySQL will listen on two network ports: the admin interface will listen on 6032, and the application will listen on 6033 (to make it easier to remember, that’s the reverse of MySQL’s default port, 3306).</p>
+
+<p>Next, ProxySQL needs to communicate with the MySQL nodes to be able to check their condition. To achieve this, ProxySQL needs to connect to each server with a dedicated user.</p>
+
+<p>First, we are going to create the user on the source server. Connect to the MySQL source instance and run these commands:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">CREATE</code><code> </code><code class="n">USER</code><code> </code><code class="s1">'proxysql'</code><code class="o">@</code><code class="s1">'%'</code><code> </code><code class="n">IDENTIFIED</code><code> </code><code class="k">by</code><code> </code><code class="s1">'$3Kr$t'</code><code class="p">;</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">GRANT</code><code> </code><code class="k">USAGE</code><code> </code><code class="k">ON</code><code> </code><code class="o">*</code><code class="p">.</code><code class="o">*</code><code> </code><code class="k">TO</code><code> </code><code class="s1">'proxysql'</code><code class="o">@</code><code class="s1">'%'</code><code class="p">;</code></strong></pre>
+
+<p>Next, we will configure ProxySQL parameters to recognize the user. First we connect to ProxySQL:</p>
+
+<pre data-type="programlisting"># <strong>mysql -uadmin -padmin -h 127.0.0.1 -P 6032</strong></pre>
+
+<p>And then we set the parameters:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">proxysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">UPDATE</code><code> </code><code class="n">global_variables</code><code> </code><code class="kt">SET</code><code> </code><code class="n">variable_value</code><code class="o">=</code><code class="s1">'proxysql'</code></strong><code>
+       </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="k">WHERE</code><code> </code><code class="n">variable_name</code><code class="o">=</code><code class="s1">'mysql-monitor_username'</code><code class="p">;</code></strong><code>
+</code><code class="n">proxysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">UPDATE</code><code> </code><code class="n">global_variables</code><code> </code><code class="kt">SET</code><code> </code><code class="n">variable_value</code><code class="o">=</code><code class="s1">'$3Kr$t'</code></strong><code>
+       </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="k">WHERE</code><code> </code><code class="n">variable_name</code><code class="o">=</code><code class="s1">'mysql-monitor_password'</code><code class="p">;</code></strong><code>
+</code><code class="n">proxysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">LOAD</code><code> </code><code class="n">MYSQL</code><code> </code><code class="n">VARIABLES</code><code> </code><code class="k">TO</code><code> </code><code class="n">RUNTIME</code><code class="p">;</code></strong><code>
+</code><code class="n">proxysql</code><code class="o">&gt;</code><code> </code><strong><code class="n">SAVE</code><code> </code><code class="n">MYSQL</code><code> </code><code class="n">VARIABLES</code><code> </code><code class="k">TO</code><code> </code><code class="n">DISK</code><code class="p">;</code></strong></pre>
+
+<p>Now that we’ve set the user in the database and ProxySQL, it is time to tell ProxySQL which MySQL servers are present in the topology:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">proxysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">INSERT</code><code> </code><code class="k">INTO</code><code> </code><code class="nf">mysql_servers</code><code class="p">(</code><code class="n">hostgroup_id</code><code class="p">,</code><code> </code><code class="n">hostname</code><code class="p">,</code><code> </code><code class="n">port</code><code class="p">)</code></strong><code>
+       </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="k">VALUES</code><code> </code><code class="p">(</code><code class="mi">10</code><code class="p">,</code><code class="s1">'10.124.33.5'</code><code class="p">,</code><code class="mi">3306</code><code class="p">)</code><code class="p">;</code></strong><code>
+</code><code class="n">proxysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">INSERT</code><code> </code><code class="k">INTO</code><code> </code><code class="nf">mysql_servers</code><code class="p">(</code><code class="n">hostgroup_id</code><code class="p">,</code><code> </code><code class="n">hostname</code><code class="p">,</code><code> </code><code class="n">port</code><code class="p">)</code></strong><code>
+       </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="k">VALUES</code><code> </code><code class="p">(</code><code class="mi">11</code><code class="p">,</code><code class="s1">'10.124.33.169'</code><code class="p">,</code><code class="mi">3306</code><code class="p">)</code><code class="p">;</code></strong><code>
+</code><code class="n">proxysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">INSERT</code><code> </code><code class="k">INTO</code><code> </code><code class="nf">mysql_servers</code><code class="p">(</code><code class="n">hostgroup_id</code><code class="p">,</code><code> </code><code class="n">hostname</code><code class="p">,</code><code> </code><code class="n">port</code><code class="p">)</code></strong><code>
+       </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="k">VALUES</code><code> </code><code class="p">(</code><code class="mi">11</code><code class="p">,</code><code class="s1">'10.124.33.130'</code><code class="p">,</code><code class="mi">3306</code><code class="p">)</code><code class="p">;</code></strong><code>
+</code><code class="n">proxysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">LOAD</code><code> </code><code class="n">MYSQL</code><code> </code><code class="n">SERVERS</code><code> </code><code class="k">TO</code><code> </code><code class="n">RUNTIME</code><code class="p">;</code></strong><code>
+</code><code class="n">proxysql</code><code class="o">&gt;</code><code> </code><strong><code class="n">SAVE</code><code> </code><code class="n">MYSQL</code><code> </code><code class="n">SERVERS</code><code> </code><code class="k">TO</code><code> </code><code class="n">DISK</code><code class="p">;</code></strong></pre>
+
+<p>The next step is to define who our writer and reader groups. The servers present in the writer group will be able to receive DML operations, while <code>SELECT</code> queries will use the servers in the reader group. In this example, the host group 10 will be the writer, and  host group 11 will be the reader:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">proxysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">INSERT</code><code> </code><code class="k">INTO</code><code> </code><code class="n">mysql_replication_hostgroups</code></strong><code>
+       </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="p">(</code><code class="n">writer_hostgroup</code><code class="p">,</code><code> </code><code class="n">reader_hostgroup</code><code class="p">)</code><code> </code><code class="k">VALUES</code><code> </code><code class="p">(</code><code class="mi">10</code><code class="p">,</code><code> </code><code class="mi">11</code><code class="p">)</code><code class="p">;</code></strong><code>
+</code><code class="n">proxysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">LOAD</code><code> </code><code class="n">MYSQL</code><code> </code><code class="n">SERVERS</code><code> </code><code class="k">TO</code><code> </code><code class="n">RUNTIME</code><code class="p">;</code></strong><code>
+</code><code class="n">proxysql</code><code class="o">&gt;</code><code> </code><strong><code class="n">SAVE</code><code> </code><code class="n">MYSQL</code><code> </code><code class="n">SERVERS</code><code> </code><code class="k">TO</code><code> </code><code class="n">DISK</code><code class="p">;</code></strong></pre>
+
+<p>Next, ProxySQL must have users that can access backend nodes to manage connections. Let’s create the user on the backend source server:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">CREATE</code><code> </code><code class="n">USER</code><code> </code><code class="s1">'app'</code><code class="o">@</code><code class="s1">'%'</code><code> </code><code class="n">IDENTIFIED</code><code> </code><code class="k">by</code><code> </code><code class="s1">'$3Kr$t'</code><code class="p">;</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">GRANT</code><code> </code><code class="k">ALL</code><code> </code><code class="n">PRIVILEGES</code><code> </code><code class="k">ON</code><code> </code><code class="o">*</code><code class="p">.</code><code class="o">*</code><code> </code><code class="k">TO</code><code> </code><code class="s1">'app'</code><code class="o">@</code><code class="s1">'%'</code><code class="p">;</code></strong></pre>
+
+<p>And now we will configure ProxySQL with the user:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">proxysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">INSERT</code><code> </code><code class="k">INTO</code><code> </code><code class="nf">mysql_users</code><code> </code><code class="p">(</code><code class="n">username</code><code class="p">,</code><code class="n">password</code><code class="p">,</code><code class="n">default_hostgroup</code><code class="p">)</code></strong><code>
+       </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="k">VALUES</code><code> </code><code class="p">(</code><code class="s1">'app'</code><code class="p">,</code><code class="s1">'$3Kr$t'</code><code class="p">,</code><code class="mi">10</code><code class="p">)</code><code class="p">;</code></strong><code>
+</code><code class="n">proxysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">LOAD</code><code> </code><code class="n">MYSQL</code><code> </code><code class="n">USERS</code><code> </code><code class="k">TO</code><code> </code><code class="n">RUNTIME</code><code class="p">;</code></strong><code>
+</code><code class="n">proxysql</code><code class="o">&gt;</code><code> </code><strong><code class="n">SAVE</code><code> </code><code class="n">MYSQL</code><code> </code><code class="n">USERS</code><code> </code><code class="k">TO</code><code> </code><code class="n">DISK</code><code class="p">;</code></strong></pre>
+
+<p>The next step is the most exciting because it is here that we define the rules. The rules will tell ProxySQL where to send write and read queries, balancing the load on the servers:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">proxysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">INSERT</code><code> </code><code class="k">INTO</code><code> </code><code class="n">mysql_query_rules</code></strong><code>
+       </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="p">(</code><code class="n">rule_id</code><code class="p">,</code><code class="n">username</code><code class="p">,</code><code class="n">destination_hostgroup</code><code class="p">,</code><code class="n">active</code><code class="p">,</code><code class="n">match_digest</code><code class="p">,</code><code class="n">apply</code><code class="p">)</code></strong><code>
+       </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="k">VALUES</code><code class="p">(</code><code class="mi">1</code><code class="p">,</code><code class="s1">'app'</code><code class="p">,</code><code class="mi">10</code><code class="p">,</code><code class="mi">1</code><code class="p">,</code><code class="s1">'^SELECT.*FOR UPDATE'</code><code class="p">,</code><code class="mi">1</code><code class="p">)</code><code class="p">;</code></strong><code>
+</code><code class="n">proxysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">INSERT</code><code> </code><code class="k">INTO</code><code> </code><code class="n">mysql_query_rules</code></strong><code>
+       </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="p">(</code><code class="n">rule_id</code><code class="p">,</code><code class="n">username</code><code class="p">,</code><code class="n">destination_hostgroup</code><code class="p">,</code><code class="n">active</code><code class="p">,</code><code class="n">match_digest</code><code class="p">,</code><code class="n">apply</code><code class="p">)</code></strong><code>
+       </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="k">VALUES</code><code class="p">(</code><code class="mi">2</code><code class="p">,</code><code class="s1">'app'</code><code class="p">,</code><code class="mi">11</code><code class="p">,</code><code class="mi">1</code><code class="p">,</code><code class="s1">'^SELECT '</code><code class="p">,</code><code class="mi">1</code><code class="p">)</code><code class="p">;</code></strong><code>
+</code><code class="n">proxysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">LOAD</code><code> </code><code class="n">MYSQL</code><code> </code><code class="n">QUERY</code><code> </code><code class="n">RULES</code><code> </code><code class="k">TO</code><code> </code><code class="n">RUNTIME</code><code class="p">;</code></strong><code>
+</code><code class="n">proxysql</code><code class="o">&gt;</code><code> </code><strong><code class="n">SAVE</code><code> </code><code class="n">MYSQL</code><code> </code><code class="n">QUERY</code><code> </code><code class="n">RULES</code><code> </code><code class="k">TO</code><code> </code><code class="n">DISK</code><code class="p">;</code></strong></pre>
+
+<p>ProxySQL has a thread responsible for connecting on each server listed in the <code>mysql_servers</code> table and checking the value of the <code>read_only</code> variable. Suppose the replica is showing up in the writer group, like this:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">proxysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">SELECT</code><code> </code><code class="o">*</code><code> </code><code class="k">FROM</code><code> </code><code class="n">mysql_servers</code><code class="p">;</code></strong></pre>
+
+<pre data-type="programlisting">+--------------+---------------+------+-----------+...
+| hostgroup_id | hostname      | port | gtid_port |...
++--------------+---------------+------+-----------+...
+| 10           | 10.124.33.5   | 3306 | 0         |...
+| 11           | 10.124.33.169 | 3306 | 0         |...
+| 11           | 10.124.33.130 | 3306 | 0         |...
++--------------+---------------+------+-----------+...
+...+--------------+---------------+------+-----------+
+...| status | weight | compression | max_connections |...
+...+--------+--------+-------------+-----------------+...
+...| ONLINE | 1      | 0           | 1000            |...
+...| ONLINE | 1      | 0           | 1000            |...
+...| ONLINE | 1      | 0           | 1000            |...
+...+--------+--------+-------------+-----------------+...
+...+---------------------+---------+----------------+---------+
+...| max_replication_lag | use_ssl | max_latency_ms | comment |
+...+---------------------+---------+----------------+---------+
+...| 0                   | 0       | 0              |         |
+...| 0                   | 0       | 0              |         |
+...| 0                   | 0       | 0              |         |
+...+---------------------+---------+----------------+---------+
+3 rows in set (0.00 sec)</pre>
+
+<p>Because we do not want ProxySQL writing data to the replica servers, which would cause data inconsistency, we need to set the <code>read_only</code> option in the replica servers, so these servers will serve only read queries.</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="kt">SET</code><code> </code><code class="n">GLOBAL</code><code> </code><code class="n">read_only</code><code class="o">=</code><code class="mi">1</code><code class="p">;</code></strong></pre>
+
+<p>Now we’re ready to use our application. Running the following command should return the hostname that ProxySQL connected from:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="err">$</code><code> </code><strong><code class="n">mysql</code><code> </code><code class="o">-</code><code class="n">uapp</code><code> </code><code class="o">-</code><code class="n">p</code><code class="s1">'$3Kr$t'</code><code> </code><code class="o">-</code><code class="n">h</code><code> </code><code class="mi">127</code><code class="p">.</code><code class="mi">0</code><code class="p">.</code><code class="mi">0</code><code class="p">.</code><code class="mi">1</code><code> </code><code class="o">-</code><code class="n">P</code><code> </code><code class="mi">6033</code><code> </code><code class="o">-</code><code class="n">e</code><code> </code><code class="s2">"select @@hostname;"</code></strong></pre>
+
+<pre data-type="programlisting">+-----------------------+
+| @@hostname            |
++-----------------------+
+| vinicius-grippa-node1 |
++-----------------------+</pre>
+
+<p>ProxySQL has a lot more features and flexibility than we’ve shown here; our goal in this section was just to present the tool so you’re aware of this option when deciding on an architecture.<a data-type="indexterm" data-startref="ch15-pro" id="idm46177445903896"/><a data-type="indexterm" data-startref="ch15-pro2" id="idm46177445903224"/></p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>As we mentioned when configuring replication in Chapter 13, we want to reinforce the idea that ProxySQL needs to reach the MySQL servers; otherwise, it won’t work.</p>
+</div>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="HAProxy Load Balancer"><div class="sect1" id="idm46177446643672">
+<h1>HAProxy Load Balancer</h1>
+
+<p><em>HAProxy</em> stands for High Availability Proxy, and it is a TCP/HTTP load balancer.<a data-type="indexterm" data-primary="load balancing" data-secondary="HAProxy load balancer" id="ch15-hap"/><a data-type="indexterm" data-primary="HAProxy load balancer" id="ch15-hap2"/><a data-type="indexterm" data-primary="Percona XtraDB Cluster" data-secondary="HAProxy load balancer" id="ch15-hap3"/> It distributes a workload across a set of servers to maximize performance and optimize resource usage.</p>
+
+<p>With the intent to expand your knowledge regarding MySQL architectures and different topologies, we will configure Percona XtraDB Cluster (Galera Cluster) with HAProxy in this section instead of a classic replication topology.</p>
+
+<p>The architecture options are similar to ProxySQL’s. HAProxy can be placed together with the application or in a middle layer. <a data-type="xref" href="#FIG-HAPROXY1">Figure 15-3</a> shows an example where HAProxy is placed on the same server as the application.</p>
+
+<figure><div id="FIG-HAPROXY1" class="figure">
+<img src="Images/lm2e_1503.png" alt="lm2e 1503" width="1243" height="991"/>
+<h6><span class="label">Figure 15-3. </span>HAProxy together with the application</h6>
+</div></figure>
+
+<p>And <a data-type="xref" href="#FIG-HAPROXY2">Figure 15-4</a> shows a topology with HAProxy in a middle layer.</p>
+
+<p>Again, these are archictectures with different pros and cons. While in the first one we do not have an extra hop (which reduces latency), we add extra load to the application server. Also, you have to configure HAProxy on each application server.</p>
+
+<p>On the other hand, having HAProxy in the middle layer facilitates managing it and increases availability, because the application can connect to any HAProxy server. However, the extra hop adds latency.</p>
+
+<figure><div id="FIG-HAPROXY2" class="figure">
+<img src="Images/lm2e_1504.png" alt="lm2e 1504" width="920" height="991"/>
+<h6><span class="label">Figure 15-4. </span>HAProxy in a middle layer running in dedicated servers</h6>
+</div></figure>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Installing and Configuring HAProxy"><div class="sect2" id="idm46177445875384">
+<h2>Installing and Configuring HAProxy</h2>
+
+<p>Common operating systems such as Red Hat/CentOS and Debian/Ubuntu provide the HAProxy package, and you can install it using the package manager. The installation process is relatively easy.</p>
+
+<p>For Debian or Ubuntu, use these commands:</p>
+
+<pre data-type="programlisting"># <strong>apt update</strong>
+# <strong>apt install haproxy</strong></pre>
+
+<p>For Red Hat or CentOS, use:</p>
+
+<pre data-type="programlisting"># <strong>sudo yum update</strong>
+# <strong>sudo yum install haproxy</strong></pre>
+
+<p>When installed, HAProxy will set the default path for the configuration file as <em>/etc/haproxy/haproxy.cfg</em>.</p>
+
+<p>Before starting HAProxy, we need to configure it. For this demonstration, in our first scenario HAProxy will be located on the same server as the application. Here are the IPs of our three-node Galera Cluster:</p>
+
+<pre data-type="programlisting">172.16.3.45/Port:3306
+172.16.1.72/Port:3306
+172.16.0.161/Port:3306</pre>
+
+<p>Let’s open our <em>/etc/haproxy/haproxy.cfg</em> file and look at it. There are many parameters to customize, split into three sections:</p>
+<dl>
+<dt><code>global</code></dt>
+<dd>
+<p>A section in the configuration file for process-wide parameters</p>
+</dd>
+<dt><code>defaults</code></dt>
+<dd>
+<p>A section in the configuration file for default parameters</p>
+</dd>
+<dt><code>listen</code></dt>
+<dd>
+<p>A section in the configuration file that defines a complete proxy, including its frontend and backend parts</p>
+</dd>
+</dl>
+
+<p><a data-type="xref" href="#TABLE-HAPROXY">Table 15-1</a> shows the basic HAProxy parameters.</p>
+<table id="TABLE-HAPROXY">
+<caption><span class="label">Table 15-1. </span>HAProxy options (with links to HAProxy documentation)</caption>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><p><a href="https://oreil.ly/Ej25a"><code>balance</code></a></p></td>
+<td><p>Defines the load balancing algorithm to be used in a backend.</p></td>
+</tr>
+<tr>
+<td><p><a href="https://oreil.ly/HRlC5"><code>clitimeout</code></a></p></td>
+<td><p>Sets the maximum inactivity time on the client side</p></td>
+</tr>
+<tr>
+<td><p><a href="https://oreil.ly/Hjwtm"><code>contimeout</code></a></p></td>
+<td><p>Sets the maximum time to wait for a connection attempt to a server to succeed</p></td>
+</tr>
+<tr>
+<td><p><a href="https://oreil.ly/75stw"><code>daemon</code></a></p></td>
+<td><p>Makes the process fork into background (recommended mode of operation)</p></td>
+</tr>
+<tr>
+<td><p><a href="https://oreil.ly/ikswS"><code>gid</code></a></p></td>
+<td><p>Changes the process’s group ID to <code><em>&lt;number&gt;</em></code></p></td>
+</tr>
+<tr>
+<td><p><a href="https://oreil.ly/ovcK5"><code>log</code></a></p></td>
+<td><p>Adds a global syslog server</p></td>
+</tr>
+<tr>
+<td><p><a href="https://oreil.ly/94uQr"><code>maxconn</code></a></p></td>
+<td><p>Sets the maximum per-process number of concurrent connections to <code><em>&lt;number&gt;</em></code></p></td>
+</tr>
+<tr>
+<td><p><a href="https://oreil.ly/c3CaJ"><code>mode</code></a></p></td>
+<td><p>Set the running mode or protocol of the instance</p></td>
+</tr>
+<tr>
+<td><p><a href="https://oreil.ly/DplEm"><code>option dontlognull</code></a></p></td>
+<td><p>Disable logging of null connections</p></td>
+</tr>
+<tr>
+<td><p><a href="https://oreil.ly/BA2mL"><code>optiontcplog</code></a></p></td>
+<td><p>Enables advanced logging of TCP connections with session state and timers</p></td>
+</tr>
+</tbody>
+</table>
+
+<p>To make HAProxy work, we will use the following configuration file based on our settings:</p>
+
+<pre data-type="programlisting">global
+    log /dev/log   local0
+    log /dev/log   local1 notice
+    maxconn 4096
+    #debug
+    #quiet
+    chroot      /var/lib/haproxy
+    pidfile     /var/run/haproxy.pid
+    user        haproxy
+    group       haproxy
+    daemon
+
+    # turn on stats unix socket
+    stats socket /var/lib/haproxy/stats
+
+#---------------------------------------------------------------------
+# common defaults that all the 'listen' and 'backend' sections will
+# use if not designated in their block
+#---------------------------------------------------------------------
+defaults
+     log     global
+     mode    http
+     option  tcplog
+     option  dontlognull
+     retries 3
+     redispatch
+     maxconn 2000
+     contimeout      5000
+     clitimeout      50000
+     srvtimeout      50000
+
+#---------------------------------------------------------------------
+# round robin balancing between the various backends
+#---------------------------------------------------------------------
+listen mysql-pxc-cluster 0.0.0.0:3307
+     mode tcp
+     bind *:3307
+     timeout client  10800s
+     timeout server  10800s
+     balance roundrobin
+     option httpchk
+
+     server vinicius-grippa-node2 172.16.0.161:3306 check port 9200
+     inter 12000 rise 3 fall 3
+     server vinicius-grippa-node1 172.16.1.72:3306 check port 9200 inter 12000
+
+     rise 3 fall 3
+     server vinicius-grippa-default 172.16.3.45:3306 check port 9200
+     inter 12000 rise 3 fall 3</pre>
+
+<p>To start HAProxy, we use the <code>haproxy</code> command. We can pass any number of configuration parameters on the command line. To use a configuration file, use the 
+<span class="keep-together"><code>-f</code></span> option. For example, we can pass one configuration file:</p>
+
+<pre data-type="programlisting"># <strong>sudo haproxy -f /etc/haproxy/haproxy.cfg</strong></pre>
+
+<p>or multiple configuration files:</p>
+
+<pre data-type="programlisting"># <strong>sudo haproxy -f /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy-2.cfg</strong></pre>
+
+<p>or a directory:</p>
+
+<pre data-type="programlisting"># <strong>sudo haproxy -f conf-dir</strong></pre>
+
+<p>With this configuration, HAProxy will balance the load between three nodes. In this case, it checks only if the <code>mysqld</code> process is listening on port 3306, but doesn’t take into account the state of the node. So, it could be sending queries to a node that has <code>mysqld</code> running even if it’s in the <code>JOINING</code> or <code>DISCONNECTED</code> state.</p>
+
+<p>To check the current status of a node, we need something a little more complex. This idea was taken from <a href="https://oreil.ly/7xj0N">Codership’s Google group</a>.</p>
+
+<p>To implement this setup, we will need two scripts:</p>
+
+<ul>
+<li>
+<p><code>clustercheck</code>, located in <em>/usr/local/bin</em> and a config for <code>xinetd</code></p>
+</li>
+<li>
+<p><code>mysqlchk</code>, located in <em>/etc/xinetd.d</em> on each node</p>
+</li>
+</ul>
+
+<p><a href="https://oreil.ly/iN1La">Both scripts are available</a> in binaries and source distributions of Percona XtraDB.</p>
+
+<p>Change the <em>/etc/services</em> file by adding the following line for each node:</p>
+
+<pre data-type="programlisting">mysqlchk        9200/tcp                # mysqlchk</pre>
+
+<p>If the <em>/etc/services</em> file does not exist, it’s likely that <code>xinetd</code> is not installed.</p>
+
+<p>To install it for CentOS/Red Hat, use:</p>
+
+<pre data-type="programlisting"># <strong>yum install -y xinetd</strong></pre>
+
+<p>For Debian/Ubuntu, use:</p>
+
+<pre data-type="programlisting"># <strong>sudo apt-get install -y xinetd</strong></pre>
+
+<p>Next, we need to create a MySQL user so the script can check if the node is healthy. Ideally, for security reasons, this user should have the minimum privileges required:</p>
+<pre data-type="programlisting">
+mysql&gt; <strong>CREATE USER 'clustercheckuser'@'localhost' IDENTIFIED BY
+               'clustercheckpassword!';</strong>
+    -&gt; <strong>GRANT PROCESS ON *.* TO 'clustercheckuser'@'localhost';</strong>
+</pre>
+
+<p>To validate how our node is performing on the health check, we can run the following command and observe the output:</p>
+
+<pre data-type="programlisting"># <strong>/usr/bin/clustercheck</strong></pre>
+
+<pre data-type="programlisting">HTTP/1.1 200 OK
+Content-Type: text/plain
+Connection: close
+Content-Length: 40
+
+Percona XtraDB Cluster Node is synced.</pre>
+
+<p>If we do this for all nodes, we will be ready to test whether our HAProxy setup is working. The easiest way to do this is to connect to it and execute some MySQL 
+<span class="keep-together">commands.</span> Let’s run a command that retrieves the hostname from which we are 
+<span class="keep-together">connected:</span></p>
+
+<pre data-type="programlisting"># <strong>mysql -uroot -psecret -h 127.0.0.1 -P 3307 -e "select @@hostname"</strong></pre>
+
+<pre data-type="programlisting" class="less_space pagebreak-before">+-----------------------+
+| @@hostname            |
++-----------------------+
+| vinicius-grippa-node1 |
++-----------------------+</pre>
+
+<p>Running this a second time gives us:</p>
+
+<pre data-type="programlisting">$ <strong>mysql -uroot -psecret -h 127.0.0.1 -P 3307 -e "select @@hostname"</strong></pre>
+
+<pre data-type="programlisting">mysql: [Warning] Using a password on the command line interface can be
+insecure.
++-----------------------+
+| @@hostname            |
++-----------------------+
+| vinicius-grippa-node2 |
++-----------------------+</pre>
+
+<p>And the third time we get:</p>
+
+<pre data-type="programlisting">$ <strong>mysql -uroot -psecret -h 127.0.0.1 -P 3307 -e "select @@hostname"</strong></pre>
+
+<pre data-type="programlisting">mysql: [Warning] Using a password on the command line interface can be
+insecure.
++-------------------------+
+| @@hostname              |
++-------------------------+
+| vinicius-grippa-default |
++-------------------------+</pre>
+
+<p>As you can see, our HAProxy is connecting in a round-robin fashion. If we shut down one of the nodes, HAProxy will route only to the remaining ones.<a data-type="indexterm" data-startref="ch15-hap" id="idm46177445801048"/><a data-type="indexterm" data-startref="ch15-hap2" id="idm46177445800344"/><a data-type="indexterm" data-startref="ch15-hap3" id="idm46177445799672"/></p>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="MySQL Router"><div class="sect1" id="MYSQL_ROUTER">
+<h1>MySQL Router</h1>
+
+<p>MySQL Router is responsible for distributing the traffic between members of an InnoDB cluster.<a data-type="indexterm" data-primary="load balancing" data-secondary="MySQL Router" id="ch15rou"/><a data-type="indexterm" data-primary="MySQL Router" id="ch15rou2"/><a data-type="indexterm" data-primary="InnoDB Cluster and MySQL Router" id="ch15rou3"/> It is a proxy-like solution to hide the cluster topology from applications, so applications don’t need to know which member of a cluster is the primary node and which are secondaries. Note that MySQL Router will <em>not</em> work with Galera Clusters; it was developed for <em>InnoDB Cluster only</em>.</p>
+
+<p>MySQL Router is capable of performing read/write splitting by exposing different interfaces. A common setup is to have one read/write interface and one read-only interface. This is the default behavior that also exposes two similar interfaces to use the X Protocol (used for CRUD operations and async calls).</p>
+
+<p>The read/write split is done using the concept of <em>roles</em>: primary for writes and secondary for read-only. This is analogous to how members of cluster are named. Additionally, each interface is exposed via a TCP port so applications only need to know the IP:port combination used for writes and the one used for reads. Then MySQL Router will take care of connections to cluster members depending on the type of traffic to the server.</p>
+
+<p>When working in a production environment, the MySQL server instances that make up an InnoDB Cluster run on multiple host machines as part of a network rather than on single machine. So, as with ProxySQL and HAProxy, the MySQL router can be a middle layer in the architecture.</p>
+
+<p><a data-type="xref" href="#FIG-MYSQL-ROUTER-ARCH">Figure 15-5</a> illustrates how the production scenario works.</p>
+
+<figure><div id="FIG-MYSQL-ROUTER-ARCH" class="figure">
+<img src="Images/lm2e_1505.png" alt="lm2e 1505" width="681" height="809"/>
+<h6><span class="label">Figure 15-5. </span>MySQL InnoDB Cluster production deployment</h6>
+</div></figure>
+
+<p>Now, to start our example, let’s take a look at the MySQL members that are part of the InnoDB Cluster:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">SELECT</code><code> </code><code class="n">member_host</code><code class="p">,</code><code> </code><code class="n">member_port</code><code class="p">,</code><code> </code><code class="n">member_state</code><code class="p">,</code><code> </code><code class="n">member_role</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="k">FROM</code><code> </code><code class="n">performance_schema</code><code class="p">.</code><code class="n">replication_group_members</code><code class="p">;</code></strong></pre>
+
+<pre data-type="programlisting">+--------------+-------------+--------------+-------------+
+| member_host  | member_port | member_state | member_role |
++--------------+-------------+--------------+-------------+
+| 172.16.3.9   |        3306 | ONLINE       | SECONDARY   |
+| 172.16.3.127 |        3306 | ONLINE       | SECONDARY   |
+| 172.16.3.120 |        3306 | ONLINE       | PRIMARY     |
++--------------+-------------+--------------+-------------+
+3 rows in set (0.00 sec)</pre>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">SELECT</code><code> </code><code class="n">cluster_name</code><code> </code><code class="k">FROM</code><code> </code><code class="n">mysql_innodb_cluster_metadata</code><code class="p">.</code><code class="n">clusters</code><code class="p">;</code></strong></pre>
+
+<pre data-type="programlisting" class="less_space pagebreak-before">+--------------+
+| cluster_name |
++--------------+
+| cluster1     |
++--------------+
+1 row in set (0.00 sec)</pre>
+
+<p>Now that we have the configuration of the MySQL nodes and the cluster name, we can start configuring MySQL Router. For performance purposes it’s recommended to set up MySQL Router in the same place as the application, supposing we have an instance per application server, so we will place our router on the application server. First, we are going to identify the version of MySQL Router compatible with our OS:</p>
+
+<pre data-type="programlisting"># <strong>cat /etc/*release</strong></pre>
+
+<pre data-type="programlisting">CentOS Linux release 7.9.2009 (Core)</pre>
+
+<p>Now, we will check the <a href="https://oreil.ly/eCH08">download page</a> and install it using <code>yum</code>:</p>
+
+<pre data-type="programlisting"># <strong>yum install -y https://dev.mysql.com/get/Downloads/MySQL-Router/mysql-</strong></pre>
+
+<pre data-type="programlisting">router-community-8.0.23-1.el7.x86_64.rpm
+Loaded plugins: fastestmirror
+mysql-router-community-8.0.23-1.el7.x86_64.rpm                                                                                                                                           |  34 MB  00:00:01
+Examining /var/tmp/yum-root-_ljdTQ/mysql-router-community-8.0.23-1.el7.x
+86_64.rpm: mysql-router-community-8.0.23-1.el7.x86_64
+Marking /var/tmp/yum-root-_ljdTQ/mysql-router-community-8.0.23-1.el7.x86
+_64.rpm to be installed
+Resolving Dependencies
+--&gt; Running transaction check
+...
+Running transaction
+  Installing : mysql-router-community-8.0.23-1.el7.x86_64
+  1/1
+  Verifying  : mysql-router-community-8.0.23-1.el7.x86_64
+  1/1
+
+Installed:
+  mysql-router-community.x86_64 0:8.0.23-1.el7
+
+Complete!</pre>
+
+<p>Now that MySQL Router is installed, we need to create a dedicated directory for its operation:</p>
+
+<pre data-type="programlisting"># <strong>mkdir /var/lib/mysqlrouter</strong></pre>
+
+<p>Next, we are going to bootstrap MySQL Router. The bootstrap will configure the router for operation with a MySQL InnoDB Cluster:</p>
+
+<pre data-type="programlisting"># <strong>mysqlrouter --bootstrap root@172.16.3.120:3306 \</strong>
+    <strong>--directory /var/lib/mysqlrouter --conf-use-sockets \</strong>
+    <strong>--account app_router --account-create always \</strong>
+    <strong>--user=mysql</strong></pre>
+
+<pre data-type="programlisting">Please enter MySQL password for root:
+# Bootstrapping MySQL Router instance at '/var/lib/mysqlrouter'...
+
+Please enter MySQL password for app_router:
+- Creating account(s)
+- Verifying account (using it to run SQL queries that would be run by
+Router)
+- Storing account in keyring
+- Adjusting permissions of generated files
+- Creating configuration /var/lib/mysqlrouter/mysqlrouter.conf
+
+...
+
+## MySQL Classic protocol
+
+- Read/Write Connections: localhost:6446, /var/lib/mysqlrouter/mysql.sock
+- Read/Only Connections:  localhost:6447,
+/var/lib/mysqlrouter/mysqlro.sock
+
+## MySQL X protocol
+
+- Read/Write Connections: localhost:64460,
+/var/lib/mysqlrouter/mysqlx.sock
+- Read/Only Connections:  localhost:64470,
+/var/lib/mysqlrouter/mysqlxro.sock</pre>
+
+<p>In the command line, we are telling the router to connect with the user <code>root</code>, in our primary server (<code>172.16.3.120</code>), at port 3306. We are also telling the router to create a socket file so we can connect using it. Finally, we are creating a new user (<code>app_router</code>) to use in our application.</p>
+
+<p>Let’s have a look at the contents that the bootstrap process created in our configuration directory (<em>/var/lib/mysqlrouter</em>):</p>
+
+<pre data-type="programlisting"># <strong>ls -l | awk '{print $9}'</strong></pre>
+
+<pre data-type="programlisting">data
+log
+mysqlrouter.conf
+mysqlrouter.key
+run
+start.sh
+stop.sh</pre>
+
+<p>A generated MySQL Router configuration file (<em>mysqlrouter.conf</em>) looks similar to this:</p>
+
+<pre data-type="programlisting"># <strong>cat mysqlrouter.conf</strong></pre>
+
+<pre data-type="programlisting"># File automatically generated during MySQL Router bootstrap
+[DEFAULT]
+user=mysql
+logging_folder=/var/lib/mysqlrouter/log
+runtime_folder=/var/lib/mysqlrouter/run
+
+...
+
+[rest_routing]
+require_realm=default_auth_realm
+
+[rest_metadata_cache]
+require_realm=default_auth_realm</pre>
+
+<p>In this example, MySQL Router configured four ports (two ports to read/write using the regular MySQL protocol, and two to read/write using the X Protocol) and four sockets. Ports are added by default, and sockets were added because we passed in <code>--conf-use-sockets</code>. The InnoDB Cluster named <code>cluster1</code> is the source of the metadata, and the destinations are using the InnoDB Cluster metadata cache to dynamically configure host information.</p>
+
+<p>By executing the <em>start.sh</em> script we can start the MySQL router daemon:</p>
+
+<pre data-type="programlisting"># <strong>./start.sh</strong></pre>
+
+<pre data-type="programlisting"># PID 1684 written to '/var/lib/mysqlrouter/mysqlrouter.pid'
+logging facility initialized, switching logging to loggers specified in
+configuration</pre>
+
+<p>Now, we can observe the process running:</p>
+
+<pre data-type="programlisting"># <strong>ps -ef | grep -i mysqlrouter</strong></pre>
+
+<pre data-type="programlisting">root      1683     1  0 17:36 pts/0    00:00:00 sudo
+ROUTER_PID=/var/lib/mysqlrouter/mysqlrouter.pid /usr/bin/mysqlrouter -c
+/var/lib/mysqlrouter/mysqlrouter.conf --user=mysql
+mysql     1684  1683  0 17:36 pts/0    00:00:17 /usr/bin/mysqlrouter -c
+/var/lib/mysqlrouter/mysqlrouter.conf --user=mysql
+root      1733  1538  0 17:41 pts/0    00:00:00 grep --color=auto -i
+mysqlrouter</pre>
+
+<p>And the ports open:</p>
+
+<pre data-type="programlisting"># <strong>netstat -tulnp | grep -i mysqlrouter</strong></pre>
+
+<pre data-type="programlisting">tcp   0   0 0.0.0.0:64470   0.0.0.0:*   LISTEN   1684/mysqlrouter
+tcp   0   0 0.0.0.0:8443    0.0.0.0:*   LISTEN   1684/mysqlrouter
+tcp   0   0 0.0.0.0:64460   0.0.0.0:*   LISTEN   1684/mysqlrouter
+tcp   0   0 0.0.0.0:6446    0.0.0.0:*   LISTEN   1684/mysqlrouter
+tcp   0   0 0.0.0.0:6447    0.0.0.0:*   LISTEN   1684/mysqlrouter</pre>
+
+<p>We’ve configured MySQL Router with the InnoDB Cluster, so now we can test this with read and read/write connections. First, we will connect to the writer port (6446):</p>
+
+<pre data-type="programlisting"># <strong>mysql -uroot -psecret -h 127.0.0.1 -P 6446 \</strong>
+    <strong>-e "create database learning_mysql;"</strong>
+# <strong>mysql -uroot -psecret -h 127.0.0.1 -P 6446 \</strong>
+    <strong>-e "use learning_mysql; select database()"</strong></pre>
+
+<pre data-type="programlisting">+----------------+
+| database()     |
++----------------+
+| learning_mysql |
++----------------+</pre>
+
+<p>As you can see, it is possible to execute both reads and writes in the writer port.</p>
+
+<p>Now we will check the read port (6447) using a <code>SELECT</code> statement:</p>
+
+<pre data-type="programlisting"># <strong>mysql -uroot -psecret -h 127.0.0.1 -P 6447 \</strong>
+    <strong>-e "use learning_mysql; select database()"</strong></pre>
+
+<pre data-type="programlisting">+----------------+
+| database()     |
++----------------+
+| learning_mysql |
++----------------+</pre>
+
+<p>That’s working, but let’s try to execute a write:</p>
+
+<pre data-type="programlisting"># <strong>mysql -uroot -psecret -h 127.0.0.1 -P 6447 \</strong>
+    <strong>-e "create database learning_mysql_write;"</strong></pre>
+
+<pre data-type="programlisting">ERROR 1290 (HY000) at line 1: The MySQL server is running with the
+--super-read-only option so it cannot execute this statement</pre>
+
+<p>So, the read port only accepts reads. It is also possible to see the router load-balancing the reads:</p>
+
+<pre data-type="programlisting"># <strong>mysql -uroot -psecret -h 127.0.0.1 -P 6447 -e "select @@hostname"</strong></pre>
+
+<pre data-type="programlisting">+-----------------------+
+| @@hostname            |
++-----------------------+
+| vinicius-grippa-node1 |
++-----------------------+</pre>
+
+<pre data-type="programlisting"># <strong>mysql -uroot -psecret -h 127.0.0.1 -P 6447 -e "select @@hostname"</strong></pre>
+
+<pre data-type="programlisting">insecure.
++-----------------------+
+| @@hostname            |
++-----------------------+
+| vinicius-grippa-node2 |
++-----------------------+</pre>
+
+<p>In this way, if any downtime occurs in one of the MySQL nodes, MySQL Router will route the queries to the remaining active nodes.<a data-type="indexterm" data-startref="ch15rou" id="idm46177445667848"/><a data-type="indexterm" data-startref="ch15rou2" id="idm46177445667144"/><a data-type="indexterm" data-startref="ch15rou3" id="idm46177445666472"/></p>
+</div></section>
+
+
+
+
+
+
+
+</div></section></div></body></html>

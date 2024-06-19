@@ -1,0 +1,1930 @@
+<html><head></head><body><div id="sbo-rt-content"><section data-type="chapter" epub:type="chapter" data-pdf-bookmark="Chapter 10. Backups and Recovery"><div class="chapter" id="CH10_BACKUP">
+<h1><span class="label">Chapter 10. </span>Backups and Recovery</h1>
+
+
+<p>The most important task for any DBA is backing up the data.<a data-type="indexterm" data-primary="backups and recovery" data-secondary="about" id="idm46177452823496"/><a data-type="indexterm" data-primary="recovery of data" data-see="backups and recovery" id="idm46177452822440"/> Correct and tested backup and recovery procedures can save a company and thus a job. Mistakes happen, disasters happen, and errors happen. MySQL is a robust piece of software, but it’s not completely free of bugs or crashes. Thus, it is crucial to understand why and how to perform backups.</p>
+
+<p>Apart from preserving database contents, most backup methods can also be used for another important purpose: <a data-type="indexterm" data-primary="backups and recovery" data-secondary="replication" data-tertiary="about" id="idm46177452820552"/><a data-type="indexterm" data-primary="replication" data-secondary="backups for" data-tertiary="about" id="idm46177452819304"/>copying the contents of the database between separate systems. Though probably not as important as saving the day when corruption happens, this copying is a routine operation for the vast majority of database operators. Developers will often need to use downstream environments, which should be similar to production. QA staff may need a volatile environment with a lifespan of an hour. Analytics may be run on a dedicated host. Some of these tasks can be solved by replication, but any replica starts from a restored backup.</p>
+
+<p>This chapter first briefly reviews two major types of backups and discusses their fundamental properties. It then looks at some of the tools available in the MySQL world for the purpose of backup and recovery. Covering each and every tool and their parameters would be beyond the scope of this book, but by the end of the chapter you should know your way around backing up and recovering MySQL data. We’ll also explore some basic data transfer scenarios. Finally, the chapter outlines a robust backup architecture that you can use as a foundation for your work.</p>
+
+<p>An overview of what we think is a good backup strategy is given in <a data-type="xref" href="#CH10_BACKUP_PRIMER">“Database Backup Strategy Primer”</a>.  We believe it’s important to understand the tools and moving parts before deciding on the strategy, and therefore that section comes last.</p>
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Physical and Logical Backups"><div class="sect1" id="BACKUP-TYPES">
+<h1>Physical and Logical Backups</h1>
+
+<p>Broadly speaking, most if not all of the backup tools fit into just<a data-type="indexterm" data-primary="backups and recovery" data-secondary="physical backups" data-tertiary="about" id="idm46177452813128"/><a data-type="indexterm" data-primary="physical backups" data-secondary="about" id="idm46177452811800"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="logical backups" data-tertiary="about" id="ch10-log"/><a data-type="indexterm" data-primary="logical backups" data-secondary="about" id="ch10-log2"/> two wide categories: logical and physical. <em>Logical</em> backups operate on the internal structures: databases (schemas), tables, views, users, and other objects. <em>Physical</em> backups are concerned with the OS-side representation of the database structures: data files, transaction journals, and so on.</p>
+
+<p>It might be easier to explain with an example. Imagine backing up a single MyISAM table in MySQL database. As you will see later in this chapter, the InnoDB storage engine is more complex to back up correctly. Knowing that MyISAM is not transactional and that there are no ongoing writes to this table, we may go ahead and copy the files related to it. In doing so, we create a physical backup of the table. We could instead go ahead and run <code>SELECT</code> <code>*</code> and <code>SHOW CREATE TABLE</code> statements against this table and preserve the outputs of those statements somewhere. That’s a very basic form of a logical backup. Of course, these are just simple examples, and in reality the process of obtaining both types of backup will be more complex and nuanced. The conceptual differences between these imaginary backups can, however, be transferred and applied to any logical and physical backups.</p>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Logical Backups"><div class="sect2" id="idm46177452804136">
+<h2>Logical Backups</h2>
+
+<p>Logical backups are concerned with the <em>actual data</em>, and not<a data-type="indexterm" data-primary="queries" data-secondary="logical backups as" id="idm46177452802008"/> its <em>physical representation</em>. As you’ve already seen, such backups don’t copy any existing database files and instead rely on queries or other means to obtain needed database contents. The result is usually some textual representation, though that’s not granted, and a logical backup’s output may well be binary-encoded. Let’s see some more examples of how such backups might look and then discuss their properties.</p>
+
+<p>Here are some examples of logical backups:</p>
+
+<ul>
+<li>
+<p>Table data queried and saved into an external <em>.csv</em> file using the <code>SELECT ... INTO OUTFILE</code> statement that we cover in <a data-type="xref" href="ch07.xhtml#WRITECSV">“Writing Data into Comma-Delimited Files”</a>.</p>
+</li>
+<li>
+<p>A table or any other object’s definition saved as a SQL statement.</p>
+</li>
+<li>
+<p>One or more <code>INSERT</code> SQL statements that, run against a database and an empty table, would populate that table up to a preserved state.</p>
+</li>
+<li>
+<p>A recording of all statements ever run that touched a particular table or database and modified data or schema objects. By this we mean DML and DDL commands; you should be familiar with both types, covered in Chapters <a data-type="xref" data-xrefstyle="select:labelnumber" href="ch03.xhtml#CH3_BASICS">3</a> and
+<a data-type="xref" data-xrefstyle="select:labelnumber" href="ch04.xhtml#CH4_MODIFY">4</a></p>
+</li>
+</ul>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>That last example actually represents how both replication and point-in-time recovery work in MySQL. We tackle those topics later, and you’ll see that the term <em>logical</em> doesn’t just apply to 
+<span class="keep-together">backups.</span></p>
+</div>
+
+<p>Recovery of a logical backup is usually done by executing one<a data-type="indexterm" data-primary="logical backups" data-secondary="recovery" id="idm46177452787640"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="logical backups" data-tertiary="recovery" id="idm46177452786584"/> or more SQL statements. Continuing with our earlier examples, let’s review the options for recovery:</p>
+
+<ul>
+<li>
+<p>Data from a <em>.csv</em> file can be loaded into a table using the <code>LOAD DATA INFILE</code> 
+<span class="keep-together">command.</span></p>
+</li>
+<li>
+<p>The table can be created or re-created by running a DDL SQL statement.</p>
+</li>
+<li>
+<p><code>INSERT</code> SQL statements can be executed using the <code>mysql</code> CLI or any other client.</p>
+</li>
+<li>
+<p>A replay of all the statements run in a database will restore it to its state after the last statement.</p>
+</li>
+</ul>
+
+<p>Logical backups have some interesting properties that make them extremely useful in some situations. More often than not, a logical backup is some form of text file, consisting mostly of SQL statements. That is not necessary, however, and is not a defining property (albeit useful one). The process of creating logical backups also usually involves the execution of some queries. These are important features because they allow for a great degree of flexibility and portability.</p>
+
+<p>Logical backups are flexible because they make it very easy to back up a part of a database. For example, you can back up schema objects without their contents or easily back up only a few of the database’s tables. You can even back up part of a table’s data, which is usually impossible with physical backups. Once the backup file is ready, there are tools you can use to review and modify it either manually or automatically, which is something not easily done with copies of database files.</p>
+
+<p>Portability comes from the fact that logical backups can be<a data-type="indexterm" data-primary="portability" data-secondary="logical backups for" id="idm46177452776472"/> loaded easily into different versions of MySQL running on different operating systems and architectures. With some modification, you can actually load logical backups taken from one RDBMS into an absolutely different one. Most database migration tools use logical replication internally due to this fact. This property also makes this backup type suitable for backing up cloud-managed databases off-site, and for migrations between them.</p>
+
+<p>Another interesting property of logical backups is that they are effective in <a data-type="indexterm" data-primary="corruption of data" data-secondary="logical backups combating" id="idm46177452774456"/>combating <em>corruption</em>—that is, physical corruption of a physical data file. Errors in data can still be introduced, for example, by bugs in software or by gradual degradation of storage media. The topic of corruption and its counterpart, integrity, is very wide, but this brief explanation should suffice for now.</p>
+
+<p class="pagebreak-before">Once a data file becomes corrupted, a database might not be able to read data from it and serve the queries. Since corruption tends to happen silently, you might not know when it occurred. However, if a logical backup was generated without error, that means it’s sound and has good data. Corruption could happen in a <em>secondary index</em> (any non-primary index; see <a data-type="xref" data-xrefstyle="chap-num-title" href="ch04.xhtml#CH4_MODIFY">Chapter 4, <em>Working with Database Structures</em></a> for more details), so a logical backup doing a full table scan might generate normally and not face an error. In short, a logical backup can both help you detect corruption early (as it scans all tables) and help you save the data (as the last successful logical backup will have a sound copy).</p>
+
+<p>The inherent problem with all logical backups comes from the fact that they are created and restored by executing SQL statements against a running database system. While that allows for flexibility and portability, it also means that these backups result in load on the database and are generally quite slow. DBAs always frown when someone runs a query that reads all the data from a table indiscriminately, and that’s exactly what logical backup tools usually do. Similarly, the restore operation for a logical backup usually results in the interpreting and running of each statement as if it came from a regular client. This doesn’t mean that logical backups are bad or shouldn’t be used, but it’s a trade-off that must be remembered.<a data-type="indexterm" data-startref="ch10-log" id="idm46177452768408"/><a data-type="indexterm" data-startref="ch10-log2" id="idm46177452767704"/></p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Physical Backups"><div class="sect2" id="idm46177452803512">
+<h2>Physical Backups</h2>
+
+<p>Whereas logical backups are all about data as in database<a data-type="indexterm" data-primary="backups and recovery" data-secondary="physical backups" data-tertiary="about" id="idm46177452765464"/><a data-type="indexterm" data-primary="physical backups" data-secondary="about" id="idm46177452764104"/> contents, physical backups are all about data as in operating system files and internal RDBMS workings. Remember, in the example with a MyISAM table being backed up, a physical backup was a copy of the files representing that table. Most of the backups and tools of this type are concerned with copying and transferring all or parts of database files.</p>
+
+<p>Some examples of physical backups include the following:</p>
+
+<ul>
+<li>
+<p>A <em>cold</em> database directory copy, meaning it’s done when the<a data-type="indexterm" data-primary="cold database copies" id="idm46177452760536"/><a data-type="indexterm" data-primary="hot database copies" id="idm46177452759832"/> database is shut down (as opposed to a <em>hot</em> copy, done while the database is running).</p>
+</li>
+<li>
+<p>A storage snapshot of volumes and filesystems used by database.</p>
+</li>
+<li>
+<p>A copy of table data files.</p>
+</li>
+<li>
+<p>A stream of changes to database data files of some form. Most RDBMSs use a stream like this for crash recovery, and sometimes for replication; InnoDB’s redo log is a similar concept.</p>
+</li>
+</ul>
+
+<p>Recovery of a physical backup is usually done by copying back the files and making them consistent. Let’s review the recovery options for the previous examples:</p>
+
+<ul class="less_space pagebreak-before">
+<li>
+<p>A cold copy can be moved to a desired location or server and then used as a data directory by a MySQL instance, old or new.</p>
+</li>
+<li>
+<p>A snapshot can be restored in place or on another volume and then used by MySQL.</p>
+</li>
+<li>
+<p>Table files can be put in place of existing ones.</p>
+</li>
+<li>
+<p>A replay of the changes stream against the data files will recover their state to the last point in time.</p>
+</li>
+</ul>
+
+<p>Of these, the simplest physical backup that can be performed is a cold database directory backup. Yes, it’s simple and basic, but it’s a very powerful tool.</p>
+
+<p>Physical backups, unlike logical ones, are very rigid, giving little leeway in terms of control over what can be backed up and where the backup can be used. Generally speaking, most physical backups can only be used to restore the exact same state of a database or a table. Usually, these backups also put constraints on the target database software version and operating system. With some work, you can restore a logical backup from MySQL to PostgreSQL. However, a cold copy of the MySQL data directory done on Linux may not work if restored on Windows. Also, you cannot take a physical backup if you don’t have physical access to the database server. <a data-type="indexterm" data-primary="cloud databases" data-secondary="physical backup challenges" id="idm46177452748536"/>This means that performing such a backup on a managed database in the cloud is impossible: the vendor might be performing physical backups in the background, but you may not have a way to get them out.</p>
+
+<p>Since a physical backup is by nature a copy of all or a subset of<a data-type="indexterm" data-primary="corruption of data" data-secondary="physical backups carrying" id="idm46177452746808"/> the original backup pages, any corruption present in the original will be included in the backup. It’s important to remember that, because this property makes physical backups ill-suited for combating corruption.</p>
+
+<p>You may wonder why you would use such a seemingly inconvenient way of backing up. The reason is that physical backups are fast. Operating on the OS or even storage level, physical backup methods are sometimes the only possible way to actually back up a database. By way of example, a storage snapshot of a multiterabyte volume might take a few seconds or minutes, whereas querying and streaming that data for a logical backup might take hours or days. The same goes for recovery.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Overview of Logical and Physical Backups"><div class="sect2" id="idm46177452766440">
+<h2>Overview of Logical and Physical Backups</h2>
+
+<p>We’ve now covered the two categories of backups and are<a data-type="indexterm" data-primary="backups and recovery" data-secondary="logical backups" data-tertiary="about physical versus" id="idm46177452742840"/><a data-type="indexterm" data-primary="logical backups" data-secondary="about physical versus" id="idm46177452741512"/><a data-type="indexterm" data-primary="physical backups" data-secondary="about logical versus" id="idm46177452740568"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="physical backups" data-tertiary="about logical versus" id="idm46177452739624"/> ready to start exploring the actual tools used for these backups in the MySQL world. Before we do that, though, let’s summarize the differences between logical and physical backups and take a quick look at the properties of the tools used to create them.</p>
+
+<p class="pagebreak-before">Properties of logical backups:</p>
+
+<ul>
+<li>
+<p>Contain a description and the contents of the logical structures</p>
+</li>
+<li>
+<p>Are human-readable and editable</p>
+</li>
+<li>
+<p>Are relatively slow to take and restore</p>
+</li>
+</ul>
+
+<p>Logical backup tools are:</p>
+
+<ul>
+<li>
+<p>Very flexible, allowing you to rename objects, combine separate sources, perform partial restores, and more</p>
+</li>
+<li>
+<p>Not usually bound to a specific database version or platform</p>
+</li>
+<li>
+<p>Able to extract data from corrupted tables and safeguard from corruption</p>
+</li>
+<li>
+<p>Suitable for backing up remote databases (for example, in the cloud)</p>
+</li>
+</ul>
+
+<p>Properties of physical backups:</p>
+
+<ul>
+<li>
+<p>Are byte-by-byte copies of parts of data files, or entire filesystems/volumes</p>
+</li>
+<li>
+<p>Are fast to take and restore</p>
+</li>
+<li>
+<p>Offer little flexibility and will always result in the same structure upon restore</p>
+</li>
+<li>
+<p>Can include corrupted pages</p>
+</li>
+</ul>
+
+<p>Physical backup tools are:</p>
+
+<ul>
+<li>
+<p>Cumbersome to operate</p>
+</li>
+<li>
+<p>Usually don’t allow for an easy cross-platform or even cross-version portability</p>
+</li>
+<li>
+<p>Cannot back up remote databases without OS access</p>
+</li>
+</ul>
+<div data-type="tip"><h6>Tip</h6>
+<p>These are not conflicting approaches. In fact, a generally good idea is to perform both types of backups on a regular basis. They serve different purposes and satisfy different requirements.</p>
+</div>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Replication as a Backup Tool"><div class="sect1" id="idm46177452743912">
+<h1>Replication as a Backup Tool</h1>
+
+<p>Replication is a very wide topic that upcoming chapters cover in detail. In this section, we briefly discuss how replication relates<a data-type="indexterm" data-primary="backups and recovery" data-secondary="replication" data-tertiary="about" id="idm46177452718136"/><a data-type="indexterm" data-primary="replication" data-secondary="backups for" data-tertiary="about" id="idm46177452716888"/><a data-type="indexterm" data-primary="logical backups" data-secondary="replication" id="idm46177452715672"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="logical backups" data-tertiary="replication" id="idm46177452714728"/> to the concept of backing up and recovering a database.</p>
+
+<p>In brief, replication is not a substitute for taking backups. The specifics of  replications are such that they result in a full or partial copy of a target database. This lets you use replication in a lot of, but not all, possible failure scenarios involving MySQL. Let’s review two examples. They will be helpful later in the chapter as well.</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>In the MySQL world, replication is a type of logical backup. That’s because it’s based on transferring logical SQL statements.</p>
+</div>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Infrastructure Failure"><div class="sect2" id="idm46177452711144">
+<h2>Infrastructure Failure</h2>
+
+<p>Infrastructure is prone to failure: drives go bad, power goes out,<a data-type="indexterm" data-primary="replication" data-secondary="backups for" data-tertiary="infrastructure failure" id="idm46177452709640"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="replication" data-tertiary="infrastructure failure" id="idm46177452708312"/><a data-type="indexterm" data-primary="infrastructure failure and backups" id="idm46177452707096"/> fires happen. Almost no system can provide 100% uptime, and only vastly distributed ones can even get close. What that means is that eventually <em>any</em> database will crash due to its host server failing. In a good case, a restart might be enough to recover. In a bad case, part or all of the data may be gone.</p>
+
+<p>Restoring and recovering a backup is by no means an instantaneous operation. <a data-type="indexterm" data-primary="backups and recovery" data-secondary="replication" data-tertiary="switchover" id="idm46177452705176"/><a data-type="indexterm" data-primary="replication" data-secondary="backups for" data-tertiary="switchover" id="idm46177452703992"/><a data-type="indexterm" data-primary="switchover of replica database" id="idm46177452702776"/>In a replicated environment, a special operation called <em>switchover</em> can be performed to put a replica in place of the failed database. In many cases, switchover saves a lot of time and allows for work on a failed system to proceed without too much rush.</p>
+
+<p>Imagine a setup with two identical servers running MySQL. One is a dedicated primary, which receives all the connections and serves all the queries. The other one is a replica. There’s a mechanism to redirect connections to the replica, with switchover resulting in 5 minutes of downtime.</p>
+
+<p>One day, a hard disk drive goes bad in the primary server. It’s a simple server, so that alone results in a crash and downtime. Monitoring catches the issue, and the DBA immediately understands that to restore the database on that server, they’ll need to install a new disk and then restore and recover the recent backup. The whole operation will take a couple of hours.</p>
+
+<p>Switching over to a replica is a good idea in this case, because it saves a lot of valuable uptime.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Deployment Bug"><div class="sect2" id="CH10_BACKUP_FAILURE_DEPLOYMENT_BUG">
+<h2>Deployment Bug</h2>
+
+<p>Software bugs are a fact of life that has to be accepted. The<a data-type="indexterm" data-primary="backups and recovery" data-secondary="replication" data-tertiary="deployment bugs" id="idm46177452697272"/><a data-type="indexterm" data-primary="replication" data-secondary="backups for" data-tertiary="deployment bugs" id="idm46177452695944"/><a data-type="indexterm" data-primary="deployment bugs and backups" id="idm46177452694728"/> more complex the system, the higher the possible incidence of logical errors. While we all strive to limit and reduce  bugs, we must understand that they will happen and plan accordingly.</p>
+
+<p>Imagine that a new version of an application is released that includes a database migration script. Even though both the new version and the script were tested in downstream environments, there’s a bug. Migration irrecoverably corrupts all customers’ last names that have “special” non-ASCII symbols. The corruption is silent, since the script finishes successfully, and the issue is noticed only a week later by an angry customer, whose name is now incorrect.</p>
+
+<p>Even though there’s a replica of the production database, it has the same data and the same logical corruption. Switching over to the replica <em>won’t</em> help in this case, and a backup taken prior to the migration must be restored to obtain a list of correct last names.</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>Delayed replicas can protect you in such situations, but the<a data-type="indexterm" data-primary="replication" data-secondary="backups for" data-tertiary="delayed replicas" id="idm46177452690712"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="replication" data-tertiary="delayed replicas" id="idm46177452689384"/> longer the delay, the less practical it is to operate such a replica. You can create a replica with a delay of a week, but you may need data from an hour ago. Usually, replica delays are measured in minutes and hours.</p>
+</div>
+
+<p>The two failure scenarios just discussed cover two distinct domains: physical and logical. Replication is a good fit for protection in case of physical issues, whereas it provides no (or little) protection from logical issues. Replication is a useful tool, but it’s no substitute for backups.</p>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="The mysqldump Program"><div class="sect1" id="CH10_BACKUP_MYSQLDUMP">
+<h1>The mysqldump Program</h1>
+
+<p>Possibly the simplest way to back up a database online is to<a data-type="indexterm" data-primary="backups and recovery" data-secondary="mysqldump" id="ch10-msq"/><a data-type="indexterm" data-primary="mysqldump" data-secondary="backups via" id="ch10-msq2"/><a data-type="indexterm" data-primary="logical backups" data-secondary="mysqldump" id="idm46177452681176"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="logical backups" data-tertiary="mysqldump" id="ch10-msq3"/><a data-type="indexterm" data-primary="dumping a database" id="idm46177452678744"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="mysqldump" data-tertiary="dumping a database" id="idm46177452678072"/><a data-type="indexterm" data-primary="mysqldump" data-secondary="dumping a database" id="idm46177452676856"/><a data-type="indexterm" data-primary="mysql database dump" id="idm46177452675912"/> dump its contents as SQL statements. This is the paramount logical backup type. <em>Dumping</em> in computing usually means outputting the contents of some system or its parts, and the result is a <em>dump</em>. In the database world, a dump is usually a logical backup, and dumping is the action of obtaining such a backup. Restoring the backup involves applying the statements to the database. You can generate dumps manually using, for example, <code>SHOW CREATE TABLE</code> and some <code>CONCAT</code> operations to get <code>INSERT</code> statements from data rows in the tables, like this:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">SHOW</code><code> </code><code class="k">CREATE</code><code> </code><code class="k">TABLE</code><code> </code><code class="n">sakila</code><code class="p">.</code><code class="n">actor</code><code class="err">\</code><code class="n">G</code></strong></pre>
+
+<pre data-type="programlisting">*************************** 1. row ***************************
+       Table: actor
+Create Table: CREATE TABLE `actor` (
+  `actor_id` smallint unsigned NOT NULL AUTO_INCREMENT,
+  `first_name` varchar(45) NOT NULL,
+  `last_name` varchar(45) NOT NULL,
+  `last_update` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`actor_id`),
+  KEY `idx_actor_last_name` (`last_name`)
+) ENGINE=InnoDB AUTO_INCREMENT=201 DEFAULT CHARSET=utf8mb4
+        COLLATE=utf8mb4_0900_ai_ci
+1 row in set (0.00 sec)</pre>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">SELECT</code><code> </code><code class="nf">CONCAT</code><code class="p">(</code><code class="s2">"INSERT INTO actor VALUES"</code><code class="p">,</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="s2">"("</code><code class="p">,</code><code class="n">actor_id</code><code class="p">,</code><code class="s2">",'"</code><code class="p">,</code><code class="n">first_name</code><code class="p">,</code><code class="s2">"','"</code><code class="p">,</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="n">last_name</code><code class="p">,</code><code class="s2">"','"</code><code class="p">,</code><code class="n">last_update</code><code class="p">,</code><code class="s2">"');"</code><code class="p">)</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="k">AS</code><code> </code><code class="n">insert_statement</code><code> </code><code class="k">FROM</code><code> </code><code class="n">actor</code><code> </code><code class="k">LIMIT</code><code> </code><code class="mi">1</code><code class="err">\</code><code class="n">G</code></strong></pre>
+
+<pre data-type="programlisting">*************************** 1. row ***************************
+insert_statement: INSERT INTO actor VALUES
+(1,'PENELOPE','GUINESS','2006-02-15 04:34:33');
+1 row in set (0.00 sec)</pre>
+
+<p>That, however, becomes extremely impractical very fast. Moreover, there are more things to consider: <em>order of statements</em>, so that upon restore an <code>INSERT</code> doesn’t run before the table is created, and <em>ownership</em> and <em>consistency</em>. Even though generating logical backups manually is good for understanding, it is tedious and error-prone. Fortunately, MySQL is bundled with a powerful logical backup tool called <code>mysqldump</code> that hides most of the complexity.</p>
+
+<p>The <code>mysqldump</code> program bundled with MySQL allows you to<a data-type="indexterm" data-primary="portability" data-secondary="mysqldump output" id="idm46177452592968"/><a data-type="indexterm" data-primary="mysqldump" data-secondary="cross-platform tool" id="idm46177452591992"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="mysqldump" data-tertiary="cross-platform tool" id="idm46177452591048"/> produce dumps from running database instances. The output of <code>mysqldump</code> is a number of SQL statements that can later be applied to the same or another instance of MySQL. <code>mysqldump</code> is a cross-platform tool, available on all the operating systems on which the MySQL server itself is available. As the resulting backup file is just a lot of text, it’s also platform-independent.</p>
+
+<p>The command-line arguments to <code>mysqldump</code> are numerous, so it is wise to <a data-type="indexterm" data-primary="mysqldump" data-secondary="reference online" id="idm46177452587880"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="mysqldump" data-tertiary="reference online" id="idm46177452558920"/><a data-type="indexterm" data-primary="web links in book" data-secondary="mysqldump documentation" id="idm46177452557832"/>review the <a href="https://oreil.ly/7T8dD">MySQL Reference Manual</a> before jumping into using the tool. However, the most basic scenario requires just one argument: the target database name.</p>
+<div data-type="tip"><h6>Tip</h6>
+<p>We recommend that you set up a <code>client</code> login path following the instructions in <a data-type="xref" href="ch09.xhtml#CH-OPTIONS-FILE-SPECIAL-LOGIN-PATH">“Login Path Configuration File”</a> to the <code>root</code> user and password. You then won’t need to specify an account and give its credentials to any of the commands we show in this chapter.</p>
+</div>
+
+<p>In the following example, <code>mysqldump</code> is invoked without output redirection, and the tool will print all the statements to standard output:</p>
+
+<pre data-type="programlisting">$ <strong>mysqldump sakila</strong></pre>
+
+<pre data-type="programlisting">...
+--
+-- Table structure for table `actor`
+--
+
+DROP TABLE IF EXISTS `actor`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `actor` (
+  `actor_id` smallint unsigned NOT NULL AUTO_INCREMENT,
+  `first_name` varchar(45) NOT NULL,
+  `last_name` varchar(45) NOT NULL,
+  `last_update` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`actor_id`),
+  KEY `idx_actor_last_name` (`last_name`)
+) ENGINE=InnoDB AUTO_INCREMENT=201 DEFAULT CHARSET=utf8mb4
+        COLLATE=utf8mb4_0900_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `actor`
+--
+
+LOCK TABLES `actor` WRITE;
+/*!40000 ALTER TABLE `actor` DISABLE KEYS */;
+INSERT INTO `actor` VALUES
+(1,'PENELOPE','GUINESS','2006-02-15 01:34:33'),
+(2,'NICK','WAHLBERG','2006-02-15 01:34:33'),
+...
+(200,'THORA','TEMPLE','2006-02-15 01:34:33');
+/*!40000 ALTER TABLE `actor` ENABLE KEYS */;
+UNLOCK TABLES;
+...</pre>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>The outputs of <code>mysqldump</code> are lengthy and ill-suited for printing in books. Here and elsewhere, the outputs are truncated to include only the lines we’re interested in.</p>
+</div>
+
+<p>You may notice that this output is more nuanced than you might expect. For example, there’s a <code>DROP TABLE IF EXISTS</code> statement, which prevents an error for the following <code>CREATE TABLE</code> command when the table already exists on the target. The <code>LOCK</code> and <code>UNLOCK TABLES</code> statements will improve data insertion performance, and so on.</p>
+
+<p>Speaking of schema structure, it is possible to generate a dump that has no data. This can be useful to create a logical clone of the database, for example, for a development environment. Flexibility like this is one of the key features of logical backups and <code>mysqldump</code>:</p>
+
+<pre data-type="programlisting">$ <strong>mysqldump --no-data sakila</strong></pre>
+
+<pre data-type="programlisting">...
+--
+-- Table structure for table `actor`
+--
+
+DROP TABLE IF EXISTS `actor`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `actor` (
+  `actor_id` smallint unsigned NOT NULL AUTO_INCREMENT,
+  `first_name` varchar(45) NOT NULL,
+  `last_name` varchar(45) NOT NULL,
+  `last_update` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`actor_id`),
+  KEY `idx_actor_last_name` (`last_name`)
+) ENGINE=InnoDB AUTO_INCREMENT=201 DEFAULT CHARSET=utf8mb4
+        COLLATE=utf8mb4_0900_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Temporary view structure for view `actor_info`
+--
+...</pre>
+
+<p>It’s also possible to create a dump of a single table in a database. In the next example, <code>sakila</code> is the database and <code>category</code> is the target table:</p>
+
+<pre data-type="programlisting">$ <strong>mysqldump sakila category</strong></pre>
+
+<p>Turning the flexibility up a notch, you can dump just a few rows from a table by specifying the <code>--where</code> or <code>-w</code> argument. As the name suggests, the syntax is the same as for the <code>WHERE</code> clause in a SQL statement:</p>
+
+<pre data-type="programlisting">$ <strong>mysqldump sakila actor --where="actor_id &gt; 195"</strong></pre>
+
+<pre data-type="programlisting">...
+--
+-- Table structure for table `actor`
+--
+
+DROP TABLE IF EXISTS `actor`;
+CREATE TABLE `actor` (
+...
+
+--
+-- Dumping data for table `actor`
+--
+-- WHERE:  actor_id &gt; 195
+
+LOCK TABLES `actor` WRITE;
+/*!40000 ALTER TABLE `actor` DISABLE KEYS */;
+INSERT INTO `actor` VALUES
+(196,'BELA','WALKEN','2006-02-15 09:34:33'),
+(197,'REESE','WEST','2006-02-15 09:34:33'),
+(198,'MARY','KEITEL','2006-02-15 09:34:33'),
+(199,'JULIA','FAWCETT','2006-02-15 09:34:33'),
+(200,'THORA','TEMPLE','2006-02-15 09:34:33');
+/*!40000 ALTER TABLE `actor` ENABLE KEYS */;
+UNLOCK TABLES;
+/*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;</pre>
+
+<p>The examples covered so far have only covered dumping all or part of a single database: <code>sakila</code>. Sometimes it’s necessary to output every database, every object, and even every user. <code>mysqldump</code> is capable of that. The following command will effectively create a full and complete logical backup of a database instance:</p>
+
+<pre data-type="programlisting">$ <strong>mysqldump --all-databases --triggers --routines --events &gt; dump.sql</strong></pre>
+
+<p>Triggers are dumped by default, so this option won’t appear in future command outputs. In the event you don’t want to dump triggers, you can use <code>--no-triggers</code>.</p>
+
+<p>There are a couple of problems with this command, however. First, even though we have redirected the output of the command to a file, the resulting file can be huge. Fortunately, its contents are likely going to be well suited for compression, though this depends on the actual data. Regardless, it’s a good idea to compress the output:<a data-type="indexterm" data-primary="mysqldump" data-secondary="compression" id="idm46177452531880"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="mysqldump" data-tertiary="compression" id="idm46177452530904"/></p>
+
+<pre data-type="programlisting">$ <strong>mysqldump --all-databases</strong> \
+<strong>--routines --events | gzip &gt; dump.sql.gz</strong></pre>
+
+<p>On Windows, compressing output through a pipe is difficult, so just compress the <em>dump.sql</em> file produced by running the previous command. On a system that is CPU-choked, like the little VM we’re using here, compression might add significant time to the backup process. That’s a trade-off that will have to be weighted for your particular 
+<span class="keep-together">system</span>:</p>
+
+<pre data-type="programlisting">$ <strong>time mysqldump --all-databases \
+--routines --events &gt; dump.sql</strong></pre>
+
+<pre data-type="programlisting">real    0m24.608s
+user    0m15.201s
+sys     0m2.691s</pre>
+
+<pre data-type="programlisting">$ <strong>time mysqldump --all-databases</strong> \
+<strong>--routines --events | gzip &gt; dump.sql.gz</strong></pre>
+
+<pre data-type="programlisting">real    2m2.769s
+user    2m4.400s
+sys     0m3.115s</pre>
+
+<pre data-type="programlisting">$ <strong>ls -lh dump.sql</strong></pre>
+
+<pre data-type="programlisting">-rw... 2.0G ... dump.sql
+-rw... 794M ... dump.sql.gz</pre>
+
+<p>The second problem is that to ensure consistency, locks will be placed on tables, preventing writes while a database is being dumped (writes to other databases can continue). This is bad both for performance and backup consistency. The resulting dump is consistent only within the database, not across the whole instance. This default behavior is necessary because some of the storage engines that MySQL uses are nontransactional (mainly the older MyISAM). <a data-type="indexterm" data-primary="InnoDB" data-secondary="multiversion concurrency control" id="idm46177452519544"/><a data-type="indexterm" data-primary="multiversion concurrency control (MVCC)" id="idm46177452518552"/><a data-type="indexterm" data-primary="InnoDB" data-secondary="transactions" data-tertiary="backups and" id="idm46177452517864"/>The default InnoDB storage engine, on the other hand, has a multiversion concurrency control (MVCC) model that allows maintenance of a <em>read snapshot</em>. We covered different storage engines in more depth in <a data-type="xref" href="ch07.xhtml#ADV2-SEC-STORAGEENGINES">“Alternative Storage Engines”</a>, and locking in <a data-type="xref" href="ch06.xhtml#CH6_TRANSACTION_LOCKING">Chapter 6</a>.</p>
+
+<p>Utilizing InnoDB’s transaction capabilities is possible by passing the <code>--single-transaction</code> command-line argument to <code>mysqldump</code>. However, that removes table locking, thus making nontransactional tables prone to inconsistencies during the dump. If your system uses, for example, both InnoDB and MyISAM tables, it may be necessary to dump them separately, if no interruption of writes and consistency are required.</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>Although <code>--single-transaction</code> ensures that writes can continue while <code>mysqldump</code> is running, there are still some caveats: DDL statements that are run concurrently might cause inconsistencies, and long-running transactions, such as one initiated by <code>mysqldump</code>, can have a <a href="https://oreil.ly/pH2pJ">negative impact on the overall instance performance</a>.</p>
+</div>
+
+<p>The basic command to make a dump of a system using mainly InnoDB tables, which guarantees limited impact on concurrent writes, is as follows:</p>
+
+<pre data-type="programlisting">$ <strong>mysqldump --single-transaction --all-databases</strong> \
+<strong>--routines --events | gzip &gt; dump.sql.gz</strong></pre>
+
+<p>In the real world, you will probably have some more arguments to specify connection options. You might also script around the <code>mysqldump</code> statement to catch any issues and notify you if anything went wrong.</p>
+
+<p>Dumping with <code>--all-databases</code> includes internal MySQL databases such as <code>mysql</code>, <code>sys</code>, and <code>information_schema</code>. That information is not always needed to restore your data and might cause problems when restoring into an instance that already has some databases. However, you should remember that MySQL user details will only be dumped as part of the <code>mysql</code> database.</p>
+
+<p>In general, using <code>mysqldump</code> and the logical backups it produces allows for the 
+<span class="keep-together">following:</span></p>
+
+<ul>
+<li>
+<p>Easy transfer of the data between environments.</p>
+</li>
+<li>
+<p>Editing of the data in place both by humans and programs. For example, you can delete personal or unnecessary data from the dump.</p>
+</li>
+<li>
+<p>Finding certain data file corruptions.</p>
+</li>
+<li>
+<p>Transfer of the data between major database versions, different platforms, and even databases.</p>
+</li>
+</ul>
+
+
+
+
+
+
+
+
+<section data-type="sect2" class="less_space pagebreak-before" data-pdf-bookmark="Bootstrapping Replication with mysqldump"><div class="sect2" id="MYSQLDUMP">
+<h2>Bootstrapping Replication with mysqldump</h2>
+
+<p>The <code>mysqldump</code> program can be used to create a replica<a data-type="indexterm" data-primary="mysqldump" data-secondary="replica instance" id="idm46177452494632"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="mysqldump" data-tertiary="replica instance" id="idm46177452493624"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="logical backups" data-tertiary="replication" id="idm46177452492408"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="replication" data-tertiary="mysqldump for" id="idm46177452491192"/><a data-type="indexterm" data-primary="replication" data-secondary="backups for" data-tertiary="mysqldump for" id="idm46177452489976"/> instance either empty or with data. To facilitate that, multiple command-line arguments are available. For example, when <code>--master-data</code> is specified, the resulting output will contain a SQL statement (<code>CHANGE MASTER TO</code>) that will set replication coordinates correctly on the target instance. When replication is later started using these coordinates on the target instance, there will be no gaps in data. In a GTID-based replication topology, 
+<span class="keep-together"><code>--set-gtid-purged</code></span> can be used to achieve the same result. However, <code>mysqldump</code> will detect that <code>gtid_mode=ON</code> and include the necessary output even without any additional command-line argument.</p>
+
+<p>An example of setting up replication with <code>mysqldump</code> is provided in <a data-type="xref" href="ch13.xhtml#CH13_HA_REPLICA_MYSQLDUMP">“Creating a Replica Using mysqldump”</a>.<a data-type="indexterm" data-startref="ch10-msq" id="idm46177452483928"/><a data-type="indexterm" data-startref="ch10-msq2" id="idm46177452483224"/><a data-type="indexterm" data-startref="ch10-msq3" id="idm46177452482552"/></p>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Loading Data from a SQL Dump File"><div class="sect1" id="load-data-sql-dump-file">
+<h1>Loading Data from a SQL Dump File</h1>
+
+<p>When performing a backup, it’s always important to keep in<a data-type="indexterm" data-primary="logical backups" data-secondary="recovery from a dump file" id="idm46177452480632"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="logical backups" data-tertiary="recovery from a dump file" id="idm46177452479672"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="mysqldump" data-tertiary="restoring from a dump file" id="idm46177452478440"/><a data-type="indexterm" data-primary="mysqldump" data-secondary="restoring from a dump file" id="idm46177452477208"/><a data-type="indexterm" data-primary="command line interface mysql" data-secondary="piping backup file contents" id="idm46177452476248"/><a data-type="indexterm" data-primary="mysql command line interface" data-secondary="piping backup file contents" id="idm46177452475272"/><a data-type="indexterm" data-primary="CLI" data-see="command line interface mysql" id="idm46177452474296"/> mind that you’re doing that to be able to later restore the data. With logical backups, the restoration process is as simple as <em>piping</em> contents of the backup file to the <code>mysql</code> CLI. As discussed earlier, the fact that MySQL has to be up for a logical backup restore makes for both good and bad consequences:</p>
+
+<ul>
+<li>
+<p>You can restore a single object while other parts of your system are working normally, which is a plus.</p>
+</li>
+<li>
+<p>The process of restoration is inefficient and will load a system just like any regular client would if it decided to insert a large amount of data. That’s a minus.</p>
+</li>
+</ul>
+
+<p>Let’s take a look at a simple example with a single database backup and restore. As we’ve seen before, <code>mysqldump</code> will include the necessary <code>DROP</code> statements into the dump, so even if the objects are present, they will be successfully restored:</p>
+
+<pre data-type="programlisting">$ <strong>mysqldump sakila &gt; /tmp/sakila.sql</strong>
+$ <strong>mysql -e "CREATE DATABASE sakila_mod"</strong>
+$ <strong>mysql sakila_mod &lt; /tmp/sakila.sql</strong>
+$ <strong>mysql sakila_mod -e "SHOW TABLES"</strong></pre>
+
+<pre data-type="programlisting">+----------------------------+
+| Tables_in_sakila_mod       |
++----------------------------+
+| actor                      |
+| actor_info                 |
+| ...                        |
+| store                      |
++----------------------------+</pre>
+
+<p>Restoring SQL dumps like the one produced by <code>mysqldump</code> or <code>mysqlpump</code> (discussed in the next section) is a resource-heavy operation. By default, it’s also a serial process, which might take a significant amount of time. There are a couple of tricks you can use to make this process faster, but keep in mind that mistakes can lead to missing or incorrectly restored data. Options include:<a data-type="indexterm" data-primary="parallel restore of dumps" id="idm46177452463256"/></p>
+
+<ul>
+<li>
+<p>Parallel restore per-schema/per-database</p>
+</li>
+<li>
+<p>Parallel restore of objects within a schema</p>
+</li>
+</ul>
+
+<p>The first one is easily done if the dumping with <code>mysqldump</code> is done on a per-database basis. The backup process can also be parallelized if consistency across databases isn’t required (it won’t be guaranteed). The following example uses the <code>&amp;</code> modifier, which instructs the shell to execute the preceding command in the background:</p>
+
+<pre data-type="programlisting">$ <strong>mysqldump sakila &gt; /tmp/sakila.sql &amp;</strong>
+$ <strong>mysqldump nasa &gt; /tmp/nasa.sql &amp;</strong></pre>
+
+<p>The resulting dumps are independent. <code>mysqldump</code> doesn’t<a data-type="indexterm" data-primary="mysqldump" data-secondary="users and grants" id="idm46177452456264"/><a data-type="indexterm" data-primary="mysql database dump" data-secondary="restore" id="idm46177452455256"/> process users and grants unless the <code>mysql</code> database is dumped, so you need to take care of that. Restoration is just as straightforward:</p>
+
+<pre data-type="programlisting">$ <strong>mysql sakila &lt; /tmp/sakila.sql &amp;</strong>
+$ <strong>mysql nasa &lt; /tmp/nasa.sql &amp;</strong></pre>
+
+<p>On Windows, it’s also possible to send command execution to the background using the PowerShell command <code>Start-Process</code> or, in later versions, the same <code>&amp;</code>.</p>
+
+<p>The second option is a bit more involved. Either you need to dump on a per-table basis (e.g., <code>mysqldump sakila artists &gt; sakila.artists.sql</code>), which results in a straightforward restore, or you need to go ahead and edit the dump file to split it into multiple ones. Taken to the extreme, you can even parallelize data insertion on the table level, although that’s probably not going to be practical.</p>
+
+<p>Although this is doable, it’s preferable to use tools that are purpose-built for this task.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="mysqlpump"><div class="sect1" id="idm46177452684712">
+<h1>mysqlpump</h1>
+
+<p><code>mysqlpump</code> is a utility program bundled with MySQL versions<a data-type="indexterm" data-primary="mysqlpump" id="ch10-pu"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="mysqlpump" id="ch10-pu2"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="logical backups" data-tertiary="mysqlpump" id="ch10-pu3"/><a data-type="indexterm" data-primary="logical backups" data-secondary="mysqlpump" id="ch10-pu4"/> 5.7 and later that improves <code>mysqldump</code> in several areas, mainly around performance and usability. The key differentiators are as follows:</p>
+
+<ul>
+<li>
+<p>Parallel dump capability</p>
+</li>
+<li>
+<p>Built-in dump compression</p>
+</li>
+<li>
+<p>Improved restore performance though delayed creation of secondary indexes</p>
+</li>
+</ul>
+
+<ul class="less_space pagebreak-before">
+<li>
+<p>Easier control over what objects are dumped</p>
+</li>
+<li>
+<p>Modified behavior of dumping user accounts</p>
+</li>
+</ul>
+
+<p>Using the program is very similar to using <code>mysqldump</code>. The main immediate difference is that when no arguments are passed, <code>mysqlpump</code> will default to dumping all of the databases (excluding <code>INFORMATION_SCHEMA</code>, <code>performance_schema</code>, <code>ndbinfo</code>, and the <code>sys</code> schema). The other notable things are that there’s a progress indicator and that <code>mysqlpump</code> defaults to parallel dump with two threads:</p>
+
+<pre data-type="programlisting">$ <strong>mysqlpump &gt; pump.out</strong></pre>
+
+<pre data-type="programlisting">Dump progress: 1/2 tables, 0/530419 rows
+Dump progress: 80/184 tables, 2574413/646260694 rows
+...
+Dump progress: 183/184 tables, 16297773/646260694 rows
+Dump completed in 10680</pre>
+
+<p>The concept of parallelism in <code>mysqlpump</code> is somewhat<a data-type="indexterm" data-primary="parallel backup queues" id="idm46177452429048"/> complicated. You can use concurrency between different databases and between different objects within a given database. By default, when no other parallel options are specified, <code>mysqlpump</code> will use a single queue with two parallel threads to process all databases and user definitions (if requested). You can control the level of parallelism of the default queue using the 
+<span class="keep-together"><code>--default-parallelism</code></span> argument. To further fine-tune concurrency, you can set up multiple parallel queues to process separate databases. Take care when choosing your desired concurrency level, since you could end up using most of the database resources for the backup run.</p>
+
+<p>An important distinction from <code>mysqldump</code> when using <code>mysqlpump</code> lies in how the latter handles user accounts.<a data-type="indexterm" data-primary="mysqldump" data-secondary="user management" id="idm46177452424520"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="mysqldump" data-tertiary="user management" id="idm46177452423512"/><a data-type="indexterm" data-primary="mysql database dump" data-secondary="mysqldump versus mysqlpump" id="idm46177452422296"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="mysqlpump" data-tertiary="user management" id="idm46177452421336"/><a data-type="indexterm" data-primary="mysqlpump" data-secondary="user management" id="idm46177452420120"/> <code>mysqldump</code> managed users by dumping <code>mysql.user</code> and other relevant tables. If the <code>mysql</code> database wasn’t included in the dump, no user information will be preserved. <code>mysqlpump</code> improves on that by introducing the command-line arguments <code>--users</code> and <code>--include-users</code>. The first one tells the utility to add user-related commands to the dump for all users, and the second accepts a list of usernames. This is a great improvement on the old way of doing things.</p>
+
+<p>Let’s combine all the new features to produce a compressed dump of non-system databases and user definitions, and use concurrency in the process:</p>
+
+<pre data-type="programlisting">$ <strong>mysqlpump --compress-output=zlib --include-users=bob,kate</strong> \
+<strong>--include-databases=sakila,nasa,employees</strong> \
+<strong>--parallel-schemas=2:employees</strong> \
+<strong>--parallel-schemas=sakila,nasa &gt; pump.out</strong></pre>
+
+<pre data-type="programlisting">Dump progress: 1/2 tables, 0/331579 rows
+Dump progress: 19/23 tables, 357923/3959313 rows
+...
+Dump progress: 22/23 tables, 3755358/3959313 rows
+Dump completed in 10098</pre>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p><code>mysqlpump</code> output can be compressed with the ZLIB or LZ4 algorithms. <a data-type="indexterm" data-primary="mysqlpump" data-secondary="compression" id="idm46177452411080"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="mysqlpump" data-tertiary="compression" id="idm46177452410024"/>When the OS-level commands <code>lz</code> and <code>openssl zlib</code> aren’t available, you can use the <code>lz4_decompress</code> and <code>zlib_decompress</code> utilities included in your MySQL distribution.</p>
+</div>
+
+<p>A dump resulting from a <code>mysqlpump</code> run is not suitable for<a data-type="indexterm" data-primary="parallel restore of dumps" id="idm46177452405992"/> parallel restore because the data inside it is interleaved. For example, the following is the result of a <code>mysqlpump</code> execution showing table creation amidst inserts to tables in different databases:</p>
+
+<pre data-type="programlisting">...,(294975,"1955-07-31","Lucian","Rosis","M","1986-12-08");
+CREATE TABLE `sakila`.`store` (
+`store_id` tinyint unsigned NOT NULL AUTO_INCREMENT,
+`manager_staff_id` tinyint unsigned NOT NULL,
+`address_id` smallint unsigned NOT NULL,
+`last_update` timestamp NOT NULL DEFAULT
+CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+PRIMARY KEY (`store_id`)
+) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT
+CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+;
+INSERT INTO `employees`.`employees` VALUES
+(294976,"1961-03-19","Rayond","Khalid","F","1989-11-03"),...</pre>
+
+<p><code>mysqlpump</code> is an improvement over <code>mysqldump</code> and adds important concurrency, compression, and object control features. However, the tool doesn’t allow parallel restore of the dump and in fact makes it impossible. The only improvement to the restore performance is that secondary indexes are added after the main load is complete.<a data-type="indexterm" data-startref="ch10-pu" id="idm46177452401832"/><a data-type="indexterm" data-startref="ch10-pu2" id="idm46177452401128"/><a data-type="indexterm" data-startref="ch10-pu3" id="idm46177452400456"/><a data-type="indexterm" data-startref="ch10-pu4" id="idm46177452399784"/></p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="mydumper and myloader"><div class="sect1" id="idm46177452448328">
+<h1>mydumper and myloader</h1>
+
+<p><code>mydumper</code> and <code>myloader</code> are both part of the open source<a data-type="indexterm" data-primary="backups and recovery" data-secondary="mydumper and myloader" id="idm46177452396552"/><a data-type="indexterm" data-primary="mydumper and myloader" id="idm46177452395576"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="logical backups" data-tertiary="mydumper and myloader" id="idm46177452394904"/><a data-type="indexterm" data-primary="logical backups" data-secondary="mydumper and myloader" id="idm46177452393688"/> project <a href="https://oreil.ly/oOo8F"><code>mydumper</code></a>. This set of tools attempts to make logical backups more performant, easier to manage, and more human-friendly. We won’t go into too much depth here, as we could easily run out of space in the book covering every possible MySQL backup variety.</p>
+
+<p>These programs can be installed either by taking the freshest release from the project’s GitHub page or by compiling the source. At the time of writing, the latest release is somewhat behind the main branch. Step-by-step installation instructions are available in <a data-type="xref" href="ch13.xhtml#CH13_HA_MYLOADER_SETUP">“Setting up the mydumper and myloader utilities”</a>.</p>
+
+<p>We previously showed how <code>mysqlpump</code> improves dumping performance but mentioned that its intertwined outputs don’t help with restoration.<a data-type="indexterm" data-primary="parallel backup queues" id="idm46177452389192"/><a data-type="indexterm" data-primary="parallel restore of dumps" id="idm46177452388488"/> <code>mydumper</code> combines the parallel dumping approach with preparing ground for parallel restore with <code>myloader</code>. That’s achieved by dumping every table into a separate file.</p>
+
+<p>The default invocation of <code>mydumper</code> is very simple. The tool tries to connect to the database, initiates a consistent dump, and creates a directory under the current one for the export files. Note that each table has its own file. <a data-type="indexterm" data-primary="mysql database dump" data-secondary="mydumper" id="idm46177452385384"/>By default, <code>mydumper</code> will also dump the <code>mysql</code> and <code>sys</code> databases. The default parallelism setting for the dump operation is <code>4</code>, meaning four separate tables will be read simultaneously. <code>myloader</code> invoked on this directory will be able to restore the tables in parallel.</p>
+
+<p>To create the dump and explore it, execute the following commands:</p>
+
+<pre data-type="programlisting">$ <strong>mydumper -u root -a</strong></pre>
+
+<pre data-type="programlisting">Enter the MySQL password:</pre>
+
+<pre data-type="programlisting">$ <strong>ls -ld export</strong></pre>
+
+<pre data-type="programlisting">drwx... export-20210613-204512</pre>
+
+<pre data-type="programlisting">$ <strong>ls -la export-20210613-204512</strong></pre>
+
+<pre data-type="programlisting">...
+-rw... sakila.actor.sql
+-rw... sakila.address-schema.sql
+-rw... sakila.address.sql
+-rw... sakila.category-schema.sql
+-rw... sakila.category.sql
+-rw... sakila.city-schema.sql
+-rw... sakila.city.sql
+...</pre>
+
+<p>Apart from parallel dumping and restore capabilities, <code>mydumper</code> has some more advanced features:</p>
+
+<ul>
+<li>
+<p>Lightweight backup locks support. Percona Server for MySQL<a data-type="indexterm" data-primary="Percona XtraBackup" data-secondary="locking via Percona Server" id="idm46177452374088"/><a data-type="indexterm" data-primary="Percona Server for MySQL" data-secondary="DDL blocking during backup" id="idm46177452372968"/><a data-type="indexterm" data-primary="mydumper and myloader" data-secondary="locking features" id="idm46177452371992"/> implements some additional lightweight locking that’s used by Percona XtraBackup. <code>mydumper</code> utilizes these locks by default when possible. These locks do not block concurrent reads and writes to InnoDB tables, but will block any DDL statements, which could otherwise render the backup invalid.</p>
+</li>
+<li>
+<p>Use of savepoints. <code>mydumper</code> uses a trick with transaction savepoints to minimize metadata locking.<a data-type="indexterm" data-primary="metadata locks" data-secondary="mydumper mimizing" id="idm46177452368808"/></p>
+</li>
+<li>
+<p>Limits on duration of metadata locking. To work around prolonged metadata locking, a problem we described in <a data-type="xref" href="ch06.xhtml#CH6_TRANSACTION_LOCKING_METADATA">“Metadata Locks”</a>, <code>mydumper</code> allows two options: failing quickly or killing long-running queries that prevent <code>mydumper</code> from succeeding.</p>
+</li>
+</ul>
+
+<p><code>mydumper</code> and <code>myloader</code> are advanced tools taking logical backup capabilities to the maximum. However, as part of a community project, they lack the documentation and polish that other tools provide. Another major downside is the lack of any 
+<span class="keep-together">support</span> or guarantees. Still, they can be a useful addition to a database operator’s 
+<span class="keep-together">toolbelt.</span></p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Cold Backup and Filesystem Snapshots"><div class="sect1" id="idm46177452398520">
+<h1>Cold Backup and Filesystem Snapshots</h1>
+
+<p>The cornerstone of physical backups, a <em>cold backup</em> is really<a data-type="indexterm" data-primary="backups and recovery" data-secondary="cold backups" id="idm46177452360072"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="physical backups" data-tertiary="cold backups" id="idm46177452359064"/><a data-type="indexterm" data-primary="physical backups" data-secondary="cold backups" id="idm46177452357848"/><a data-type="indexterm" data-primary="cold backups" id="idm46177452356904"/> just a copy of the data directory and other necessary files, done while the database instance is down. This technique isn’t frequently used, but it can save the day when you need to create a consistent backup quickly. With databases now regularly approaching the multiterabyte size range, just copying the files can take a very long time. However, the cold backup still has its good points:</p>
+
+<ul>
+<li>
+<p>Very fast (arguably the fastest backup method apart from snapshots)</p>
+</li>
+<li>
+<p>Straightforward</p>
+</li>
+<li>
+<p>Easy to use, hard to do wrong</p>
+</li>
+</ul>
+
+<p>Modern storage systems and some filesystems have readily available snapshot capabilities.<a data-type="indexterm" data-primary="backups and recovery" data-secondary="snapshots" id="idm46177452351992"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="physical backups" data-tertiary="snapshots" id="idm46177452351016"/><a data-type="indexterm" data-primary="physical backups" data-secondary="snapshots" id="idm46177452349800"/><a data-type="indexterm" data-primary="snapshots" id="idm46177452348856"/> They allow you to create near-instantaneous copies of volumes of arbitrary size by utilizing internal mechanisms. The properties of different snapshot-capable systems vary widely, making it impossible for us to cover all of them. However, we can still talk a bit about them from the database perspective.</p>
+
+<p>Most snapshots will be <em>copy-on-write</em> (COW) and internally<a data-type="indexterm" data-primary="copy-on-write (COW) snapshots" id="idm46177452346904"/> consistent to some point in time. However, we already know that database files aren’t consistent on disk, especially with transactional storage engines like InnoDB. This makes it somewhat difficult to get the snapshot backup right. There are two options:</p>
+<dl>
+<dt>Cold backup snapshot</dt>
+<dd>
+<p>When the database is shut down, its data files may still not be<a data-type="indexterm" data-primary="cold backup snapshots" id="idm46177452344232"/> perfectly consistent. But if you do a snapshot of all of the database files (including InnoDB redo logs, for example), together they will allow for the database to start. That’s only natural, because otherwise the database would lose data on every restart. Don’t forget that you may have database files split among many volumes. You will need to have all of them. This method will work for all storage engines.</p>
+</dd>
+<dt>Hot backup snapshot</dt>
+<dd>
+<p>With a running database, taking a snapshot correctly is a<a data-type="indexterm" data-primary="hot backups" data-secondary="snapshots" id="idm46177452341608"/> greater challenge than when the database is down. If your database files are located over multiple volumes, you cannot guarantee that snapshots, even initiated simultaneously, will be consistent to the same point in time, which can lead to disastrous results. Moreover, nontransactional storage engines like MyISAM don’t guarantee consistency for files on disk while the database is running. That’s actually true for InnoDB as well, but InnoDB’s redo logs are always consistent (unless safeguards are disabled), and MyISAM lacks this functionality.</p>
+</dd>
+</dl>
+
+<p>The recommended way to do a hot backup snapshot would therefore be to utilize some amount of locking. Since the snapshot-taking process is usually a quick one, the resulting downtime shouldn’t be significant. Here’s the process:</p>
+<ol>
+<li>
+<p>Create a new session, and lock all of the tables with the <code>FLUSH TABLES WITH READ LOCK</code> command. This session cannot be closed, or else locks will be released.</p>
+</li>
+<li>
+<p>Optionally, record the current binlog position by running the <code>SHOW MASTER</code>   
+<span class="keep-together"><code>STATUS</code></span> command.</p>
+</li>
+<li>
+<p>Create snapshots of all volumes where MySQL’s database files are located according to the storage system’s manual.</p>
+</li>
+<li>
+<p>Unlock the tables with the <code>UNLOCK TABLES</code> command in the session opened initially.</p>
+</li>
+
+</ol>
+
+<p>This general approach should be suitable for most if not all of the current storage system and filesystems capable of doing snapshots. Note that they all differ subtly in the actual procedure and requirements. <a data-type="indexterm" data-primary="cloud databases" data-secondary="fsfreeze for backups" id="idm46177452331624"/>Some cloud vendors require you to additionally perform an <code>fsfreeze</code> on the filesystems.</p>
+
+<p>Always test your backups thoroughly before implementing them in production and trusting them with your data. You can only trust a solution that you’ve tested and are comfortable using. Copying arbitrary backup strategy suggestions is not a very good idea.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Percona XtraBackup"><div class="sect1" id="PERCONA_PXB">
+<h1>Percona XtraBackup</h1>
+
+<p>The logical step forward in physical backups is implementing<a data-type="indexterm" data-primary="Percona XtraBackup" id="ch10-prx"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="physical backups" data-tertiary="Percona XtraBackup" id="ch10-prx2"/><a data-type="indexterm" data-primary="physical backups" data-secondary="Percona XtraBackup" id="ch10-prx3"/><a data-type="indexterm" data-primary="hot backups" data-secondary="Percona XtraBackup" id="idm46177452323704"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="Percona XtraBackup" id="ch10-prx4"/><a data-type="indexterm" data-primary="XtraBackup" data-see="Percona XtraBackup" id="idm46177452321544"/> so-called <em>hot backups</em>—that is, making a copy of database files while the database is running. We’ve already mentioned that MyISAM tables can be copied, but that doesn’t work for InnoDB and other transactional storage engines like MyRocks. The problem therefore is that you can’t just copy the files because the database is constantly undergoing changes. For example, InnoDB might be flushing some dirty pages in the background even if no writes are hitting the database right now. You can try your luck and copy the database directory under a running system and then try to restore that directory and start a MySQL server using it. Chances are, it won’t work. And while it may work sometimes, we strongly recommend against taking chances with database backups.</p>
+
+<p>The capability to perform hot backups is built into three main<a data-type="indexterm" data-primary="MariaDB" data-secondary="mariabackup" id="idm46177452318648"/><a data-type="indexterm" data-primary="hot backups" data-secondary="MySQL Enterprise Backup" id="idm46177452317592"/><a data-type="indexterm" data-primary="hot backups" data-secondary="mariabackup" id="idm46177452316648"/><a data-type="indexterm" data-primary="MySQL Enterprise Backup (MEB)" id="idm46177452315704"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="MySQL Enterprise Backup" id="idm46177452315016"/><a data-type="indexterm" data-primary="mariabackup" id="idm46177452314072"/> MySQL backup tools: <a href="https://oreil.ly/yMK8t">Percona XtraBackup</a>, <a href="https://oreil.ly/rkSrr">MySQL Enterprise Backup</a>, and <a href="https://oreil.ly/DJvoa"><code>mariabackup</code></a>. We’ll briefly talk about all of them, but will mainly concentrate on the XtraBackup utility. It’s 
+<span class="keep-together">important</span> to 
+<span class="keep-together">understand</span> that all the tools share properties, so knowing how to use one will help you use the others.</p>
+
+<p>Percona XtraBackup is a free and open source tool maintained by Percona and the wider MySQL community. It’s capable of performing online backups of MySQL instances with InnoDB, MyISAM, and MyRocks tables. The program is available only on Linux. Note that it’s impossible to use XtraBackup with recent versions of MariaDB: only MySQL and Percona Server are supported. For MariaDB, use the utility we cover in <a data-type="xref" href="#CH10_BACKUP_MARIABACKUP">“mariabackup”</a>.</p>
+
+<p>Here is an overview of how XtraBackup operates:</p>
+<ol>
+<li>
+<p>Records the current log sequence number (LSN), an internal version number for the operation</p>
+</li>
+<li>
+<p>Starts accumulating InnoDB <em>redo data</em> (the type of data InnoDB stores for crash recovery)</p>
+</li>
+<li>
+<p>Locks tables in the least intrusive way possible</p>
+</li>
+<li>
+<p>Copies InnoDB tables</p>
+</li>
+<li>
+<p>Locks nontransactional tables completely</p>
+</li>
+<li>
+<p>Copies MyISAM tables</p>
+</li>
+<li>
+<p>Unlocks all tables</p>
+</li>
+<li>
+<p>Processes MyRocks tables, if present</p>
+</li>
+<li>
+<p>Puts accumulated redo data alongside the copied database files</p>
+</li>
+
+</ol>
+
+<p>The main idea behind XtraBackup and hot backups in general is combining the no-downtime nature of logical backups with the performance and relative lack of performance impact of cold backups. XtraBackup doesn’t guarantee no disruption of service, but it’s a great step forward compared with a regular cold backup. The lack of performance impact means that XtraBackup will use some CPU and I/O, but only that needed to copy the database files. Logical backups, on the other hand, must pass each row through all of the database internals, making them inherently slow.</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>XtraBackup requires physical access to the database files and cannot be run remotely. <a data-type="indexterm" data-primary="DBaaS (database-as-a-service)" data-secondary="Percona XtraBackup unsuitable" id="idm46177452296216"/><a data-type="indexterm" data-primary="cloud databases" data-secondary="DBaaS (database-as-a-service)" data-tertiary="Percona XtraBackup unsuitable" id="idm46177452295304"/>This makes it unsuitable for doing offsite backups of managed databases (DBaaS), for example. Some cloud vendors, however, allow you to import databases using backups made by this tool.</p>
+</div>
+
+<p>The XtraBackup utility is widely available in various Linux distributions’ repositories and thus can easily be installed using a package manager. Alternatively, you can download packages and binary distributions directly from the <a href="https://oreil.ly/XjN4C">XtraBackup Downloads page</a> on Percona’s website.</p>
+<div data-type="warning" epub:type="warning"><h6>Warning</h6>
+<p>To back up MySQL 8.0, you must use XtraBackup 8.0. The minor versions of XtraBackup and MySQL ideally should also match: XtraBackup 8.0.25 is guaranteed to work with MySQL 8.0.25. For MySQL 5.7 and older releases, use XtraBackup 2.4.</p>
+</div>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Backing Up and Recovering"><div class="sect2" id="CH10_BACKUP_PXC_USAGE">
+<h2>Backing Up and Recovering</h2>
+
+<p>Unlike other tools we’ve mentioned previously, XtraBackup, by<a data-type="indexterm" data-primary="Percona XtraBackup" data-secondary="backing up" id="ch10-bu"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="Percona XtraBackup" data-tertiary="backing up" id="idm46177452286904"/> nature of it being a physical backup tool, requires not only access to the MySQL server but also read access to the database files. On most MySQL installations, that usually means that the 
+<span class="keep-together"><code>xtrabackup</code></span> program should be run by the <code>root</code> user, or <code>sudo</code> must be used. We’ll be using the <code>root</code> user throughout this section, and we set up a login path using the steps from <a data-type="xref" href="ch09.xhtml#CH-OPTIONS-FILE-SPECIAL-LOGIN-PATH">“Login Path Configuration File”</a>.</p>
+
+<p>First, we need to run the basic <code>xtrabackup</code> command:</p>
+
+<pre data-type="programlisting"># <strong>xtrabackup --host=127.0.0.1 --target-dir=/tmp/backup --backup</strong></pre>
+
+<pre data-type="programlisting">...
+Using server version 8.0.25
+210613 22:23:06 Executing LOCK INSTANCE FOR BACKUP...
+...
+210613 22:23:07 [01] Copying ./sakila/film.ibd
+    to /tmp/backup/sakila/film.ibd
+210613 22:23:07 [01]        ...done
+...
+210613 22:23:10 [00] Writing /tmp/backup/xtrabackup_info
+210613 22:23:10 [00]        ...done
+xtrabackup: Transaction log of lsn (6438976119)
+    to (6438976129) was copied.
+210613 22:23:11 completed OK!</pre>
+
+<p>If the login path doesn’t work, you can pass <code>root</code> user’s credentials to <code>xtrabackup</code> using the <code>--user</code> and <code>--password</code> command-line arguments. XtraBackup will usually be able to identify the target server’s data directory by reading the default option files, but if that doesn’t work or you have multiple installations of MySQL, you may need to specify the <code>--datadir</code> option, too. Even though <code>xtrabackup</code> only works locally, it still needs to connect to a local running MySQL instance and thus has <code>--host</code>, <code>--port</code>, and <code>--socket</code> arguments. You may need to specify some of them according to your particular setup.</p>
+<div data-type="tip"><h6>Tip</h6>
+<p>While we use <em>/tmp/backup</em> as the backup’s destination path for our example, you should avoid storing important files under <em>/tmp</em>. That’s especially true for backups.</p>
+</div>
+
+<p>The result of that <code>xtrabackup --backup</code> invocation is a bunch of database files, which are actually not consistent to any point in time, and a chunk of redo data that InnoDB won’t be able to apply:</p>
+
+<pre data-type="programlisting"># <strong>ls -l /tmp/backup/</strong></pre>
+
+<pre data-type="programlisting">...
+drwxr-x---.  2 root root       160 Jun 13 22:23 mysql
+-rw-r-----.  1 root root  46137344 Jun 13 22:23 mysql.ibd
+drwxr-x---.  2 root root        60 Jun 13 22:23 nasa
+drwxr-x---.  2 root root       580 Jun 13 22:23 sakila
+drwxr-x---.  2 root root       580 Jun 13 22:23 sakila_mod
+drwxr-x---.  2 root root        80 Jun 13 22:23 sakila_new
+drwxr-x---.  2 root root        60 Jun 13 22:23 sys
+...</pre>
+
+<p>To make the backup ready for future restore, another phase must be performed—preparation. There’s no need to connect to a MySQL server for that:</p>
+
+<pre data-type="programlisting"># <strong>xtrabackup --target-dir=/tmp/backup --prepare</strong></pre>
+
+<pre data-type="programlisting">...
+xtrabackup: cd to /tmp/backup/
+xtrabackup: This target seems to be not prepared yet.
+...
+Shutdown completed; log sequence number 6438976524
+210613 22:32:23 completed OK!</pre>
+
+<p>The resulting data directory is actually perfectly ready to be used.<a data-type="indexterm" data-startref="ch10-bu" id="idm46177452265928"/><a data-type="indexterm" data-primary="Percona XtraBackup" data-secondary="recovery" id="idm46177452265144"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="Percona XtraBackup" data-tertiary="recovery" id="idm46177452264200"/> You can start up a MySQL instance pointing directly to this directory, and it will work. A very common mistake here is trying to start MySQL Server under the <code>mysql</code> user while the restored and prepared backup is owned by <code>root</code> or another OS user. Make sure to incorporate <code>chown</code> and <code>chmod</code> as required into your backup recovery procedure. However, there’s a useful user experience feature of <code>--copy-back</code> available. <code>xtrabackup</code> preserves the original database file layout locations, and invoked with <code>--copy-back</code> will restore all files to their original locations:</p>
+
+<pre data-type="programlisting"># <strong>xtrabackup --target-dir=/tmp/backup --copy-back</strong></pre>
+
+<pre data-type="programlisting">...
+Original data directory /var/lib/mysql is not empty!</pre>
+
+<p class="pagebreak-before">That didn’t work, because our original MySQL Server is still running, and its data directory is not empty. XtraBackup will refuse to restore a backup unless the target data directory is empty. That should protect you from accidentally restoring a backup. Let’s shut down the running MySQL Server, remove or move its data directory, and restore the backup:</p>
+
+<pre data-type="programlisting"># <strong>systemctl stop mysqld</strong>
+# <strong>mv /var/lib/mysql /var/lib/mysql_old</strong>
+# <strong>xtrabackup --target-dir=/tmp/backup --copy-back</strong></pre>
+
+<pre data-type="programlisting">...
+210613 22:39:01 [01] Copying ./sakila/actor.ibd
+    to /var/lib/mysql/sakila/actor.ibd
+210613 22:39:01 [01]        ...done
+...
+210613 22:39:01 completed OK!</pre>
+
+<p>After that, the files are in their correct locations, but owned by <code>root</code>:</p>
+
+<pre data-type="programlisting"># <strong>ls -l /var/lib/mysql/</strong></pre>
+
+<pre data-type="programlisting">drwxr-x---. 2 root root      4096 Jun 13 22:39 sakila
+drwxr-x---. 2 root root      4096 Jun 13 22:38 sakila_mod
+drwxr-x---. 2 root root      4096 Jun 13 22:39 sakila_new</pre>
+
+<p>You’ll need to change the owner of the files back to <code>mysql</code> (or the user used in your system) and fix the directory permissions. Once that’s done, you can start MySQL and verify the data:</p>
+
+<pre data-type="programlisting"># <strong>chown -R mysql:mysql /var/lib/mysql/</strong>
+# <strong>chmod o+rx /var/lib/mysql/</strong>
+# <strong>systemctl start mysqld</strong>
+# <strong>mysql sakila -e "SHOW TABLES;"</strong></pre>
+
+<pre data-type="programlisting">+----------------------------+
+| Tables_in_sakila           |
++----------------------------+
+| actor                      |
+...
+| store                      |
++----------------------------+</pre>
+<div data-type="tip"><h6>Tip</h6>
+<p>The best practice is to do both the backup and prepare work<a data-type="indexterm" data-primary="Percona XtraBackup" data-secondary="backing up" id="idm46177452245768"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="Percona XtraBackup" data-tertiary="backing up" id="idm46177452244712"/> during the backup phase, minimizing the number of possible surprises later. Imagine having the prepare phase fail while you’re trying to recover some data! However, note that incremental backups that we cover later have special handling procedures contradicting this tip.</p>
+</div>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Advanced Features"><div class="sect2" id="idm46177452289784">
+<h2>Advanced Features</h2>
+
+<p>In this section we discuss some of XtraBackup’s more advanced features. They are not required to use the tool, and we give them just as a brief overview:<a data-type="indexterm" data-primary="Percona XtraBackup" data-secondary="advanced features" id="idm46177452241880"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="Percona XtraBackup" data-tertiary="advanced features" id="idm46177452240904"/></p>
+<dl>
+<dt>Database file verification</dt>
+<dd>
+<p>While performing the backup, XtraBackup will verify the checksums of all of the pages of the data files it’s processing. This is an attempt to alleviate the inherent problem of physical backups, which is that they will contain any corruptions in the source database. We recommend augmenting this check with other steps listed in <a data-type="xref" href="#CH10_BACKUP_TEST_VERIFY">“Testing and Verifying Your Backups”</a>.</p>
+</dd>
+<dt>Compression</dt>
+<dd>
+<p>Even though copying physical files is much faster than querying the database, the backup process can be limited by disk performance. You cannot decrease the amount of data you read, but you can utilize compression to make the backup itself smaller, decreasing the amount of data that has to be written. That’s especially important when a backup destination is a network location. In addition, you will just use less space for storing backups. Note that, as we showed in <a data-type="xref" href="#CH10_BACKUP_MYSQLDUMP">“The mysqldump Program”</a>, on a CPU-choked system compression may actually increase the time it takes to create a backup. XtraBackup uses the <code>qpress</code> tool for compression. This tool is available in the <code>percona-release</code> package:</p>
+
+<pre data-type="programlisting"># <strong>xtrabackup --host=127.0.0.1</strong> \
+<strong>--target-dir=/tmp/backup_compressed/</strong> \
+<strong>--backup --compress</strong></pre>
+</dd>
+<dt>Parallelism</dt>
+<dd>
+<p>It’s possible to run the backup and copy-back processes in parallel by using the <code>--parallel</code> command-line argument.<a data-type="indexterm" data-primary="parallel backup queues" id="idm46177452229048"/></p>
+</dd>
+<dt>Encryption</dt>
+<dd>
+<p>In addition to being able to work with encrypted databases, it’s also possible for XtraBackup to create encrypted backups.</p>
+</dd>
+<dt>Streaming</dt>
+<dd>
+<p>Instead of creating a directory full of backed-up files, XtraBackup can stream the resulting backup in an <code>xbstream</code> format. This results in more portable backups and allows integration with <code>xbcloud</code>. You can stream backups over SSH, for example.</p>
+</dd>
+<dt>Cloud upload</dt>
+<dd>
+<p>Backups taken with XtraBackup can be uploaded to any<a data-type="indexterm" data-primary="cloud databases" data-secondary="physical backup challenges" data-tertiary="Percona XtraBackup" id="idm46177452223080"/> S3-compatible storage using <code>xbcloud</code>. S3 is Amazon’s object storage facility and an API that is widely adopted by many companies. This tool only works with backups streamed through the <code>xbstream</code>.</p>
+</dd>
+</dl>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Incremental Backups with XtraBackup"><div class="sect2" id="idm46177452220424">
+<h2>Incremental Backups with XtraBackup</h2>
+
+<p>As described earlier, a hot backup is a copy of every byte of<a data-type="indexterm" data-primary="Percona XtraBackup" data-secondary="incremental backups" id="ch10-inc"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="Percona XtraBackup" data-tertiary="incremental backups" id="ch10-inc2"/><a data-type="indexterm" data-primary="hot backups" data-secondary="Percona XtraBackup" data-tertiary="incremental backups" id="ch10-inc3"/><a data-type="indexterm" data-primary="incremental backups with XtraBackup" id="ch10-inc4"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="incremental backups" id="ch10-inc5"/> information in the database. This is how XtraBackup works by default. But in a lot of cases, databases undergo change at an <em>irregular</em> rate—new data is added frequently, while old data doesn’t change that much (or at all). For example, new financial records may be added every day, and accounts get modified, but in a given week only a small percentage of accounts are changed. Thus, the next logical step in improving hot backups is adding the ability to perform so-called <em>incremental backups</em>, or backups of only the changed data. That will allow you to perform backups more frequently by decreasing the need for space.</p>
+
+<p>For incremental backups to work, you need first to have a full backup of the database,<a data-type="indexterm" data-primary="incremental backups with XtraBackup" data-secondary="base backup" id="idm46177452209704"/><a data-type="indexterm" data-primary="base backup for incrementals" id="idm46177452208760"/> called a <em>base backup</em>—otherwise there’s nothing to increment from. Once your base backup is ready, you can perform any number of incremental backups, each consisting of the changes made since the previous one (or from the base backup in the case of the first incremental backup). <a data-type="indexterm" data-primary="backups and recovery" data-secondary="point-in-time recovery" data-tertiary="incremental backups achieving" id="idm46177452207272"/><a data-type="indexterm" data-primary="incremental backups with XtraBackup" data-secondary="point-in-time recovery" id="idm46177452206008"/><a data-type="indexterm" data-primary="point-in-time recovery (PITR)" data-secondary="incremental backups achieving" id="idm46177452205048"/>Taken to the extreme, you could create an incremental backup every minute, achieving something called <em>point-in-time recovery</em> (PITR), but this is not very practical, and as you will soon learn there are better ways to do that.</p>
+
+<p>Here’s an example of the XtraBackup commands you could use to create a base backup and then an incremental backup. Notice how the incremental backup points to the base backup via the <code>--incremental-basedir</code> argument:</p>
+
+<pre data-type="programlisting"># <strong>xtrabackup --host=127.0.0.1</strong> \
+<strong>--target-dir=/tmp/base_backup --backup</strong>
+# <strong>xtrabackup --host=127.0.0.1 --backup</strong> \
+<strong>--incremental-basedir=/tmp/base_backup</strong> \
+<strong>--target-dir=/tmp/inc_backup1</strong></pre>
+
+<p>If you check the backup sizes, you’ll see that the incremental backup is very small compared to the base backup:</p>
+
+<pre data-type="programlisting"># <strong>du -sh /tmp/base_backup</strong></pre>
+
+<pre data-type="programlisting">2.2G    /tmp/base_backup
+6.0M    /tmp/inc_backup1</pre>
+
+<p>Let’s create another incremental backup. In this case, we’ll pass the previous incremental backup’s directory as the base directory:</p>
+
+<pre data-type="programlisting"># <strong>xtrabackup --host=127.0.0.1 --backup</strong> \
+<strong>--incremental-basedir=/tmp/inc_backup1</strong> \
+<strong>--target-dir=/tmp/inc_backup2</strong></pre>
+
+<pre data-type="programlisting">210613 23:32:20 completed OK!</pre>
+
+<p>You may be wondering whether it’s possible to specify the original base backup’s directory as the <code>--incremental-basedir</code> for each new incremental backup. In fact, that results in a completely valid backup, which is a variation of an incremental backup (or the other way around). <a data-type="indexterm" data-primary="incremental backups with XtraBackup" data-secondary="cumulative backups" id="idm46177452192696"/><a data-type="indexterm" data-primary="cumulative backups" id="idm46177452191704"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="cumulative backups" id="idm46177452191032"/><a data-type="indexterm" data-primary="incremental backups with XtraBackup" data-secondary="differential backups" id="idm46177452190088"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="differential backups" id="idm46177452189128"/><a data-type="indexterm" data-primary="differential backups" id="idm46177452188184"/>Such incremental backups that contain changes made not just since the previous incremental backup but since the base backup are usually called <em>cumulative</em> backups. Incremental backups targeting any previous backup are called <em>differential</em> backups. Cumulative incremental backups usually consume more space, but can considerably decrease the time needed for the prepare phase when a backup is restored.</p>
+
+<p>Importantly, the <a href="https://oreil.ly/2c4LM">prepare process for incremental backups</a> differs<a data-type="indexterm" data-primary="incremental backups with XtraBackup" data-secondary="prepare process for" id="idm46177452185160"/><a data-type="indexterm" data-primary="web links in book" data-secondary="incremental backup prepare process" id="idm46177452184168"/> from that for regular backups. Let’s prepare the backups we’ve just taken, starting with the base backup:</p>
+
+<pre data-type="programlisting"># <strong>xtrabackup --prepare --apply-log-only</strong> \
+<strong>--target-dir=/tmp/base_backup</strong></pre>
+
+<p>The <code>--apply-log-only</code> argument tells <code>xtrabackup</code> to not finalize the prepare process, as we still need to apply changes from the incremental backups. Let’s do that:</p>
+
+<pre data-type="programlisting"># <strong>xtrabackup --prepare --apply-log-only</strong> \
+<strong>--target-dir=/tmp/base_backup</strong> \
+<strong>--incremental-dir=/tmp/inc_backup1</strong>
+# <strong>xtrabackup --prepare --apply-log-only</strong> \
+<strong>--target-dir=/tmp/base_backup</strong> \
+<strong>--incremental-dir=/tmp/inc_backup2</strong></pre>
+
+<p>All commands should report <code>completed OK!</code> at the end. Once the <code>--prepare <span class="keep-together">--apply-log-only</span></code> operation is run, the base backup advances to the point of the incremental backup, making PITR to an earlier time impossible. So, it’s not a good idea to prepare immediately when performing incremental backups. To finalize the prepare process, the base backup with the changes applied from incremental backups must be prepared normally:</p>
+
+<pre data-type="programlisting"># <strong>xtrabackup --prepare --target-dir=/tmp/base_backup</strong></pre>
+
+<p>Once the base backup is “fully” prepared, attempts to apply incremental backups will fail with the following message:</p>
+
+<pre data-type="programlisting">xtrabackup: This target seems to be already prepared.
+xtrabackup: error: applying incremental backup needs
+    target prepared with --apply-log-only.</pre>
+
+<p>Incremental backups are inefficient when the relative amount of changes in the database is high. In the worst case, where every row in the database was changed between full a backup and an incremental backup, the latter will actually just be a full backup, storing 100% of the data. Incremental backups are most efficient when most of the data is appended and the relative amount of old data being changed is low. There are no rules regarding this, but if 50% of your data changes between your base backup and an incremental backup, consider not using incremental backups.<a data-type="indexterm" data-startref="ch10-inc" id="idm46177452171064"/><a data-type="indexterm" data-startref="ch10-inc2" id="idm46177452170360"/><a data-type="indexterm" data-startref="ch10-inc3" id="idm46177452169688"/><a data-type="indexterm" data-startref="ch10-inc4" id="idm46177452169016"/><a data-type="indexterm" data-startref="ch10-inc5" id="idm46177452168344"/><a data-type="indexterm" data-startref="ch10-prx" id="idm46177452167672"/><a data-type="indexterm" data-startref="ch10-prx2" id="idm46177452167000"/><a data-type="indexterm" data-startref="ch10-prx3" id="idm46177452166328"/><a data-type="indexterm" data-startref="ch10-prx4" id="idm46177452165656"/></p>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Other Physical Backup Tools"><div class="sect1" id="idm46177452328744">
+<h1>Other Physical Backup Tools</h1>
+
+<p>XtraBackup isn’t the only tool available that’s capable of performing hot MySQL physical backups. Our decision to explain the concepts using that particular tool was driven by our experience with it. However, that doesn’t mean that other tools are worse in any way. They may well be better suited to your needs. However, we have limited space, and the topic of backing up is very wide. We could write a <em>Backing Up MySQL</em> book of considerable volume!</p>
+
+<p>That said, to give you an idea of some of the other options, let’s take a look at two other readily available physical backup tools.</p>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="MySQL Enterprise Backup"><div class="sect2" id="idm46177452162584">
+<h2>MySQL Enterprise Backup</h2>
+
+<p>Called MEB for short, this tool is available as part of Oracle’s MySQL Enterprise Edition.<a data-type="indexterm" data-primary="backups and recovery" data-secondary="MySQL Enterprise Backup" id="idm46177452160968"/><a data-type="indexterm" data-primary="physical backups" data-secondary="MySQL Enterprise Backup" id="idm46177452159992"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="physical backups" data-tertiary="MySQL Enterprise Backup" id="idm46177452159048"/><a data-type="indexterm" data-primary="hot backups" data-secondary="MySQL Enterprise Backup" id="idm46177452157832"/><a data-type="indexterm" data-primary="MySQL Enterprise Backup (MEB)" id="idm46177452156888"/> It’s a closed-source proprietary tool that is similar in functionality to XtraBackup. You’ll find comprehensive documentation for it on the <a href="https://oreil.ly/nj7xI">MYSQL website</a>. The two tools are currently at  feature parity, so almost everything that was covered for XtraBackup will be true for MEB as well.</p>
+
+<p>MEB’s standout property is that it’s truly a cross-platform solution. XtraBackup works only on Linux, whereas MEB also works on Solaris, Windows, macOS, and FreeBSD. MEB doesn’t support flavors of MySQL other than Oracle’s standard one.</p>
+
+<p>Some additional features that MEB has, which are not available in XtraBackup, include the following:</p>
+
+<ul>
+<li>
+<p>Backup progress reporting</p>
+</li>
+<li>
+<p>Offline backups</p>
+</li>
+<li>
+<p>Tape backups through Oracle Secure Backups</p>
+</li>
+<li>
+<p>Binary and relay log backups</p>
+</li>
+<li>
+<p>Table rename at restore time</p>
+</li>
+</ul>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="mariabackup"><div class="sect2" id="CH10_BACKUP_MARIABACKUP">
+<h2>mariabackup</h2>
+
+<p><code>mariabackup</code> is a tool by MariaDB for backing up MySQL databases.<a data-type="indexterm" data-primary="MariaDB" data-secondary="mariabackup" id="idm46177452146552"/><a data-type="indexterm" data-primary="hot backups" data-secondary="mariabackup" id="idm46177452145576"/><a data-type="indexterm" data-primary="mariabackup" id="idm46177452144632"/> Originally forked from XtraBackup, this is a free open source tool that is available on Linux and Windows. The standout property of <code>mariabackup</code> is its seamless work with the MariaDB fork of MySQL, which continues to diverge significantly from both the mainstream MySQL and Percona Server. Since this is a direct fork of XtraBackup, you’ll find many similarities in how the tools are used and in their properties. Some of XtraBackup’s newer features, like backup encryption and secondary index 
+<span class="keep-together">omission,</span> are not present in <code>mariabackup</code>. However, using XtraBackup to back up MariaDB is currently impossible.</p>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Point-in-Time Recovery"><div class="sect1" id="CH10_BACKUP_PITR">
+<h1>Point-in-Time Recovery</h1>
+
+<p>Now that you’re familiar with the concept of hot backups, you<a data-type="indexterm" data-primary="backups and recovery" data-secondary="point-in-time recovery" data-tertiary="about" id="idm46177452139656"/> have almost everything you need to complete your backup toolkit. So far all the backup types that we’ve discussed share a similar trait—a deficiency. They allow restore only at the point in time when they were taken. If you have two backups, one done at 23:00 on Monday and the second at 23:00 on Tuesday, you cannot restore to 17:00 on Tuesday.</p>
+
+<p>Remember the infrastructure failure example given at the beginning of the chapter? Now, let’s make it worse and say that the data is gone, all the drives failed, and there’s no replication. The event happened on Wednesday at 21:00. Without PITR and with daily backups taken at 23:00, this means that you’ve just lost a full day’s worth of data irrevocably. Arguably, incremental backups done with XtraBackup allow you to make that problem somewhat less pronounced, but they still leave some room for data loss, and it’s less than practical to be running them very often.</p>
+
+<p>MySQL maintains a journal of transactions called the <em>binary log</em>. <a data-type="indexterm" data-primary="transactions" data-secondary="binary log" id="idm46177452135736"/><a data-type="indexterm" data-primary="binary logs" data-secondary="transaction log" id="idm46177452134728"/><a data-type="indexterm" data-primary="binary logs" data-secondary="point-in-time recovery" id="idm46177452133784"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="point-in-time recovery" data-tertiary="binary log for" id="idm46177452132840"/><a data-type="indexterm" data-primary="point-in-time recovery (PITR)" data-secondary="binary log for" id="idm46177452131624"/>By combining any of the backup methods we’ve discussed so far with binary logs, we get the ability to restore to a transaction at an arbitrary point in time. It’s very important to understand that you need both a backup <em>and</em> binary logs from after the backup for this to work. You also cannot go back in time, so you cannot recover the data to a point in time before your oldest base backup or dump was created.</p>
+
+<p>Binary logs contain both transaction timestamps and their identifiers. You can rely on either for recovery, and it is possible to tell MySQL to recover to a certain timestamp. This is not a problem when you want to recover to the latest point in time, but can be extremely important and helpful when trying to perform a restore to fix a logical inconsistency, like the one described in <a data-type="xref" href="#CH10_BACKUP_FAILURE_DEPLOYMENT_BUG">“Deployment Bug”</a>.  However, in most situations, you will need to identify a specific problematic transaction, and we’ll show you how to do that.</p>
+
+<p>One interesting peculiarity of MySQL is that it allows for PITR for logical backups.<a data-type="indexterm" data-primary="backups and recovery" data-secondary="logical backups" data-tertiary="point-in-time recovery" id="idm46177452127512"/><a data-type="indexterm" data-primary="logical backups" data-secondary="point-in-time recovery" id="idm46177452126264"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="point-in-time recovery" data-tertiary="logical backups" id="idm46177452125320"/><a data-type="indexterm" data-primary="point-in-time recovery (PITR)" data-secondary="logical backups" id="idm46177452124104"/> <a data-type="xref" href="#load-data-sql-dump-file">“Loading Data from a SQL Dump File”</a> discusses storing the binlog position for replica provisioning using <code>mysqldump</code>. The same binlog position can be used as a starting point for PITR. Every backup type in MySQL is suitable for PITR, unlike in other databases. To facilitate this property, make sure to note the binlog position when taking your backup. Some backup tools do that for you. When using those that don’t, you can run <code>SHOW MASTER STATUS</code> to get that data.</p>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Technical Background on Binary Logs"><div class="sect2" id="idm46177452121048">
+<h2>Technical Background on Binary Logs</h2>
+
+<p>MySQL differs from a lot of other mainstream RDBMS in that it<a data-type="indexterm" data-primary="binary logs" data-secondary="technical background" id="idm46177452119576"/><a data-type="indexterm" data-primary="point-in-time recovery (PITR)" data-secondary="binary log for" data-tertiary="technical background" id="idm46177452118520"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="point-in-time recovery" data-tertiary="binary log technical background" id="idm46177452117336"/><a data-type="indexterm" data-primary="storage engines" data-secondary="about" id="idm46177452116152"/> supports multiple storage engines, as discussed in <a data-type="xref" href="ch07.xhtml#ADV2-SEC-STORAGEENGINES">“Alternative Storage Engines”</a>. Not only that, but it supports multiple storage engines for tables inside a single database. As a result, some concepts in MySQL are different from in other systems.</p>
+
+<p>Binary logs in MySQL are essentially transaction logs.<a data-type="indexterm" data-primary="read-only transactions not logged" id="idm46177452113576"/> When binary logging is enabled, every transaction (excluding read-only transactions) will be reflected in the binary logs. There are three ways to write transactions to binary logs:</p>
+<dl>
+<dt><em>Statement</em></dt>
+<dd>
+<p>In this mode, statements are logged to the binary logs as they were written, which might cause indeterministic execution in replication scenarios.</p>
+</dd>
+<dt><em>Row</em></dt>
+<dd>
+<p>In this mode, statements are broken down into minimal DML operations, each modifying a single specific row. Although it guarantees deterministic execution, this mode is the most verbose and results in the largest files and thus the greatest I/O overhead.</p>
+</dd>
+<dt><em>Mixed</em></dt>
+<dd>
+<p>In this mode, “safe” statements are logged as is, while others are broken down.</p>
+</dd>
+</dl>
+
+<p>Usually, in database management systems, the transaction log is used for crash recovery,<a data-type="indexterm" data-primary="crash recovery via logs" id="idm46177452106680"/><a data-type="indexterm" data-primary="binary logs" data-secondary="crash recovery" id="idm46177452105944"/> replication, and PITR. However, because MySQL supports multiple storage engines, its binary logs can’t be used for crash recovery. Instead, each engine maintains its own crash recovery mechanism. For example, MyISAM is not crash-safe, <a data-type="indexterm" data-primary="InnoDB" data-secondary="crash-safe" id="idm46177452104616"/><a data-type="indexterm" data-primary="storage engines" data-secondary="crash-safe" id="idm46177452103672"/>whereas InnoDB has its own redo logs. Every transaction in MySQL is a distributed transaction with two-phase commit, to allow for this multiengined nature. Each committed transaction is guaranteed to be reflected in the storage engine’s redo logs, if the engine is transactional, as well as in MySQL’s own transaction log (the binary logs).</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>Binary logging has to be enabled in your MySQL instance for<a data-type="indexterm" data-primary="point-in-time recovery (PITR)" data-secondary="binary log for" id="idm46177452101160"/><a data-type="indexterm" data-primary="binary logs" data-secondary="point-in-time recovery" id="idm46177452100136"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="point-in-time recovery" data-tertiary="binary log for" id="idm46177452099192"/> PITR to be possible. You should also default to having <code>sync_binlog=1</code>, which guarantees the durability of each write. Refer to the <a href="https://oreil.ly/ygjVz">MySQL documentation</a> to understand the trade-offs of disabling binlog syncing.</p>
+</div>
+
+<p>We’ll talk more about how binary logs work in <a data-type="xref" href="ch13.xhtml#CH13_HA">Chapter 13</a>.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" class="less_space pagebreak-before" data-pdf-bookmark="Preserving Binary Logs"><div class="sect2" id="CH10_BACKUPS_PRESERVE_BINLOGS">
+<h2>Preserving Binary Logs</h2>
+
+<p>To allow PITR, you must preserve the binary logs starting from<a data-type="indexterm" data-primary="point-in-time recovery (PITR)" data-secondary="binary log for" data-tertiary="preserving binary logs" id="idm46177452093064"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="point-in-time recovery" data-tertiary="binary logs preserved" id="idm46177452091720"/><a data-type="indexterm" data-primary="binary logs" data-secondary="point-in-time recovery" data-tertiary="preserving binary logs" id="idm46177452090504"/> the binlog position of the oldest backup. There are few ways to do this:</p>
+
+<ul>
+<li>
+<p>Copy or sync binary logs “manually” using some readily available tool like <code>rsync</code>. Remember that MySQL continues to write to the current binary log file. If you’re copying files instead of continuously syncing them, do not copy the current binary log file. Continuously syncing files will take care of this problem by overwriting the partial file once it becomes non-current.</p>
+</li>
+<li>
+<p>Use <code>mysqlbinlog</code> to copy individual files or stream binlogs<a data-type="indexterm" data-primary="mysqlbinlog" id="idm46177452085640"/> continuously. Instructions are available <a href="https://oreil.ly/GAsjw">in the documentation</a>.</p>
+</li>
+<li>
+<p>Use MySQL Enterprise Backup, which has a built-in binlog<a data-type="indexterm" data-primary="MySQL Enterprise Backup (MEB)" data-secondary="preserving binary logs" id="idm46177452083192"/> copy feature. Note that it’s not a continuous copying, but relies on incremental backups to have binlog copies. This allows for PITR between two backups.</p>
+</li>
+<li>
+<p>Allow MySQL Server to store all the needed binary logs in its data directory by setting a high value for the<a data-type="indexterm" data-primary="MySQL" data-secondary="binary logs stored in data directory" id="idm46177452080856"/><a data-type="indexterm" data-primary="binary logs" data-secondary="stored in data directory" id="idm46177452079864"/><a data-type="indexterm" data-primary="binlog_expire_logs_seconds" id="idm46177452078904"/><a data-type="indexterm" data-primary="expire_logs_days" id="idm46177452078216"/> <code>binlog_expire_logs_seconds</code> or <code>expire_logs_days</code> variables. This option should ideally not be used on its own, but can be used in addition to any of the others. If anything happens to the data directory, like filesystem corruption, binary logs stored there may also get lost.</p>
+</li>
+</ul>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Identifying a PITR Target"><div class="sect2" id="idm46177452075832">
+<h2>Identifying a PITR Target</h2>
+
+<p>You may use the PITR technique to achieve two objectives:<a data-type="indexterm" data-primary="point-in-time recovery (PITR)" data-secondary="latest or arbitrary point in time" id="idm46177452074168"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="point-in-time recovery" data-tertiary="latest or arbitrary point in time" id="idm46177452073032"/></p>
+<ol>
+<li>
+<p>Recover to the latest point in time.</p>
+</li>
+<li>
+<p>Recover to an arbitrary point in time.</p>
+</li>
+
+</ol>
+
+<p>The first one, as discussed earlier, is useful to recover a completely lost database to the latest available state. The second is useful to get data as it was before. An example of a case when this can be useful was given in <a data-type="xref" href="#CH10_BACKUP_FAILURE_DEPLOYMENT_BUG">“Deployment Bug”</a>. To recover lost or incorrectly modified data, you can restore a backup and then recover it to a point in time just before the deployment was executed.</p>
+
+<p>Identifying the actual specific time when an issue happened can be a challenge. More often than not, the only way for you to find the desired point in time is by inspecting binary logs written around the time when the issue occurred. For example, if you suspect that a table was dropped, you may look for the table name, then for any DDL statements issued on that table, or specifically for a <code>DROP TABLE</code> statement.</p>
+
+<p class="pagebreak-before">Let’s illustrate that example. First, we need to actually drop a table, so we’ll drop the <code>facilities</code> table we created in <a data-type="xref" href="ch07.xhtml#LOADCSV">“Loading Data from Comma-Delimited Files”</a>. However, before that we’ll insert a record that’s for sure missing in the original backup:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">INSERT</code><code> </code><code class="k">INTO</code><code> </code><code class="nf">facilities</code><code class="p">(</code><code class="n">center</code><code class="p">)</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="k">VALUES</code><code> </code><code class="p">(</code><code class="s1">'this row was not here before'</code><code class="p">)</code><code class="p">;</code></strong></pre>
+
+<pre data-type="programlisting">Query OK, 1 row affected (0.01 sec)</pre>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">DROP</code><code> </code><code class="k">TABLE</code><code> </code><code class="n">nasa</code><code class="p">.</code><code class="n">facilities</code><code class="p">;</code></strong></pre>
+
+<pre data-type="programlisting">Query OK, 0 rows affected (0.02 sec)</pre>
+
+<p>We could now go back and restore one of the backups we’ve taken throughout this chapter, but then we would lose any changes made to the database between that point and the <code>DROP</code>. <a data-type="indexterm" data-primary="SHOW" data-secondary="BINARY LOGS" id="idm46177452013016"/><a data-type="indexterm" data-primary="binary logs" data-secondary="point-in-time recovery" data-tertiary="SHOW BINARY LOGS" id="idm46177452012008"/><a data-type="indexterm" data-primary="point-in-time recovery (PITR)" data-secondary="binary log for" data-tertiary="SHOW BINARY LOGS" id="idm46177452010792"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="point-in-time recovery" data-tertiary="SHOW BINARY LOGS" id="idm46177452009608"/><a data-type="indexterm" data-primary="mysqlbinlog" id="idm46177452008392"/>Instead, we’ll use <code>mysqlbinlog</code> to inspect the content of the binary logs and find the recovery target just before the <code>DROP</code> statement was run. To find the list of binary logs available in the data directory, you can run the following command:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">SHOW</code><code> </code><code class="k">BINARY</code><code> </code><code class="n">LOGS</code><code class="p">;</code></strong></pre>
+
+<pre data-type="programlisting">+---------------+-----------+-----------+
+| Log_name      | File_size | Encrypted |
++---------------+-----------+-----------+
+| binlog.000291 |       156 | No        |
+| binlog.000292 |       711 | No        |
++---------------+-----------+-----------+
+2 rows in set (0.00 sec)</pre>
+<div data-type="warning" epub:type="warning"><h6>Warning</h6>
+<p>MySQL won’t keep binary logs in its data directory forever.<a data-type="indexterm" data-primary="binary logs" data-secondary="stored in data directory" id="idm46177451977480"/><a data-type="indexterm" data-primary="MySQL" data-secondary="binary logs stored in data directory" id="idm46177451976536"/><a data-type="indexterm" data-primary="binlog_expire_logs_seconds" id="idm46177451975624"/><a data-type="indexterm" data-primary="expire_logs_days" id="idm46177451974984"/> They’re removed automatically when they are older than the duration specified under <code>binlog_expire_logs_seconds</code> or <code>expire_log_days</code>, and also can be removed manually by running <code>PURGE BINARY LOGS</code>. If you want to make sure binary logs are available, you should preserve them outside of the data directory as described in the previous section.</p>
+</div>
+
+<p>Now that the list of binary logs is available, you can either try to search in them, from the newest one to the oldest one, or you can just dump all their contents together. In our example, the files are small, so we can use the latter approach. In any case, the <code>mysqlbinlog</code> command is used:</p>
+<pre data-type="programlisting">
+<strong># cd /var/lib/mysql
+# mysqlbinlog binlog.000291 binlog.000292 \
+-vvv --base64-output='decode-rows' &gt; /tmp/mybinlog.sql</strong>
+</pre>
+
+<p>Inspecting the output file, we can find the problematic statement:</p>
+
+<pre data-type="programlisting">...
+#210613 23:32:19 server id 1  end_log_pos 200 ... Rotate to binlog.000291
+...
+# at 499
+#210614  0:46:08 server id 1  end_log_pos 576 ...
+# original_commit_timestamp=1623620769019544 (2021-06-14 00:46:09.019544 MSK)
+# immediate_commit_timestamp=1623620769019544 (2021-06-14 00:46:09.019544 MSK)
+/*!80001 SET @@session.original_commit_timestamp=1623620769019544*//*!*/;
+/*!80014 SET @@session.original_server_version=80025*//*!*/;
+/*!80014 SET @@session.immediate_server_version=80025*//*!*/;
+SET @@SESSION.GTID_NEXT= 'ANONYMOUS'/*!*/;
+# at 576
+#210614  0:46:08 server id 1  end_log_pos 711 ... Xid = 25
+use `nasa`/*!*/;
+SET TIMESTAMP=1623620768/*!*/;
+DROP TABLE `facilities` /* generated by server */
+/*!*/;
+SET @@SESSION.GTID_NEXT= 'AUTOMATIC' /* added by mysqlbinlog */ /*!*/;
+DELIMITER ;
+...</pre>
+
+<p>We should stop our recovery before 2021-06-14 00:46:08, or at binary log position 499. We’ll also need all binary logs from the latest backup, up to and including <em>binlog.00291</em>. Using this information, we can proceed to backup restoration and recovery.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Point-in-Time-Recovery Example: XtraBackup"><div class="sect2" id="idm46177452075176">
+<h2>Point-in-Time-Recovery Example: XtraBackup</h2>
+
+<p>On its own, XtraBackup doesn’t provide PITR capabilities. You<a data-type="indexterm" data-primary="point-in-time recovery (PITR)" data-secondary="Percona XtraBackup" id="idm46177451947624"/><a data-type="indexterm" data-primary="Percona XtraBackup" data-secondary="point-in-time recovery" id="idm46177451946680"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="point-in-time recovery" data-tertiary="XtraBackup" id="idm46177451945736"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="Percona XtraBackup" data-tertiary="point-in-time recovery" id="idm46177451944520"/> need to add the additional step of running <code>mysqlbinlog</code> to replay the binlog contents on the restored database:</p>
+<ol>
+<li>
+<p>Restore the backup. See <a data-type="xref" href="#CH10_BACKUP_PXC_USAGE">“Backing Up and Recovering”</a> for the exact steps.</p>
+</li>
+<li>
+<p>Start MySQL Server. If you are restoring on the source instance directly, it is recommended to use the <code>--skip-networking</code> option to prevent nonlocal clients from accessing the database. Otherwise, some clients may change the database before you’ve actually finished the recovery.</p>
+</li>
+<li>
+<p>Locate the backup’s binary log position. It’s available in the <em>xtrabackup_binlog_info</em> file in the backup directory:</p>
+
+<pre data-type="programlisting"># <strong>cat /tmp/base_backup/xtrabackup_binlog_info</strong></pre>
+
+<pre data-type="programlisting">binlog.000291   156</pre>
+</li>
+<li>
+<p>Find the timestamp or binlog position to which you want to recover—for example, immediately before a <code>DROP TABLE</code> was executed, as discussed earlier.</p>
+</li>
+<li>
+<p>Replay the binlogs up to the desired point. For this example, we’ve preserved binary log <em>binlog.000291</em> separately, but you would use your centralized binlog storage for the source of the binary logs. You use the <code>mysqlbinlog</code> command for this:</p>
+
+<pre data-type="programlisting"># <strong>mysqlbinlog /opt/mysql/binlog.000291</strong> \
+<strong>/opt/mysql/binlog.000292 --start-position=156</strong> \
+<strong>--stop-datetime="2021-06-14 00:46:00" | mysql</strong></pre>
+</li>
+<li>
+<p>Make sure the recovery was successful and that no data is missing. In our case, we’ll look for the record we added to the <code>facilities</code> table before dropping it:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">SELECT</code><code> </code><code class="n">center</code><code> </code><code class="k">FROM</code><code> </code><code class="n">facilities</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="k">WHERE</code><code> </code><code class="n">center</code><code> </code><code class="k">LIKE</code><code> </code><code class="s1">'%before%'</code><code class="p">;</code></strong></pre>
+
+<pre data-type="programlisting">+------------------------------+
+| center                       |
++------------------------------+
+| this row was not here before |
++------------------------------+
+1 row in set (0.00 sec)</pre>
+</li>
+
+</ol>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Point-in-Time-Recovery Example: mysqldump"><div class="sect2" id="idm46177451901160">
+<h2>Point-in-Time-Recovery Example: mysqldump</h2>
+
+<p>The steps necessary for PITR with <code>mysqldump</code> are analogous<a data-type="indexterm" data-primary="point-in-time recovery (PITR)" data-secondary="mysqldump" id="idm46177451899608"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="point-in-time recovery" data-tertiary="mysqldump" id="idm46177451898632"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="mysqldump" data-tertiary="point-in-time recovery" id="idm46177451897416"/><a data-type="indexterm" data-primary="mysqldump" data-secondary="point-in-time recovery" id="idm46177451896200"/> to the steps taken earlier with XtraBackup. We’re only showing this for completeness and so that you can see that PITR is similar with each and every backup type in MySQL. Here’s the process:</p>
+<ol>
+<li>
+<p>Restore the SQL dump. Again, if your recovery target server is the backup source, you probably want to make it inaccessible to clients.</p>
+</li>
+<li>
+<p>Locate the binary log position in the <code>mysqldump</code> backup file:</p>
+
+<pre data-type="programlisting">CHANGE MASTER TO MASTER_LOG_FILE='binlog.000010',
+MASTER_LOG_POS=191098797;</pre>
+</li>
+<li>
+<p>Find the timestamp or binlog position to which you want to recover (for example, immediately before a <code>DROP TABLE</code> was executed, as discussed before).</p>
+</li>
+<li>
+<p>Replay the binlogs up to the desired point:</p>
+
+<pre data-type="programlisting"># <strong>mysqlbinlog /path/to/datadir/mysql-bin.000010</strong> \
+<strong>/path/to/datadir/mysql-bin.000011</strong> \
+<strong>--start-position=191098797</strong> \
+<strong>--stop-datetime="20-05-25 13:00:00" | mysql</strong></pre>
+</li>
+
+</ol>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Exporting and Importing InnoDB Tablespaces"><div class="sect1" id="idm46177452141000">
+<h1>Exporting and Importing InnoDB Tablespaces</h1>
+
+<p>One of the major downsides of physical backups is that they usually<a data-type="indexterm" data-primary="InnoDB" data-secondary="Transportable Tablespaces" data-tertiary="background" id="ch10-te"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="InnoDB Transportable Tablespaces" data-tertiary="background" id="ch10-te2"/> require a significant portion of your database files to be copied at the same time. Although a storage engine like MyISAM allows for the copying of idle tables’ data files, you cannot guarantee consistency of InnoDB files. There are situations, though, where you need to transfer only a few tables, or just one table. So far the only option we’ve seen for that would be to utilize logical backups, which can be unacceptably slow. The export and import tablespaces feature of InnoDB, officially called <em>Transportable Tablespace</em>, is a way to get the best of both worlds. We will also call this feature <em>export/import</em> for brevity.</p>
+
+<p>The Transportable Tablespaces feature lets you combine the performance of an online physical backup with the granularity of a logical one. In essence, it offers the ability to do an online copy of an InnoDB table’s data files to be used for import into the same or a different table. <a data-type="indexterm" data-primary="replication" data-secondary="InnoDB Transportable Tablespaces" id="idm46177451867768"/>Such a copy can serve as a backup, or as a way to transfer data between separate MySQL installations.</p>
+
+<p>Why use export/import when a logical dump achieves the same thing? Export/import is much faster and, apart from the table being locked, doesn’t impact the server significantly. This is especially true for import. With table sizes in the multigigabyte range, this is one of the few feasible options for data transfer.</p>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Technical Background"><div class="sect2" id="idm46177451865736">
+<h2>Technical Background</h2>
+
+<p>To help you understand how this feature works, we’ll briefly review two concepts: physical backups and tablespaces.</p>
+
+<p>As we’ve seen, for a physical backup to be consistent, we can generally take two routes. The first is to shut down the instance, or otherwise make the data read-only in a guaranteed manner. The second is to make the data files consistent to point in time and then accumulate all changes between that point in time and the end of the backup. The Transportable Tablespaces feature works in the first way, requiring the table to be made read-only for a short while.</p>
+
+<p>A tablespace is a file that stores a table’s data and its indexes. By default, InnoDB uses the <code>innodb_file_per_table</code> option, which forces the creation of a dedicated tablespace file for each table. It’s possible to create a tablespace that will contain data for multiple tables, and you can use the “old” behavior of having all tables reside in a single <em>ibdata</em> tablespace. However, export is supported only for the default configuration, where there’s a dedicated tablespace for each table. Tablespaces exist separately for each partition in a partitioned table, which allows for an interesting ability to transfer partitions between separate tables or create a table from a partition.<a data-type="indexterm" data-startref="ch10-te" id="idm46177451861432"/><a data-type="indexterm" data-startref="ch10-te2" id="idm46177451860728"/></p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Exporting a Tablespace"><div class="sect2" id="idm46177451859800">
+<h2>Exporting a Tablespace</h2>
+
+<p>Now that those concepts have been covered, you know what<a data-type="indexterm" data-primary="InnoDB" data-secondary="Transportable Tablespaces" data-tertiary="exporting" id="idm46177451858168"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="InnoDB Transportable Tablespaces" data-tertiary="exporting" id="idm46177451856904"/> needs to be done for the export. However, one thing that’s still missing is the table definition. Even though most InnoDB tablespace files actually contain a redundant copy of the data dictionary records for their tables, the current implementation of Transportable Tablespaces requires a table to be present on the target before import.</p>
+
+<p class="pagebreak-before">The steps for exporting a tablespace are:</p>
+<ol>
+<li>
+<p>Get the table definition.</p>
+</li>
+<li>
+<p>Stop all writes to the table (or tables) and make it consistent.</p>
+</li>
+<li>
+<p>Prepare the extra files necessary for import of the tablespace later:</p>
+
+<ul>
+<li>
+<p>The <em>.cfg</em> file stores metadata used for schema verification.</p>
+</li>
+<li>
+<p>The <em>.cfp</em> file is generated only when encryption is used and contains the transition key that the target server needs to decrypt the tablespace.</p>
+</li>
+</ul>
+</li>
+
+</ol>
+
+<p>To get the table definition, you can use the <code>SHOW CREATE TABLE</code> <a data-type="indexterm" data-primary="SHOW" data-secondary="CREATE TABLE" data-tertiary="table definition" id="idm46177451847032"/>command that we’ve shown quite a few times throughout this book. All the other steps are done automatically by MySQL with a single command: <code>FLUSH TABLE ... FOR EXPORT</code>. That command locks the table and generates the additional required file (or files, if encryption is used) near the regular <em>.ibd</em> file of the target table. Let’s export the <code>actor</code> table from the <code>sakila</code> database:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">USE</code><code> </code><code class="n">sakila</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="n">FLUSH</code><code> </code><code class="k">TABLE</code><code> </code><code class="n">actor</code><code> </code><code class="k">FOR</code><code> </code><code class="n">EXPORT</code><code class="p">;</code></strong></pre>
+
+<pre data-type="programlisting">Query OK, 0 rows affected (0.00 sec)</pre>
+
+<p>The session where <code>FLUSH TABLE</code> was executed should remain open, because the <code>actor</code> table will be released as soon as the session is terminated. A new file, <em>actor.cfg</em>, should appear near the regular <em>actor.ibd</em> file in the MySQL data directory. Let’s verify:</p>
+
+<pre data-type="programlisting"># <strong>ls -1 /var/lib/mysql/sakila/actor.</strong></pre>
+
+<pre data-type="programlisting">/var/lib/mysql/sakila/actor.cfg
+/var/lib/mysql/sakila/actor.ibd</pre>
+
+<p>This pair of <em>.ibd</em> and <em>.cfg</em> files can now be copied somewhere and used later. Once you’ve copied the files, it’s generally advisable to release the locks on the table by running the <code>UNLOCK TABLES</code> statement, or closing the session where <code>FLUSH TABLE</code> was called. Once all that is done, you have a tablespace ready for import.</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>Partitioned tables have multiple <em>.ibd</em> files, and each of them gets a dedicated <em>.cfg</em> file. For example:</p>
+
+<ul>
+<li>
+<p><em>learning_mysql_partitioned#p#p0.cfg</em></p>
+</li>
+<li>
+<p><em>learning_mysql_partitioned#p#p0.ibd</em></p>
+</li>
+<li>
+<p><em>learning_mysql_partitioned#p#p1.cfg</em></p>
+</li>
+<li>
+<p><em>learning_mysql_partitioned#p#p1.ibd</em></p>
+</li>
+</ul>
+</div>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Importing a Tablespace"><div class="sect2" id="CH10_BACKUP_IMPORT_TABLESPACE">
+<h2>Importing a Tablespace</h2>
+
+<p>Importing a tablespace is quite straightforward. It consists of the following steps:<a data-type="indexterm" data-primary="InnoDB" data-secondary="Transportable Tablespaces" data-tertiary="importing" id="idm46177451791128"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="InnoDB Transportable Tablespaces" data-tertiary="importing" id="idm46177451789912"/></p>
+<ol>
+<li>
+<p>Create a table using the preserved definition. It is not possible to change the table’s definition in any way.</p>
+</li>
+<li>
+<p>Discard the table’s tablespace.</p>
+</li>
+<li>
+<p>Copy over the <em>.ibd</em> and <em>.cfg</em> files.</p>
+</li>
+<li>
+<p>Alter the table to import the tablespace.</p>
+</li>
+
+</ol>
+
+<p>If the table exists on the target server and has the same definition, then there’s no need to perform step 1.</p>
+
+<p>Let’s restore the <code>actor</code> table in another database on the same server. The table needs to exist, so we’ll create it:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">USE</code><code> </code><code class="n">nasa</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">CREATE</code><code> </code><code class="k">TABLE</code><code> </code><code class="ss">`actor`</code><code> </code><code class="p">(</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code>  </code><strong><code class="ss">`actor_id`</code><code> </code><code class="kt">smallint</code><code> </code><code class="k">unsigned</code><code> </code><code class="k">NOT</code><code> </code><code class="no">NULL</code><code> </code><code class="kp">AUTO_INCREMENT</code><code class="p">,</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code>  </code><strong><code class="ss">`first_name`</code><code> </code><code class="kt">varchar</code><code class="p">(</code><code class="mi">45</code><code class="p">)</code><code> </code><code class="k">NOT</code><code> </code><code class="no">NULL</code><code class="p">,</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code>  </code><strong><code class="ss">`last_name`</code><code> </code><code class="kt">varchar</code><code class="p">(</code><code class="mi">45</code><code class="p">)</code><code> </code><code class="k">NOT</code><code> </code><code class="no">NULL</code><code class="p">,</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code>  </code><strong><code class="ss">`last_update`</code><code> </code><code class="kt">timestamp</code><code> </code><code class="k">NOT</code><code> </code><code class="no">NULL</code><code> </code><code class="k">DEFAULT</code><code> </code><code class="k">CURRENT_TIMESTAMP</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code>    </code><strong><code class="k">ON</code><code> </code><code class="k">UPDATE</code><code> </code><code class="k">CURRENT_TIMESTAMP</code><code class="p">,</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code>  </code><strong><code class="k">PRIMARY</code><code> </code><code class="k">KEY</code><code> </code><code class="p">(</code><code class="ss">`actor_id`</code><code class="p">)</code><code class="p">,</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code>  </code><strong><code class="k">KEY</code><code> </code><code class="ss">`idx_actor_last_name`</code><code> </code><code class="p">(</code><code class="ss">`last_name`</code><code class="p">)</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="p">)</code><code> </code><code class="kp">ENGINE</code><code class="o">=</code><code class="n">InnoDB</code><code> </code><code class="kp">AUTO_INCREMENT</code><code class="o">=</code><code class="mi">201</code><code> </code><code class="k">DEFAULT</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code>    </code><strong><code class="kp">CHARSET</code><code class="o">=</code><code class="n">utf8mb4</code><code> </code><code class="k">COLLATE</code><code class="o">=</code><code class="n">utf8mb4_0900_ai_ci</code><code class="p">;</code></strong></pre>
+
+<pre data-type="programlisting">Query OK, 0 rows affected (0.04 sec)</pre>
+
+<p>As soon as the <code>actor</code> table is created, MySQL creates an <em>.ibd</em> file for it:</p>
+
+<pre data-type="programlisting"># <strong>ls /var/lib/mysql/nasa/</strong></pre>
+
+<pre data-type="programlisting">actor.ibd  facilities.ibd</pre>
+
+<p>This brings us to the next step: discarding this new table’s tablespace.<a data-type="indexterm" data-primary="ALTER TABLE" data-secondary="DISCARD TABLESPACE" id="idm46177451672120"/><a data-type="indexterm" data-primary="InnoDB" data-secondary="Transportable Tablespaces" data-tertiary="discarding" id="idm46177451671144"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="InnoDB Transportable Tablespaces" data-tertiary="discarding" id="idm46177451669960"/> That’s done by running a special <code>ALTER TABLE</code>:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">ALTER</code><code> </code><code class="k">TABLE</code><code> </code><code class="n">actor</code><code> </code><code class="n">DISCARD</code><code> </code><code class="n">TABLESPACE</code><code class="p">;</code></strong></pre>
+
+<pre data-type="programlisting">Query OK, 0 rows affected (0.02 sec)</pre>
+
+<p>Now the <em>.ibd</em> file will be gone:</p>
+
+<pre data-type="programlisting"># <strong>ls /var/lib/mysql/nasa/</strong></pre>
+
+<pre data-type="programlisting">facilities.ibd</pre>
+<div data-type="warning" epub:type="warning"><h6>Warning</h6>
+<p>Discarding the tablespace leads to total deletion of the associated tablespace files and is not a recoverable operation. You will need to recover from a backup if you run <code>ALTER TABLE ... DISCARD TABLESPACE</code> accidentally.</p>
+</div>
+
+<p>We can now copy the exported tablespace of the original <code>actor</code> table along with the <em>.cfg</em> file:</p>
+
+<pre data-type="programlisting"># <strong>cp -vip /opt/mysql/actor.* /var/lib/mysql/nasa/</strong></pre>
+
+<pre data-type="programlisting">'/opt/mysql/actor.cfg' -&gt; '/var/lib/mysql/nasa/actor.cfg'
+'/opt/mysql/actor.ibd' -&gt; '/var/lib/mysql/nasa/actor.ibd'</pre>
+
+<p>With all the steps done, it’s now possible to import the tablespace and verify the data:<a data-type="indexterm" data-primary="ALTER TABLE" data-secondary="IMPORT TABLESPACE" id="idm46177451587592"/></p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">ALTER</code><code> </code><code class="k">TABLE</code><code> </code><code class="n">actor</code><code> </code><code class="n">IMPORT</code><code> </code><code class="n">TABLESPACE</code><code class="p">;</code></strong></pre>
+
+<pre data-type="programlisting">Query OK, 0 rows affected (0.02 sec)</pre>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">SELECT</code><code> </code><code class="o">*</code><code> </code><code class="k">FROM</code><code> </code><code class="n">nasa</code><code class="p">.</code><code class="n">actor</code><code> </code><code class="k">LIMIT</code><code> </code><code class="mi">5</code><code class="p">;</code></strong></pre>
+
+<pre data-type="programlisting">+----------+------------+--------------+---------------------+
+| actor_id | first_name | last_name    | last_update         |
++----------+------------+--------------+---------------------+
+|        1 | PENELOPE   | GUINESS      | 2006-02-15 04:34:33 |
+|        2 | NICK       | WAHLBERG     | 2006-02-15 04:34:33 |
+|        3 | ED         | CHASE        | 2006-02-15 04:34:33 |
+|        4 | JENNIFER   | DAVIS        | 2006-02-15 04:34:33 |
+|        5 | JOHNNY     | LOLLOBRIGIDA | 2006-02-15 04:34:33 |
++----------+------------+--------------+---------------------+
+5 rows in set (0.00 sec)</pre>
+
+<p>You can see that we have the data from <code>sakila.actor</code> in <code>nasa.actor</code>.</p>
+
+<p>The best thing about Transportable Tablespaces is probably the efficiency. You can move very large tables between databases easily using this feature.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="XtraBackup Single-Table Restore"><div class="sect2" id="idm46177451792520">
+<h2>XtraBackup Single-Table Restore</h2>
+
+<p>Perhaps surprisingly, we’re going to mention XtraBackup once<a data-type="indexterm" data-primary="Percona XtraBackup" data-secondary="recovery" data-tertiary="single table" id="idm46177451539304"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="Percona XtraBackup" data-tertiary="recovery of single table" id="idm46177451538056"/><a data-type="indexterm" data-primary="point-in-time recovery (PITR)" data-secondary="XtraBackup single table recovery" id="idm46177451536872"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="point-in-time recovery" data-tertiary="XtraBackup single table recovery" id="idm46177451535992"/> again in the context of Transportable Tablespaces. That’s because XtraBackup allows for the export of the tables from any existing backup. In fact, that’s the most convenient way to restore an individual table, and it’s also a first building block for a single-table or partial-database PITR.</p>
+
+<p>This is one of the most advanced backup and recovery techniques, and it’s  completely based on the Transportable Tablespaces feature. It also carries over all of the limitations: for example, it won’t work on non-file-per-table tablespaces. We won’t give the exact steps here, and only cover this technique so that you know it’s possible.</p>
+
+<p>To perform a single-table restore, you should first run <code>xtrabackup</code> with the 
+<span class="keep-together"><code>--export</code></span> command-line argument to prepare the table for export. You may notice that the table’s name isn’t specified in this command, and in reality each table will be exported. Let’s run the command on one of the backups we took earlier:</p>
+
+<pre data-type="programlisting"># <strong>xtrabackup --prepare --export --target-dir=/tmp/base_backup</strong>
+# <strong>ls -1 /tmp/base_backup/sakila/</strong></pre>
+
+<pre data-type="programlisting">actor.cfg
+actor.ibd
+address.cfg
+address.ibd
+category.cfg
+category.ibd
+...</pre>
+
+<p>You can see that we have a <em>.cfg</em> file for each table: every tablespace is now ready to be exported and imported in another database. From here, you can repeat the steps from the previous section to restore the data from one of the tables.</p>
+
+<p>Single-table or partial-database PITR is tricky, and that’s true for most of the database management systems out there. As you saw in <a data-type="xref" href="#CH10_BACKUP_PITR">“Point-in-Time Recovery”</a>, PITR in MySQL is based on binlogs. What that means for partial recovery is that transactions concerning all tables in all databases are recorded, but binlogs can be filtered when applied through replication. Very briefly, therefore, the partial recovery procedure is this: you export the required tables, build a completely separate instance, and feed it with binlogs through a replication channel.</p>
+
+<p>You can find more information in community blogs and articles like <a href="https://oreil.ly/jjdfT">“MySQL Single Table PITR”</a>, <a href="https://oreil.ly/YWWpY">“Filtering Binary Logs with MySQL”</a>, and <a href="https://oreil.ly/zoWpw">“How to Make MySQL PITR Faster”</a>.</p>
+
+<p>The export/import feature is a powerful technique when used correctly and under certain circumstances.</p>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Testing and Verifying Your Backups"><div class="sect1" id="CH10_BACKUP_TEST_VERIFY">
+<h1>Testing and Verifying Your Backups</h1>
+
+<p>Backups are good only when you’re sure you can trust them.<a data-type="indexterm" data-primary="backups and recovery" data-secondary="testing and verifying" id="idm46177451501832"/> There are numerous examples of people having backup systems that failed when most needed. It’s entirely possible to be taking backups frequently and still lose the data.</p>
+
+<p>There are multiple ways in which backups can be unhelpful or can fail:</p>
+<dl>
+<dt>Inconsistent backups</dt>
+<dd>
+<p>The simplest example of this is a snapshot backup incorrectly taken from multiple volumes when the database is running. The resulting backup may be broken or missing data. Unfortunately, some of the backups you take may be consistent, and others may not be broken or inconsistent enough for you to notice until it’s too late.</p>
+</dd>
+<dt>Corruption of the source database</dt>
+<dd>
+<p>Physical backups, as we<a data-type="indexterm" data-primary="corruption of data" data-secondary="physical backups carrying" id="idm46177451497096"/> covered extensively, will have copies of all of the database pages, corrupted or not. Some tools try to verify the data as they go, but this is not completely error-free. Your successful backups may contain bad data that cannot be read later.</p>
+</dd>
+<dt>Corruption of the backups</dt>
+<dd>
+<p>Backups are just data on their own and as such are susceptible to the same issues as the original data. Your successful backup might end up being completely useless if its data gets corrupted while it’s being stored.</p>
+</dd>
+<dt>Bugs</dt>
+<dd>
+<p>Things happen. A backup tool you’ve been using for a dozen years might have a bug that you, of all people, will discover. In the best case, your backup will fail; in the worst case, it might fail to restore.</p>
+</dd>
+<dt>Operational errors</dt>
+<dd>
+<p>We’re all human, and we make mistakes. If you automate everything, the risk here changes from human errors to bugs.</p>
+</dd>
+</dl>
+
+<p>That’s not a comprehensive list of the issues that you might face, but it gives you some insight into the problems you might encounter even when your backup strategy is sound. Let’s review some steps you can take to make you sleep better:</p>
+
+<ul>
+<li>
+<p>When implementing a backup system, test it thoroughly, and test it in various modes. Make sure you can back up your system, and use the backup for recovery. Test with and without load. Your backups can be consistent when no connection is modifying the data, and fail when that’s not true.</p>
+</li>
+<li>
+<p>Use both physical and logical backups. They have different properties and failure modes, especially around source data corruption.</p>
+</li>
+<li>
+<p>Back up your backups, or just make sure that they are at least as durable as the database.</p>
+</li>
+<li>
+<p>Periodically perform backup restoration tests.</p>
+</li>
+</ul>
+
+<p>The last point is especially interesting. No backup should be considered safe until it’s been restored and tested. That means that in a perfect world, your automation will actually try to use the backup to build a database server and report back success only when that goes well. Additionally, that new database can be attached to the source as a replica, and a <a data-type="indexterm" data-primary="Percona Toolkit" data-secondary="data verification" id="idm46177451486392"/><a data-type="indexterm" data-primary="web links in book" data-secondary="Percona Toolkit data verification" id="idm46177451485544"/>data verification tool like <a href="https://oreil.ly/YgfuM"><code>pt-table-checksum</code> from Percona Toolkit</a> can be used to check the data consistency.</p>
+
+<p class="pagebreak-before">Here are some possible steps for backup data verification for physical backups:</p>
+<ol>
+<li>
+<p>Prepare the backup.</p>
+</li>
+<li>
+<p>Restore the backup.</p>
+</li>
+<li>
+<p>Run <code>innochecksum</code> on all of the <em>.ibd</em> files.</p>
+
+<p>The following command will run four <code>innochecksum</code> processes in parallel on Linux:</p>
+
+<pre data-type="programlisting">$ <strong>find . -type f -name "*.ibd" -print0 |\</strong>
+<strong>xargs -t -0r -n1 --max-procs=4 innochecksum</strong></pre>
+</li>
+<li>
+<p>Start a new MySQL instance using the restored backup. Use a spare server, or just a dedicated <em>.cnf</em> file, and don’t forget to use nondefault ports and paths.</p>
+</li>
+<li>
+<p>Use <code>mysqldump</code> or any alternative to dump all of the data, making sure it’s readable and providing another copy of the backup.</p>
+</li>
+<li>
+<p>Attach the new MySQL instance as a replica to the original source database, and use <code>pt-table-checksum</code> or any alternative to verify that the data matches. The procedure is nicely explained in the <a href="https://oreil.ly/fHruN"><code>xtrabackup</code> documentation</a>, among other sources.</p>
+</li>
+
+</ol>
+
+<p>These steps are complex and might take a long time, so you should decide whether it’s appropriate for your business and environment to utilize all of them.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Database Backup Strategy Primer"><div class="sect1" id="CH10_BACKUP_PRIMER">
+<h1>Database Backup Strategy Primer</h1>
+
+<p>Now that we’ve covered many of the bits and pieces related to<a data-type="indexterm" data-primary="backups and recovery" data-secondary="strategy for backups" id="idm46177451470504"/> backups and recovery, we can piece together a robust backup strategy. Here are the elements we’ll need to consider:</p>
+<dl>
+<dt>Point-in-time recovery</dt>
+<dd>
+<p>We need to decide whether we’ll need PITR capabilities, as<a data-type="indexterm" data-primary="point-in-time recovery (PITR)" data-secondary="backup strategy decisions" id="idm46177451467336"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="point-in-time recovery" data-tertiary="backup strategy decisions" id="idm46177451466296"/> that’ll drive our decisions regarding the backup strategy. You have to make the call for your specific case, but our suggestion is to default to having PITR available. It can be a lifesaver. If we decide that we’re going to need this capability, we need to set up binary logging and binlog copying.</p>
+</dd>
+<dt>Logical backups</dt>
+<dd>
+<p>We will likely need logical backups, either for their portability or<a data-type="indexterm" data-primary="logical backups" data-secondary="backup strategy" id="idm46177451463336"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="logical backups" data-tertiary="backup strategy" id="idm46177451462280"/><a data-type="indexterm" data-primary="corruption of data" data-secondary="logical backups combating" id="idm46177451461064"/><a data-type="indexterm" data-primary="portability" data-secondary="logical backups for" id="idm46177451460104"/> for the corruption safeguard. Since logical backups load the source database significantly, schedule them for a time when there’s the least load. In some circumstances it won’t be possible to do logical backups of your production database, either due to time or load constraints, or both. Since we still want to have the ability to run logical backups, we can use following techniques:</p>
+
+<ul>
+<li>
+<p>Run logical backups on a replicated database. It can be problematic to track binlog position in this case, so it’s recommended to use GTID-based replication in this case.</p>
+</li>
+<li>
+<p>Incorporate creation of logical backups into the physical backup’s verification process. A prepared backup is a data directory that can by used by a MySQL server right away. If you run a server targeting the backup, you will spoil that backup, so you need to copy that prepared backup somewhere first.</p>
+</li>
+</ul>
+</dd>
+<dt>Physical backups</dt>
+<dd>
+<p>Based on the OS, MySQL flavor, system properties, and careful<a data-type="indexterm" data-primary="physical backups" data-secondary="backup strategy" id="idm46177451454664"/><a data-type="indexterm" data-primary="backups and recovery" data-secondary="physical backups" data-tertiary="backup strategy" id="idm46177451453608"/> review of documentation, we need to choose the tool we’ll be using for physical backups. For the sake of simplicity, we’re choosing XtraBackup here.</p>
+
+<p>The first decision to make is how important the mean time to<a data-type="indexterm" data-primary="mean time to recovery and backup strategy" id="idm46177451451704"/> recovery (MTTR) target is for us. For example, if we only do weekly base backups, we might end up needing to apply almost a week’s worth of transactions to recover the backup. To decrease the MTTR, implement incremental backups on a daily or perhaps even hourly basis.</p>
+
+<p>Taking a step back, your system might be so large that even a hot backup with one of the physical backup tools is not viable for you. In that case, you need to go for snapshots of the volumes, if that’s possible.</p>
+</dd>
+<dt>Backup storage</dt>
+<dd>
+<p>We need to make sure our backups are safely, and ideally<a data-type="indexterm" data-primary="backups and recovery" data-secondary="storage of" id="idm46177451448488"/> redundantly, stored. We might accomplish this with a hardware storage setup utilizing a less-performant but redundant RAID array of level 5 or 6, or with a less reliable storage setup if we also continuously stream our backups to a cloud storage like Amazon’s S3. Or we might just default to using S3 if that’s possible for us with the backup tools of choice.</p>
+</dd>
+<dt>Backup testing and verification</dt>
+<dd>
+<p>Finally, once we have backups in place, we need to implement a backup testing process. Depending on the budget available for implementation and maintenance of this exercise, we should decide how many steps will be run each time and which steps will be run only periodically.</p>
+</dd>
+</dl>
+
+<p>With all of this done, we can say that we have our bases covered and our database safely backed up. It may seem like a lot of effort, considering how infrequently backups are used, but you have to remember that you will eventually face a disaster—it’s just a question of time.</p>
+</div></section>
+
+
+
+
+
+
+
+</div></section></div></body></html>

@@ -1,0 +1,1156 @@
+<html><head></head><body><div id="sbo-rt-content"><section data-type="chapter" epub:type="chapter" data-pdf-bookmark="Chapter 13. High Availability"><div class="chapter" id="CH13_HA">
+<h1><span class="label">Chapter 13. </span>High Availability</h1>
+
+
+<p>In the IT context, the term <em>high availability</em> defines a state of<a data-type="indexterm" data-primary="high availability" data-secondary="about" id="idm46177448973896"/><a data-type="indexterm" data-primary="failure" data-seealso="high availability" id="idm46177448972888"/> continuous operation for a specified length of time. The goal is not eliminating the risk of failure—that would be impossible. Rather, we are trying to guarantee that in a failure situation, the system remains available so that operation can continue. We often measure availability against a 100% operational or never-fails standard. A common standard of availability is known as <em>five 9s</em>, or 99.999% availability. Two 9s would be a system that guarantees 99% availability, allowing up to 1% downtime. Over the course of a year, this would translate to 3.65 days of unavailability.</p>
+
+<p><em>Reliability engineering</em> uses three principles of systems<a data-type="indexterm" data-primary="reliability engineering" id="idm46177448970120"/><a data-type="indexterm" data-primary="single points of failure (SPOFs)" id="idm46177448969416"/> design to help achieve high availability: elimination of single points of failure (SPOFs), reliable crossover or failover points, and failure detection capabilities (including monitoring, discussed in <a data-type="xref" href="ch12.xhtml#CH12_MONITORING">Chapter 12</a>).</p>
+
+<p>Redundancy is required for many components to achieve high availability. A simple example is an airplane with two engines. If one engine fails while flying, the aircraft can still land at an airport. A more complex example is a nuclear power plant, where there are numerous redundant protocols and components to avoid catastrophic failures. Similarly, to achieve high availability of a database we need network redundancy, disk redundancy, different power supplies, multiple application and database servers, and much more.</p>
+
+<p>This chapter will focus on the options to achieve high availability that MySQL databases offer.</p>
+
+
+
+
+
+
+<section data-type="sect1" class="less_space pagebreak-before" data-pdf-bookmark="Asynchronous Replication"><div class="sect1" id="idm46177448965912">
+<h1>Asynchronous Replication</h1>
+
+<p><em>Replication</em> enables data from one MySQL database server<a data-type="indexterm" data-primary="high availability" data-secondary="asynchronous replication" data-tertiary="about" id="ch13-asab"/><a data-type="indexterm" data-primary="replication" data-secondary="asynchronous" data-see="asynchronous replication" id="idm46177448962216"/><a data-type="indexterm" data-primary="replication" data-secondary="synchronous" data-see="synchronous replication" id="idm46177448960984"/><a data-type="indexterm" data-primary="asynchronous replication" data-secondary="about" id="ch13-asab3"/> (known as a <em>source</em>) to be copied to one or more other MySQL database servers (known as <em>replicas</em>). <a data-type="indexterm" data-primary="defaults" data-secondary="asynchronous replication" id="idm46177448957576"/>MySQL replication by default is asynchronous. With asynchronous replication, the source writes events to its binary log, and replicas request them when ready. There is no guarantee that any event will ever reach any replica. It’s a loosely coupled source/replica relationship, where the following are true:</p>
+
+<ul>
+<li>
+<p>The source does not wait for the replica to catch up.</p>
+</li>
+<li>
+<p>The replica determines how much to read and from which point in the binary log.</p>
+</li>
+<li>
+<p>The replica can be arbitrarily far behind the source in reading or applying changes. This issue is known as <em>replication lag</em>, and we will look at ways of minimizing it.</p>
+</li>
+</ul>
+
+<p>Asynchronous replication provides lower write latency since a write is acknowledged locally by a source before being written to the replicas.</p>
+
+<p>MySQL implements its replication capabilities using three main threads, one on the source server and two on the replicas:<a data-type="indexterm" data-primary="thread" data-secondary="asynchronous replication threads" id="idm46177448951416"/></p>
+<dl>
+<dt><em>Binary log dump thread</em></dt>
+<dd>
+<p>The source creates a thread to send the binary log contents to a replica when the replica connects. We can identify this thread in the output of <code>SHOW PROCESSLIST</code> on the source as the <code>Binlog Dump</code> thread.<a data-type="indexterm" data-primary="SHOW" data-secondary="PROCESSLIST" id="idm46177448947624"/></p>
+
+<p>The binary log dump thread acquires a lock on the source’s binary log for reading each event sent to the replica. When the source reads the event, the lock is released, even before the source sends the event to the replica.</p>
+</dd>
+<dt><em>Replication I/O thread</em></dt>
+<dd>
+<p>When we execute the <code>START SLAVE</code> statement on a replica server, the replica creates an I/O thread connected to the source and asks it to send the updates recorded in its binary logs.</p>
+
+<p>The replication I/O thread reads the updates that the source’s <code>Binlog Dump</code> thread sends (see the previous item) and copies them to local files that comprise the replica’s relay log.</p>
+
+<p>MySQL shows the state of this thread as <code>Slave_IO_running</code> in the output of <code>SHOW SLAVE STATUS</code>.<a data-type="indexterm" data-primary="SHOW" data-secondary="SLAVE STATUS" id="idm46177448941640"/></p>
+</dd>
+<dt><em>Replication SQL thread</em></dt>
+<dd>
+<p>The replica creates a SQL thread to read the relay log written by the replication I/O thread and execute the transactions contained in it.</p>
+</dd>
+</dl>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>As mentioned in Chapter 1, Oracle, Percona, and Maria DB are working to remove legacy terminology with negative connotations from their products. The documentation already uses the terms <em>source</em> and <em>replica</em>, as we do in this book, but because of the need to maintain backward compatibility and support for older versions, it would be impossible to completely change the terminology in one release. This is an ongoing effort.</p>
+</div>
+
+<p>There are ways to improve replication parallelization, as you’ll see later in this 
+<span class="keep-together">chapter.</span></p>
+
+<p><a data-type="xref" href="#FIG-ASYNC_REPL">Figure 13-1</a> shows what the MySQL replication architecture looks like.</p>
+
+<figure><div id="FIG-ASYNC_REPL" class="figure">
+<img src="Images/lm2e_1301.png" alt="lm2e 1301" width="1357" height="513"/>
+<h6><span class="label">Figure 13-1. </span>Asynchronous replication architecture flow</h6>
+</div></figure>
+
+<p>Replication works because events written to the binary log are read from the source and then processed on the replica, as shown in <a data-type="xref" href="#FIG-ASYNC_REPL">Figure 13-1</a>. The events are recorded within the binary log in different formats according to the type of event. MySQL replication has three kinds of binary logging formats:</p>
+<dl>
+<dt>Row-based replication (RBR)</dt>
+<dd>
+<p>The source writes events to the binary log that indicate how individual table rows are changed. Replication of the source to the replica works by copying the events representing the replica’s table rows’ changes. For MySQL 5.7 and 8.0, this is the default replication format.</p>
+</dd>
+<dt>Statement-based replication (SBR)</dt>
+<dd>
+<p>The source writes SQL statements to the binary log. Replication of the source to the replica works by executing the SQL statements on the replica.</p>
+</dd>
+<dt>Mixed replication</dt>
+<dd>
+<p>You can also configure MySQL to use a mix of both statement-based and row-based logging, depending on which one is most appropriate to log the changes. With mixed-format logging, MySQL uses a statement-based log by default but switches to a row-based log for certain unsafe statements that have a nondeterministic behavior. For example, suppose we have the following statement:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">UPDATE</code><code> </code><code class="n">customer</code><code> </code><code class="kt">SET</code><code> </code><code class="n">last_update</code><code class="o">=</code><code class="nf">NOW</code><code class="p">(</code><code class="p">)</code><code> </code><code class="k">WHERE</code><code> </code><code class="n">customer_id</code><code class="o">=</code><code class="mi">1</code><code class="p">;</code></strong></pre>
+
+<p>We know that the function <code>NOW()</code> returns the current date and time. Imagine that the source replicates the statement with 1 second of delay (there could be various reasons for this, such as the replica being on a different continent than the source). When the replica receives the statement and executes it, there will be a 1-second difference in the date and time returned by the function, leading to data inconsistency between the source and replica. When the mixed replication format is used, whenever MySQL parses a nondeterministic function like this, it will convert the statement to row-based replication. You can find a list of other functions that MySQL considers unsafe in the <a href="https://oreil.ly/RGyxB">documentation</a>.<a data-type="indexterm" data-startref="ch13-asab" id="idm46177448904680"/><a data-type="indexterm" data-startref="ch13-asab3" id="idm46177448904008"/></p>
+</dd>
+</dl>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Basic Parameters to Set on the Source and the Replica"><div class="sect2" id="basicparameters">
+<h2>Basic Parameters to Set on the Source and the Replica</h2>
+
+<p>There are some basic settings that we need to set on both the<a data-type="indexterm" data-primary="high availability" data-secondary="asynchronous replication" data-tertiary="parameters to set" id="idm46177448901144"/><a data-type="indexterm" data-primary="asynchronous replication" data-secondary="parameters to set" id="idm46177448899928"/> source server and the replica server in order to make replication work. They are required for all methods explained in this section.</p>
+
+<p>On the source server, you must enable binary logging and define a unique server ID. You’ll need to restart the server after making these changes (if you haven’t already) because these parameters are not dynamic.</p>
+<div data-type="tip"><h6>Tip</h6>
+<p>The server ID does not need to be incremental or be in any order, like having the source server ID be smaller than the replica server ID. The only requirement is that it be unique in each server that is part of the replication topology.</p>
+</div>
+
+<p>Here’s what this will look like in the <em>my.cnf</em> file:<a data-type="indexterm" data-primary="my.cnf configuration file" data-secondary="asynchronous replication" id="idm46177448875928"/></p>
+<pre data-type="programlisting">
+[mysqld]
+log-bin=mysql-bin
+server-id=1
+</pre>
+
+<p>You also need to establish a unique server ID for each replica. Like with the source, if you haven’t done this yet, you’ll need to restart the replica server after assigning it its ID. It is not mandatory to enable the binary log in the replica server, although it is a recommended practice:</p>
+<pre data-type="programlisting">
+[mysqld]
+log-bin=mysql-replica-bin
+server-id=1617565330
+binlog_format = ROW
+log_slave_updates
+</pre>
+
+<p>Using the <code>log_slave_updates</code> option tells the replica server that commands from a source server should be logged to the replica’s own binary log. Again, this is not mandatory, but it is recommended as a good practice.</p>
+
+<p>Each replica connects to the source using a MySQL username and password, so you’ll also need to create a user account on the source server that the replica can use to connect (for a refresher on this, see “Creating and Using New Users” on page 317). Any account can be used for this operation, provided it has been granted the <code>REPLICATION SLAVE</code> privilege. Here’s an example of how to create the user on the source server:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">CREATE</code><code> </code><code class="n">USER</code><code> </code><code class="s1">'repl'</code><code class="o">@</code><code class="s1">'%'</code><code> </code><code class="n">IDENTIFIED</code><code> </code><code class="k">BY</code><code> </code><code class="s1">'P@ssw0rd!'</code><code class="p">;</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">GRANT</code><code> </code><code class="n">REPLICATION</code><code> </code><code class="n">SLAVE</code><code> </code><code class="k">ON</code><code> </code><code class="o">*</code><code class="p">.</code><code class="o">*</code><code> </code><code class="k">TO</code><code> </code><code class="s1">'repl'</code><code class="o">@</code><code class="s1">'%'</code><code class="p">;</code></strong></pre>
+<div data-type="tip"><h6>Tip</h6>
+<p>If you are using an automation tool like Ansible to deploy MySQL, you can use the following bash command to create server IDs:<a data-type="indexterm" data-primary="Ansible deploying MySQL" id="idm46177448828600"/></p>
+
+<pre data-type="programlisting"># <strong>date '+%s'</strong></pre>
+
+<pre data-type="programlisting">1617565330</pre>
+
+<p>The command converts the current date and time to an integer value, so it increases monotonically. Note that the <code>date</code> command does not guarantee the values’ uniqueness, but you may find it convenient to use as it provides a relatively good uniqueness level.</p>
+</div>
+
+<p>In the next sections, you will see different options to create a replica server.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Creating a Replica Using PerconaXtraBackup"><div class="sect2" id="idm46177448902488">
+<h2>Creating a Replica Using PerconaXtraBackup</h2>
+
+<p>As we saw in Chapter 10, the Percona XtraBackup tool provides<a data-type="indexterm" data-primary="high availability" data-secondary="asynchronous replication" data-tertiary="Percona XtraBackup" id="idm46177448831912"/><a data-type="indexterm" data-primary="asynchronous replication" data-secondary="Percona XtraBackup" id="idm46177448830696"/><a data-type="indexterm" data-primary="Percona XtraBackup" data-secondary="asynchronous replication" id="idm46177448829784"/> a method of performing a hot backup of your MySQL data while the system is running. It also offers advanced capabilities like parallelization, compression, and encryption.</p>
+
+<p>The first step is taking a copy of the current source so we can start our replica. The XtraBackup tool performs a physical backup of the source (see “Physical and Logical Backups” on page 376). We will use the commands provided in <a data-type="xref" href="ch10.xhtml#PERCONA_PXB">“Percona XtraBackup”</a>:</p>
+
+<pre data-type="programlisting"># <strong>xtrabackup --defaults-file=my.cnf -uroot -p_&lt;password&gt;_</strong> \
+    <strong>-H <em>&lt;host&gt;</em> -P 3306 --backup --parallel=4</strong> \
+    <strong>--datadir=./data/ --target-dir=./backup/</strong></pre>
+
+<p class="pagebreak-before">Alternatively, you can use <code>rsync</code>, NFS, or any other method that you feel comfortable with.</p>
+
+<p>Once XtraBackup finishes the backup, we will send the files to a backup directory on the replica server. In this example, we will send the files using the <code>scp</code> command:</p>
+
+<pre data-type="programlisting"># <strong>scp -r ./backup/* <em>&lt;user&gt;@&lt;host&gt;</em>:/backup</strong></pre>
+
+<p>At this point we’re finished with the source. The following steps will run only on the replica server. The next step is to prepare our backup:</p>
+
+<pre data-type="programlisting"># <strong>xtrabackup --prepare --apply-log --target-dir=./</strong></pre>
+
+<p>With everything set, we are going to move the backup to the data directory:</p>
+
+<pre data-type="programlisting"># <strong>xtrabackup --defaults-file=/etc/my.cnf --copy-back --target-dir=./backup</strong></pre>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>Before proceeding, verify that your replica server does not have the same <code>server_id</code> as your source. If you followed the steps outlined in the previous section, you should have taken care of this already; if not, do so now.</p>
+</div>
+
+<p>On the replica, the content of the file <em>xtrabackup_binlog_info</em> will look something like this:</p>
+
+<pre data-type="programlisting">$ <strong>cat /backup/xtrabackup_binlog_info</strong>
+mysql-bin.000003    156</pre>
+
+<p>This information is essential because it tells us where to start replicating. Remember that the source was still receiving operations when we took the backup, so we need to know what position MySQL was at in the binary log file when the backup finished.</p>
+
+<p>With that information, we can run the command to start the replication. It will look something like this:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">CHANGE</code><code> </code><code class="n">MASTER</code><code> </code><code class="k">TO</code><code> </code><code class="n">MASTER_HOST</code><code class="o">=</code><code class="s1">'192.168.1.2'</code><code class="p">,</code><code> </code><code class="n">MASTER_USER</code><code class="o">=</code><code class="s1">'repl'</code><code class="p">,</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="n">MASTER_PASSWORD</code><code class="o">=</code><code class="s1">'P@ssw0rd!'</code><code class="p">,</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="n">MASTER_LOG_FILE</code><code class="o">=</code><code class="s1">'mysql-bin.000003'</code><code class="p">,</code><code> </code><code class="n">MASTER_LOG_POS</code><code class="o">=</code><code class="mi">156</code><code class="p">;</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="n">START</code><code> </code><code class="n">SLAVE</code><code class="p">;</code></strong></pre>
+
+<p>Once you’ve started, you can run the <code>SHOW SLAVE STATUS</code> command to check if the replication is working:<a data-type="indexterm" data-primary="SHOW" data-secondary="SLAVE STATUS" id="idm46177448726120"/></p>
+<pre data-type="programlisting" data-code-language="mysql">
+<code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">SHOW</code><code> </code><code class="n">SLAVE</code><code> </code><code class="n">STATUS</code><code class="err">\</code><code class="n">G</code></strong><code>
+</code></pre>
+
+<pre data-type="programlisting">             Slave_IO_Running: Yes
+            Slave_SQL_Running: Yes
+                   Last_Errno: 0
+                   Last_Error:
+                 Skip_Counter: 0
+          Exec_Master_Log_Pos: 8332
+              Relay_Log_Space: 8752
+              Until_Condition: None
+        Seconds_Behind_Master: 0
+Master_SSL_Verify_Server_Cert: No
+                Last_IO_Errno: 0
+                Last_IO_Error:
+               Last_SQL_Errno: 0
+               Last_SQL_Error:</pre>
+
+<p>It is important to check that both threads are running (<code>Slave_IO_Running</code> and <code>Slave_SQL_Running</code>), whether there have been any errors (<code>Last_Error</code>), and how many seconds the replica is behind the source. For large databases with an intensive write workload, the replica may take a while to catch up.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Creating a Replica Using the Clone Plugin"><div class="sect2" id="clone_plugin">
+<h2>Creating a Replica Using the Clone Plugin</h2>
+
+<p>MySQL 8.0.17 introduced the <a href="https://oreil.ly/fBWth">clone plugin</a>, which<a data-type="indexterm" data-primary="high availability" data-secondary="asynchronous replication" data-tertiary="clone plugin" id="ch13-clo"/><a data-type="indexterm" data-primary="asynchronous replication" data-secondary="clone plugin" id="ch13-clo2"/><a data-type="indexterm" data-primary="clone plugin for replication" id="ch13-clo3"/> can be used to make one MySQL server instance a <em>clone</em> of another. We refer to the server instance where the <code>CLONE</code> statement is executed as the <em>recipient</em> and to the source server instance from which the recipient will clone the data as the <em>donor</em>. The donor instance can be local or remote. The cloning process works by creating a physical snapshot of the data and metadata stored in the InnoDB storage engine on the donor, and transferring it to the recipient. Both local and remote instances perform the same clone operation; there is no difference related to the data between the two options.</p>
+
+<p>Let’s walk through a real example. We’ll show you some additional details along the way, like how to monitor the progress of a long-running <code>CLONE</code> command, the privileges required to clone, and more. The following example uses the classic shell. We’ll talk about MySQL Shell, introduced in MySQL 8.0, in Chapter 16.</p>
+
+<p>Choose the MySQL server to clone from and connect to it as the <code>root</code> user. Then install the clone plugin, create a user to transfer the data from the donor server, and grant that user the <code>BACKUP_ADMIN</code> privilege:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="n">INSTALL</code><code> </code><code class="n">PLUGIN</code><code> </code><code class="n">CLONE</code><code> </code><code class="k">SONAME</code><code> </code><code class="s2">"mysql_clone.so"</code><code class="p">;</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">CREATE</code><code> </code><code class="n">USER</code><code> </code><code class="n">clone_user</code><code class="o">@</code><code class="s1">'%'</code><code> </code><code class="n">IDENTIFIED</code><code> </code><code class="k">BY</code><code> </code><code class="s2">"clone_password"</code><code class="p">;</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">GRANT</code><code> </code><code class="n">BACKUP_ADMIN</code><code> </code><code class="k">ON</code><code> </code><code class="o">*</code><code class="p">.</code><code class="o">*</code><code> </code><code class="k">to</code><code> </code><code class="n">clone_user</code><code class="p">;</code></strong></pre>
+
+<p>Next, to observe the progress of the cloning operation, we need to grant that user privileges to view the <code>performance_schema</code> database and execute functions:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">GRANT</code><code> </code><code class="k">SELECT</code><code> </code><code class="k">ON</code><code> </code><code class="n">performance_schema</code><code class="p">.</code><code class="o">*</code><code> </code><code class="k">TO</code><code> </code><code class="n">clone_user</code><code class="p">;</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">GRANT</code><code> </code><code class="n">EXECUTE</code><code> </code><code class="k">ON</code><code> </code><code class="o">*</code><code class="p">.</code><code class="o">*</code><code> </code><code class="k">to</code><code> </code><code class="n">clone_user</code><code class="p">;</code></strong></pre>
+
+<p>Now we will move to the recipient server. If you are provisioning a new node, first initialize a data directory and start the server.</p>
+
+<p>Connect to the recipient server as the <code>root</code> user. Then install the clone plugin, create a user to replace the current instance data with the cloned data, and grant that user the <code>CLONE_ADMIN</code> privilege. We’ll also provide a list of valid donors that the recipient can clone (here, just one):</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="n">INSTALL</code><code> </code><code class="n">PLUGIN</code><code> </code><code class="n">CLONE</code><code> </code><code class="k">SONAME</code><code> </code><code class="s2">"mysql_clone.so"</code><code class="p">;</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="kt">SET</code><code> </code><code class="n">GLOBAL</code><code> </code><code class="n">clone_valid_donor_list</code><code> </code><code class="o">=</code><code> </code><code class="s2">"127.0.0.1:21122"</code><code class="p">;</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">CREATE</code><code> </code><code class="n">USER</code><code> </code><code class="n">clone_user</code><code> </code><code class="n">IDENTIFIED</code><code> </code><code class="k">BY</code><code> </code><code class="s2">"clone_password"</code><code class="p">;</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">GRANT</code><code> </code><code class="n">CLONE_ADMIN</code><code> </code><code class="k">ON</code><code> </code><code class="o">*</code><code class="p">.</code><code class="o">*</code><code> </code><code class="k">to</code><code> </code><code class="n">clone_user</code><code class="p">;</code></strong></pre>
+
+<p>We’ll grant this user the same privileges we did on the donor side, to observe the progress on the recipient side:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">GRANT</code><code> </code><code class="k">SELECT</code><code> </code><code class="k">ON</code><code> </code><code class="n">performance_schema</code><code class="p">.</code><code class="o">*</code><code> </code><code class="k">TO</code><code> </code><code class="n">clone_user</code><code class="p">;</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">GRANT</code><code> </code><code class="n">EXECUTE</code><code> </code><code class="k">ON</code><code> </code><code class="o">*</code><code class="p">.</code><code class="o">*</code><code> </code><code class="k">to</code><code> </code><code class="n">clone_user</code><code class="p">;</code></strong></pre>
+
+<p>We now have everything we need in place, so it’s time to start the cloning process. Note that the donor server must be reachable from the recipient. The recipient will connect to the donor with the address and credentials provided and start cloning:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="n">CLONE</code><code> </code><code class="n">INSTANCE</code><code> </code><code class="k">FROM</code><code> </code><code class="n">clone_user</code><code class="o">@</code><code class="mi">192</code><code class="p">.</code><code class="mi">168</code><code class="p">.</code><code class="mi">1</code><code class="p">.</code><code class="mi">2</code><code class="p">:</code><code class="mi">3306</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="n">IDENTIFIED</code><code> </code><code class="k">BY</code><code> </code><code class="s2">"clone_password"</code><code class="p">;</code></strong></pre>
+
+<p>The recipient must shut down and restart itself for the clone operation to succeed. We can monitor the progress with the following query:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><strong>SELECT STAGE, STATE, CAST(BEGIN_TIME AS TIME) as "START TIME",
+CASE WHEN END_TIME IS NULL THEN
+LPAD(sys.format_time(POWER(10,12) * (UNIX_TIMESTAMP(now()) -
+    UNIX_TIMESTAMP(BEGIN_TIME))), 10,' <em>)
+ELSE
+LPAD(sys.format_time(POWER(10,12) * (UNIX_TIMESTAMP(END_TIME) -
+    UNIX_TIMESTAMP(BEGIN_TIME))), 10,</em> <em>)
+END AS DURATION,
+LPAD(CONCAT(FORMAT(ROUND(ESTIMATE/1024/1024,0), 0)," MB"), 16,</em> <em>)
+AS "Estimate",
+CASE WHEN BEGIN_TIME IS NULL THEN LPAD('0%</em>, 7, ' <em>)
+WHEN ESTIMATE &gt; 0 THEN
+LPAD(CONCAT(CAST(ROUND(DATA*100/ESTIMATE, 0) AS BINARY), "%"), 7, ' ')
+WHEN END_TIME IS NULL THEN LPAD('0%</em>, 7, ' <em>)
+ELSE LPAD('100%</em>, 7, ' ') END AS "Done(%)"
+from performance_schema.clone_progress;</strong></pre>
+
+<p>This will allow us to observe each state of the cloning process. The output will be similar to this:</p>
+
+<pre data-type="programlisting">+-----------+-----------+------------+-----------+----------+---------+
+| STAGE     | STATE     | START TIME | DURATION  | Estimate | Done(%) |
++-----------+-----------+------------+-----------+----------+---------+
+| DROP DATA | Completed | 14:44:46   |    1.33 s |     0 MB | 100%    |
++-----------+-----------+------------+-----------+----------+---------+
+| FILE COPY | Completed | 14:44:48   |    5.62 s | 1,511 MB | 100%    |
++-----------+-----------+------------+-----------+----------+---------+
+| PAGE COPY | Completed | 14:44:53   |  95.06 ms |     0 MB | 100%    |
++-----------+-----------+------------+-----------+----------+---------+
+| REDO COPY | Completed | 14:44:54   |  99.71 ms |     0 MB | 100%    |
++-----------+-----------+------------+-----------+----------+---------+
+| FILE SYNC | Completed | 14:44:54   |    6.33 s |     0 MB | 100%    |
++-----------+-----------+------------+-----------+----------+---------+
+| RESTART   | Completed | 14:45:00   |    4.08 s |     0 MB | 100%    |
++-----------+-----------+------------+-----------+----------+---------+
+| RECOVERY  | Completed | 14:45:04   | 516.86 ms |     0 MB | 100%    |
++-----------+-----------+------------+-----------+----------+---------+
+7 rows in set (0.08 sec)</pre>
+
+<p>As mentioned previously, there is a restart at the end. Note that replication has not started yet.</p>
+
+<p>In addition to cloning the data, the cloning operation extracts the binary log position and GTID from the donor server and transfers them to the recipient. We can execute the following queries on the donor to view the binary log position or the GTID of the last transaction that was applied:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">SELECT</code><code> </code><code class="n">BINLOG_FILE</code><code class="p">,</code><code> </code><code class="n">BINLOG_POSITION</code><code> </code><code class="k">FROM</code><code> </code><code class="n">performance_schema</code><code class="p">.</code><code class="n">clone_status</code><code class="p">;</code></strong></pre>
+
+<pre data-type="programlisting">+------------------+-----------------+
+| BINLOG_FILE      | BINLOG_POSITION |
++------------------+-----------------+
+| mysql-bin.000002 |       816804753 |
++------------------+-----------------+
+1 row in set (0.01 sec)</pre>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">SELECT</code><code> </code><code class="o">@</code><code class="o">@</code><code class="n">GLOBAL</code><code class="p">.</code><code class="n">GTID_EXECUTED</code><code class="p">;</code></strong></pre>
+
+<pre data-type="programlisting">+------------------------+
+| @@GLOBAL.GTID_EXECUTED |
++------------------------+
+|                        |
++------------------------+
+1 row in set (0.00 sec)</pre>
+
+<p>In this example we are not using GTIDs, so the query does not return anything. Next, we will run the command to start the replication:</p>
+<pre data-type="programlisting" data-code-language="mysql">
+<code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">CHANGE</code><code> </code><code class="n">MASTER</code><code> </code><code class="k">TO</code><code> </code><code class="n">MASTER_HOST</code><code> </code><code class="o">=</code><code> </code><code class="s1">'192.168.1.2'</code><code class="p">,</code><code> </code><code class="n">MASTER_PORT</code><code> </code><code class="o">=</code><code> </code><code class="mi">3306</code><code class="p">,</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="n">MASTER_USER</code><code> </code><code class="o">=</code><code> </code><code class="s1">'repl'</code><code class="p">,</code><code> </code><code class="n">MASTER_PASSWORD</code><code> </code><code class="o">=</code><code> </code><code class="s1">'P@ssw0rd!'</code><code class="p">,</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="n">MASTER_LOG_FILE</code><code> </code><code class="o">=</code><code> </code><code class="s1">'mysql-bin.000002'</code><code class="p">,</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="n">MASTER_LOG_POSITION</code><code> </code><code class="o">=</code><code> </code><code class="mi">816804753</code><code class="p">;</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="n">START</code><code> </code><code class="n">SLAVE</code><code class="p">;</code></strong><code>
+</code></pre>
+
+<p>As in the previous section, we can check that replication is working correctly by running the <code>SHOW SLAVE STATUS</code> command.</p>
+
+<p>The advantage of this approach is that the clone plugin automates the whole process, and only at the end is it necessary to execute the <code>CHANGE MASTER</code> command. The disadvantage is that the plugin is available only for MySQL 8.0.17 and higher. While it’s still relatively new, we believe that in  years to come, this process may become the default.<a data-type="indexterm" data-startref="ch13-clo" id="idm46177448258712"/><a data-type="indexterm" data-startref="ch13-clo2" id="idm46177448258008"/><a data-type="indexterm" data-startref="ch13-clo3" id="idm46177448257336"/></p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Creating a Replica Using mysqldump"><div class="sect2" id="CH13_HA_REPLICA_MYSQLDUMP">
+<h2>Creating a Replica Using mysqldump</h2>
+
+<p>This is what we might call the classic approach. It’s the typical<a data-type="indexterm" data-primary="high availability" data-secondary="asynchronous replication" data-tertiary="mysqldump" id="idm46177448255096"/><a data-type="indexterm" data-primary="asynchronous replication" data-secondary="mysqldump" id="idm46177448253880"/><a data-type="indexterm" data-primary="mysqldump" data-secondary="asynchronous replication" id="idm46177448252968"/> option for those who are getting started with MySQL and still learning about the ecosystem.  As usual, we assume here that you have performed the necessary setup in <a data-type="xref" href="#basicparameters">“Basic Parameters to Set on the Source and the Replica”</a>.</p>
+
+<p>Let’s see an example of using <code>mysqldump</code> to create a new replica. We will execute the backup from the source server:</p>
+<pre data-type="programlisting" data-code-language="mysql">
+# <strong>mysqldump -uroot -p&lt;<em>password</em>&gt; --single-transaction</strong> \
+    <strong>--all-databases --routines --triggers --events</strong> \
+    <strong>--master-data=2 &gt; backup.sql</strong>
+</pre>
+
+<p>The dump succeeded if the message <code>Dump completed</code> appears at the end:</p>
+
+<pre data-type="programlisting"># <strong>tail -1f backup.sql</strong></pre>
+
+<pre data-type="programlisting">-- Dump completed on 2021-04-26 20:16:33</pre>
+
+<p>With the backup taken, we need to import it in the replica server. For example, you can use this command:</p>
+
+<pre data-type="programlisting">$ <strong>mysql &lt; backup.sql</strong></pre>
+
+<p>Once that’s done, you’ll need to execute the <code>CHANGE MASTER</code> command with the coordinates extracted from the dump (for more details about <code>mysqldump</code>, revisit <a data-type="xref" href="ch10.xhtml#CH10_BACKUP_MYSQLDUMP">“The mysqldump Program”</a>). Because we used the <code>--master-data=2</code> option, the information will be written at the beginning of the dump. For example:</p>
+
+<pre data-type="programlisting">$ <strong>head -n 35 out</strong>
+-- MySQL dump 10.13  Distrib 5.7.31-34, for Linux (x86_64)
+--
+-- Host: 127.0.0.1    Database:
+-- ------------------------------------------------------
+-- Server version   5.7.33-log
+
+...
+
+--
+-- Position to start replication or point-in-time recovery from
+--
+
+-- <strong>CHANGE MASTER TO MASTER_LOG_FILE='mysql-bin.000001', MASTER_LOG_POS=4089;</strong></pre>
+
+<p>Or, if you’re using GTIDs:</p>
+
+<pre data-type="programlisting">--
+-- GTID state at the beginning of the backup
+-- (origin: @@global.gtid_executed)
+--
+
+<strong>SET @@GLOBAL.GTID_PURGED=<em>00048008-1111-1111-1111-111111111111:1-16</em>;</strong></pre>
+
+<p>Next, we are going to execute the command to start the replication. For the GTID scenario, it looks like this:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">CHANGE</code><code> </code><code class="n">MASTER</code><code> </code><code class="k">TO</code><code> </code><code class="n">MASTER_HOST</code><code class="o">=</code><code class="s1">'192.168.1.2'</code><code class="p">,</code><code> </code><code class="n">MASTER_USER</code><code class="o">=</code><code class="s1">'repl'</code><code class="p">,</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="n">MASTER_PASSWORD</code><code> </code><code class="o">=</code><code> </code><code class="s1">'P@ssw0rd!'</code><code class="p">,</code><code> </code><code class="n">MASTER_AUTO_POSITION</code><code class="o">=</code><code class="mi">1</code><code class="p">;</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="n">START</code><code> </code><code class="n">SLAVE</code><code class="p">;</code></strong></pre>
+
+<p>For traditional replication, you can start replication from the previously extracted binary log file position as follows:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">CHANGE</code><code> </code><code class="n">MASTER</code><code> </code><code class="k">TO</code><code> </code><code class="n">MASTER_LOG_FILE</code><code class="o">=</code><code class="s1">'mysql-bin.000001'</code><code class="p">,</code><code> </code><code class="n">MASTER_LOG_POS</code><code class="o">=</code><code class="mi">4089</code><code class="p">,</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="n">MASTER_HOST</code><code class="o">=</code><code class="s1">'192.168.1.2'</code><code class="p">,</code><code> </code><code class="n">MASTER_USER</code><code class="o">=</code><code class="s1">'repl'</code><code class="p">,</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="n">MASTER_PASSWORD</code><code class="o">=</code><code class="s1">'P@ssw0rd!'</code><code class="p">;</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="n">START</code><code> </code><code class="n">SLAVE</code><code class="p">;</code></strong></pre>
+
+<p>To verify that replication is working, execute the <code>SHOW SLAVE STATUS</code> command.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Creating a Replica Using mydumper and myloader"><div class="sect2" id="idm46177448256408">
+<h2>Creating a Replica Using mydumper and myloader</h2>
+
+<p><code>mysqldump</code> is the most common tool used by beginners for<a data-type="indexterm" data-primary="high availability" data-secondary="asynchronous replication" data-tertiary="mydumper and myloader" id="ch13-myd"/><a data-type="indexterm" data-primary="asynchronous replication" data-secondary="mydumper and myloader" id="ch13-myd2"/><a data-type="indexterm" data-primary="mydumper and myloader" data-secondary="asynchronous replication" id="ch13-myd3"/> performing backups and building replicas. But there is a more efficient method: <code>mydumper</code>. Like <code>mysqldump</code>, this tool generates a logical backup and can be used to create a consistent backup of your database. The main difference between <code>mydumper</code> and <code>mysqldump</code> is that <code>mydumper</code>, when paired with <code>myloader</code>, can dump and restore data in parallel, improving the dump and, especially, restore time. Imagine a scenario where your database has a dump of 500 GB. Using <code>mysqldump</code>, you will have a single huge file. With <code>mydumper</code>, you will have one file per table, allowing the restore process to be executed in parallel later.</p>
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect3" data-pdf-bookmark="Setting up the mydumper and myloader utilities"><div class="sect3" id="CH13_HA_MYLOADER_SETUP">
+<h3>Setting up the mydumper and myloader utilities</h3>
+
+<p>You can run <code>mydumper</code> directly on the source server or from another server, which in general is better since it will avoid the overhead in the storage system of writing the backup files on the same server.</p>
+
+<p>To install <code>mydumper</code>, download the package specific to the operating system version you are using. You can find the releases in the <a href="https://oreil.ly/7hakG"><code>mydumper</code> GitHub repository</a>. Let’s see an example for CentOS:</p>
+
+<pre data-type="programlisting"># <strong>yum install https://github.com/maxbube/mydumper/releases/download/v0.10.3/</strong> \
+<strong>mydumper-0.10.3-1.el7.x86_64.rpm -y</strong></pre>
+
+<p>Now you should have both the <code>mydumper</code> and <code>myloader</code> commands installed on the server. You can validate this with:</p>
+
+<pre data-type="programlisting">$ <strong>mydumper --version</strong>
+mydumper 0.10.3, built against MySQL 5.7.33-36
+
+$ <strong>myloader --version</strong>
+myloader 0.10.3, built against MySQL 5.7.33-36</pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect3" data-pdf-bookmark="Extracting data from the source"><div class="sect3" id="idm46177448067496">
+<h3>Extracting data from the source</h3>
+
+<p>The following command will execute a dump of all databases (except <code>mysql</code>, <code>test</code>, and the <code>sys</code> schema) with 15<a data-type="indexterm" data-primary="parallel backup queues" data-secondary="asynchronous replication" id="idm46177448065096"/> simultaneous threads and will also include triggers, views, and functions:</p>
+<pre data-type="programlisting">
+# <strong>mydumper --regex '^(?!(mysql\.|test\.|sys\.))' --threads=15
+--user=learning_user --password='learning_mysql' --host=192.168.1.2</strong> \
+    <strong>--port=3306 --trx-consistency-only --events --routines --triggers</strong> \
+    <strong>--compress --outputdir /backup --logfile /tmp/log.out --verbose=2</strong>
+</pre>
+<div data-type="tip"><h6>Tip</h6>
+<p>You will need to grant at least the <code>SELECT</code> and <code>RELOAD</code> permissions to the <code>mydumper</code> user.</p>
+</div>
+
+<p>If you check the output directory (<code>outputdir</code>), you will see the compressed files. Here’s the output on one of the authors’ machines:</p>
+<pre data-type="programlisting">
+# <strong>ls -l backup/</strong>
+total 5008
+-rw...1 vinicius.grippa percona   182 May  1 19:30 metadata
+-rw...1 vinicius.grippa percona   258 May  1 19:30 sysbench.sbtest10-schema.sql.gz
+-rw...1 vinicius.grippa percona 96568 May  1 19:30 sysbench.sbtest10.sql.gz
+-rw...1 vinicius.grippa percona   258 May  1 19:30 sysbench.sbtest11-schema.sql.gz
+-rw...1 vinicius.grippa percona 96588 May  1 19:30 sysbench.sbtest11.sql.gz
+-rw...1 vinicius.grippa percona   258 May  1 19:30 sysbench.sbtest12-schema.sql.gz
+...
+</pre>
+<div data-type="tip"><h6>Tip</h6>
+<p>Decide the number of threads based on the CPU cores of the database server and server load. Doing a parallel dump can consume a lot of server resources.</p>
+</div>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect3" data-pdf-bookmark="Restoring data in a replica server"><div class="sect3" id="idm46177448056120">
+<h3>Restoring data in a replica server</h3>
+
+<p>Like with <code>mysqldump</code>, we need to have the replica MySQL instance already up and running. Once the data is ready to be imported, we can execute the following command:</p>
+<pre data-type="programlisting">
+# <strong>myloader --user=learning_user --password='learning_mysql'
+--threads=25 --host=192.168.1.3 --port=3306
+--directory=/backup --overwrite-tables --verbose 3</strong>
+</pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect3" data-pdf-bookmark="Establishing the replication"><div class="sect3" id="idm46177448052648">
+<h3>Establishing the replication</h3>
+
+<p>Now that we’ve restored the data, we will set up replication. We need to find the correct binary log position at the start of the backup. This information is stored in the <code>mydumper</code> metadata file:</p>
+<pre data-type="programlisting">
+$ <strong>cat backup/metadata</strong>
+Started dump at: 2021-05-01 19:30:00
+SHOW MASTER STATUS:
+    Log: mysql-bin.000002
+    Pos: 9530779
+    GTID:00049010-1111-1111-1111-111111111111:1-319
+
+Finished dump at: 2021-05-01 19:30:01
+</pre>
+
+<p>Now, we simply execute the <code>CHANGE MASTER</code> command like we did previously for <code>mysqldump</code>:<a data-type="indexterm" data-startref="ch13-myd" id="idm46177448047944"/><a data-type="indexterm" data-startref="ch13-myd2" id="idm46177448047208"/><a data-type="indexterm" data-startref="ch13-myd3" id="idm46177448046536"/></p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">CHANGE</code><code> </code><code class="n">MASTER</code><code> </code><code class="k">TO</code><code> </code><code class="n">MASTER_HOST</code><code class="o">=</code><code class="s1">'192.168.1.2'</code><code class="p">,</code><code> </code><code class="n">MASTER_USER</code><code class="o">=</code><code class="s1">'repl'</code><code class="p">,</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="n">MASTER_PASSWORD</code><code class="o">=</code><code class="s1">'P@ssw0rd!'</code><code class="p">,</code><code>  </code><code class="n">MASTER_LOG_FILE</code><code class="o">=</code><code class="s1">'mysql-bin.000002'</code><code class="p">,</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="n">MASTER_LOG_POS</code><code class="o">=</code><code class="mi">9530779</code><code class="p">,</code><code> </code><code class="n">MASTER_PORT</code><code class="o">=</code><code class="mi">49010</code><code class="p">;</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="n">START</code><code> </code><code class="n">SLAVE</code><code class="p">;</code></strong></pre>
+</div></section>
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Group Replication"><div class="sect2" id="idm46177447993432">
+<h2>Group Replication</h2>
+
+<p>It might be a bit controversial to include Group Replication in the asynchronous replication group.<a data-type="indexterm" data-primary="high availability" data-secondary="asynchronous replication" data-tertiary="group replication" id="ch13-grp"/><a data-type="indexterm" data-primary="asynchronous replication" data-secondary="group replication" id="ch13-grp2"/><a data-type="indexterm" data-primary="group replication" id="ch13-grp3"/> The short explanation for this choice is that Group Replication is asynchronous. The confusion here can be explained by the comparison with Galera (discussed in <a data-type="xref" href="#GALERA-CLUSTER-INTRO">“Galera/PXC Cluster”</a>), which claims to be synchronous or virtually synchronous.</p>
+
+<p>The more detailed reasoning is that it depends on how we define replication. <a data-type="indexterm" data-primary="replication" data-secondary="about" id="idm46177447998408"/>In the MySQL world, we define replication as the process that enables changes made in one database (the source) to be automatically duplicated in another (the replica). The entire process involves five different steps:</p>
+<ol>
+<li>
+<p>Locally applying the change on the source</p>
+</li>
+<li>
+<p>Generating a binlog event</p>
+</li>
+<li>
+<p>Sending the binlog event to the replica(s)</p>
+</li>
+<li>
+<p>Adding the binlog event to the replica’s relay log</p>
+</li>
+<li>
+<p>Applying the binlog event from the relay log on the replica</p>
+</li>
+
+</ol>
+
+<p class="pagebreak-before">In MySQL Group Replication and Galera (even if the Galera cache primarily replaces the binlog and relay log files), only step 3 is synchronous—the streaming of the binary log event (or write set in Galera) to the replica(s).</p>
+
+<p>Thus, while the process of sending (replicating/streaming) the data to the other servers is synchronous, the <em>applying</em> of these changes is still wholly asynchronous.</p>
+<div data-type="tip"><h6>Tip</h6>
+<p>Group Replication has been available since MySQL 5.7. However, when the product was released, it was not mature enough, leading to constant performance issues and crashes. We highly recommend using MySQL 8.0 if you want to test Group Replication.</p>
+</div>
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect3" data-pdf-bookmark="Installing Group Replication"><div class="sect3" id="idm46177447960728">
+<h3>Installing Group Replication</h3>
+
+<p>The first advantage of Group Replication compared to Galera is that you don’t have to install different binaries. MySQL Server provides Group Replication as a plugin. It’s also available for Oracle MySQL and Percona Server for MySQL; for details on installing those, see <a data-type="xref" href="ch01.xhtml#CH1_INSTALL">Chapter 1</a>.</p>
+
+<p>To confirm that the Group Replication plugin is enabled, run the following query:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">SELECT</code><code> </code><code class="n">PLUGIN_NAME</code><code class="p">,</code><code> </code><code class="n">PLUGIN_STATUS</code><code class="p">,</code><code> </code><code class="n">PLUGIN_TYPE</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="k">FROM</code><code> </code><code class="n">INFORMATION_SCHEMA</code><code class="p">.</code><code class="n">PLUGINS</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="k">WHERE</code><code> </code><code class="n">PLUGIN_NAME</code><code> </code><code class="k">LIKE</code><code> </code><code class="s1">'group_replication'</code><code class="p">;</code></strong></pre>
+
+<p>The output should show <code>ACTIVE</code>, as you see here:</p>
+
+<pre data-type="programlisting">+-------------------+---------------+-------------------+
+| PLUGIN_NAME       | PLUGIN_STATUS | PLUGIN_TYPE       |
++-------------------+---------------+-------------------+
+| group_replication | ACTIVE        | GROUP REPLICATION |
++-------------------+---------------+-------------------+
+1 row in set (0.00 sec)</pre>
+
+<p>If the plugin is not installed, run the following command to install it:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="n">INSTALL</code><code> </code><code class="n">PLUGIN</code><code> </code><code class="n">group_replication</code><code> </code><code class="k">SONAME</code><code> </code><code class="s1">'group_replication.so'</code><code class="p">;</code></strong></pre>
+
+<p>With the plugin active, we will set the minimum parameters required on the servers to start Group Replication. Open <em>my.cnf</em> on server 1 and add the following:<a data-type="indexterm" data-primary="my.cnf configuration file" data-secondary="asynchronous replication" data-tertiary="group replication" id="idm46177447894936"/></p>
+
+<pre data-type="programlisting">[mysqld]
+server_id=175907211
+log-bin=mysqld-bin
+enforce_gtid_consistency=ON
+gtid_mode=ON
+log-slave-updates
+transaction_write_set_extraction=XXHASH64
+master_info_repository=TABLE
+relay_log_info_repository=TABLE
+binlog_checksum=NONE</pre>
+
+<p class="pagebreak-before">Let’s go over each of those parameters:</p>
+<dl>
+<dt><code>server_id</code></dt>
+<dd>
+<p>Like with classic replication, this parameter helps to identify each member in the group using a unique ID. You must use a different value for each server participating in Group Replication.</p>
+</dd>
+<dt><code>log_bin</code></dt>
+<dd>
+<p>In MySQL 8.0 this parameter is enabled by default. It is responsible for recording all the changes in the database in binary log files.</p>
+</dd>
+<dt><code>enforce_gtid_consistency</code></dt>
+<dd>
+<p>This value must be set to <code>ON</code> to instruct MySQL to execute transaction-safe statements to ensure consistency when replicating data.</p>
+</dd>
+<dt><code>gtid_mode</code></dt>
+<dd>
+<p>This directive enables global transaction identifier-based logging when set to <code>ON</code>. This is required for Group Replication.</p>
+</dd>
+<dt><code>log_slave_updates</code></dt>
+<dd>
+<p>This value is set to <code>ON</code> to allow members to log updates from each other. In other words, the directive chains the replication servers together.</p>
+</dd>
+<dt><code>transaction_write_set_extraction</code></dt>
+<dd>
+<p>This instructs the MySQL server to collect write sets and encode them using a hashing algorithm. In this case, we are using the XXHASH64 algorithm. Write sets are defined by primary keys on each record.</p>
+</dd>
+<dt><code>master_info_repository</code></dt>
+<dd>
+<p>When set to <code>TABLE</code>, this directive allows MySQL to store details about source binary log files and positions into a table rather than a file to enable faster replication and guarantee consistency using InnoDB’s ACID properties. In MySQL 8.0.23 this is the default, and the <code>FILE</code> option is deprecated.</p>
+</dd>
+<dt><code>relay_log_info_repository</code></dt>
+<dd>
+<p>When set to <code>TABLE</code>, this configures MySQL to store replication information as an InnoDB table. In MySQL 8.0.23 this is the default, and the <code>FILE</code> option is deprecated.</p>
+</dd>
+<dt><code>binlog_checksum</code></dt>
+<dd>
+<p>Setting this to <code>NONE</code> tells MySQL not to write a checksum for each event in the binary log. The server will instead verify events when they are written by checking their length. In versions of MySQL up to and including 8.0.20, Group Replication cannot make use of checksums. If you’re using a later release and want to use checksums, you can omit this setting and use the default, <code>CRC32</code>.</p>
+</dd>
+</dl>
+
+<p>Next, we are going to add some specific parameters for Group Replication:</p>
+
+<pre data-type="programlisting">[mysqld]
+
+loose-group_replication_group_name="8dc32851-d7f2-4b63-8989-5d4b467d8251"
+loose-group_replication_start_on_boot=OFF
+loose-group_replication_local_address="10.124.33.139:33061"
+loose-group_replication_group_seeds="10.124.33.139:33061,
+10.124.33.90:33061, 10.124.33.224:33061"
+loose-group_replication_bootstrap_group=OFF
+bind-address = "0.0.0.0"
+report_host = "10.124.33.139"</pre>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>We are using the <code>loose-</code> prefix to instruct the server to start even when the MySQL Group Replication plugin is not installed and configured. This avoids encountering server errors before you finish configuring all the settings.</p>
+</div>
+
+<p>Let’s see what each parameter does:</p>
+<dl>
+<dt><code>group_replication_group_name</code></dt>
+<dd>
+<div class="openblock">
+<p>This is the name of the group that we are creating. We are going to use the built-in Linux <code>uuidgen</code> command to generate a universally unique identifier (UUID). It produces output like this:</p>
+<pre data-type="programlisting">
+$ <strong>uuidgen</strong>
+</pre>
+
+<pre data-type="programlisting">8dc32851-d7f2-4b63-8989-5d4b467d8251</pre>
+</div>
+
+</dd>
+<dt><code>group_replication_start_on_boot</code></dt>
+<dd>
+<p>When set to <code>OFF</code>, the value instructs the plugin not to start working automatically when the server starts. You may set this value to <code>ON</code> once you are through with configuring all the group members.</p>
+</dd>
+<dt><code>loose-group_replication_local_address</code></dt>
+<dd>
+<p>This is the internal IP address and port combination used for communicating with other MySQL server members in the group. The recommended port for Group Replication is 33061.</p>
+</dd>
+<dt><code>group_replication_group_seeds</code></dt>
+<dd>
+<p>This configures the IP addresses or hostnames of members participating in Group Replication, together with their communication port. New members use the value to establish themselves in the group.</p>
+</dd>
+<dt><code>group_replication_bootstrap_group</code></dt>
+<dd>
+<p>This option instructs the server whether to create a group or not. We will only enable this option on demand on server 1, to avoid creating multiple groups. So, it will remain off for now.</p>
+</dd>
+<dt><code>bind_address</code></dt>
+<dd>
+<p>The value of <code>0.0.0.0</code> tells MySQL to listen to all networks.</p>
+</dd>
+<dt><code>report_host</code></dt>
+<dd>
+<p>This is the IP address or hostname the group members reports to each other when they are registered in the group.</p>
+</dd>
+</dl>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect3" data-pdf-bookmark="Setting up MySQL Group Replication"><div class="sect3" id="idm46177447960264">
+<h3>Setting up MySQL Group Replication</h3>
+
+<p>First, we will set up the <code>group_replication_recovery</code> channel. MySQL Group Replication uses this channel to transfer transactions between members. Because of this, we must set up a replication user with <code>REPLICATION SLAVE</code> permission on each server.</p>
+
+<p>So, on server 1, log in to the MySQL console and execute the following commands:</p>
+<pre data-type="programlisting" data-code-language="mysql">
+<code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="kt">SET</code><code> </code><code class="n">SQL_LOG_BIN</code><code class="o">=</code><code class="mi">0</code><code class="p">;</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">CREATE</code><code> </code><code class="n">USER</code><code> </code><code class="n">replication_user</code><code class="o">@</code><code class="s1">'%'</code><code> </code><code class="n">IDENTIFIED</code><code> </code><code class="k">BY</code><code> </code><code class="s1">'P@ssw0rd!'</code><code class="p">;</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">GRANT</code><code> </code><code class="n">REPLICATION</code><code> </code><code class="n">SLAVE</code><code> </code><code class="k">ON</code><code> </code><code class="o">*</code><code class="p">.</code><code class="o">*</code><code> </code><code class="k">TO</code><code> </code><code class="s1">'replication_user'</code><code class="o">@</code><code class="s1">'%'</code><code class="p">;</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="n">FLUSH</code><code> </code><code class="n">PRIVILEGES</code><code class="p">;</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="kt">SET</code><code> </code><code class="n">SQL_LOG_BIN</code><code class="o">=</code><code class="mi">1</code><code class="p">;</code></strong><code>
+</code></pre>
+
+<p>We first set <code>SQL_LOG_BIN</code> to <code>0</code> to prevent the new user’s details from being logged to the binary log then we reenable it at the end.</p>
+
+<p>To instruct the MySQL server to use the replication user we have created for the <code>group_replication_recovery</code> channel, run this command:</p>
+<pre data-type="programlisting" data-code-language="mysql">
+<code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">CHANGE</code><code> </code><code class="n">MASTER</code><code> </code><code class="k">TO</code><code> </code><code class="n">MASTER_USER</code><code class="o">=</code><code class="s1">'replication_user'</code><code class="p">,</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="n">MASTER_PASSWORD</code><code class="o">=</code><code class="s1">'P@ssw0rd!'</code><code> </code><code class="k">FOR</code><code> </code><code class="n">CHANNEL</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="s1">'group_replication_recovery'</code><code class="p">;</code></strong><code>
+</code></pre>
+
+<p>These settings will allow members joining the group to run the distributed recovery process to get to the same state as the other members (donors).</p>
+
+<p>Now we will start the Group Replication service on server 1. We will bootstrap the group using these commands:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="kt">SET</code><code> </code><code class="n">GLOBAL</code><code> </code><code class="n">group_replication_bootstrap_group</code><code class="o">=</code><code class="k">ON</code><code class="p">;</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="n">START</code><code> </code><code class="n">GROUP_REPLICATION</code><code class="p">;</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="kt">SET</code><code> </code><code class="n">GLOBAL</code><code> </code><code class="n">group_replication_bootstrap_group</code><code class="o">=</code><code class="n">OFF</code><code class="p">;</code></strong></pre>
+
+<p>To avoid starting up more groups, we set <code>group_replication_bootstrap_group</code> back to <code>OFF</code> after successfully starting the group.</p>
+
+<p>To check the status of the new member, use this command:</p>
+<pre data-type="programlisting" data-code-language="mysql">
+<code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">SELECT</code><code> </code><code class="o">*</code><code> </code><code class="k">FROM</code><code> </code><code class="n">performance_schema</code><code class="p">.</code><code class="n">replication_group_members</code><code class="p">;</code></strong><code>
+</code></pre>
+
+<pre data-type="programlisting" class="less_space pagebreak-before">+---------------------------+--------------------------------------+...
+| CHANNEL_NAME              | MEMBER_ID                            |...
++---------------------------+--------------------------------------+...
+| group_replication_applier | d58b2766-ab90-11eb-ba00-00163ed02a2e |...
++-------------+-------------+--------------+-------------+---------+...
+...+---------------+-------------+--------------+-------------+----------------+
+...| MEMBER_HOST   | MEMBER_PORT | MEMBER_STATE | MEMBER_ROLE | MEMBER_VERSION |
+...+---------------+-------------+--------------+-------------+----------------+
+...| 10.124.33.139 |        3306 | ONLINE       | PRIMARY     | 8.0.22         |
+...+---------------+-------------+--------------+-------------+----------------+
+1 row in set (0.00 sec)</pre>
+
+<p>Great. So far we’ve bootstrapped and initiated one group member. Let’s proceed to the second server. Make sure you have installed the same MySQL version as on server 1, and add the following settings to the <em>my.cnf</em> file:</p>
+
+<pre data-type="programlisting">[mysqld]
+loose-group_replication_group_name="8dc32851-d7f2-4b63-8989-5d4b467d851"
+loose-group_replication_start_on_boot=OFF
+loose-group_replication_local_address="10.124.33.90:33061"
+loose-group_replication_group_seeds="10.124.33.139:33061,
+10.124.33.90:33061, 10.124.33.224:33061"
+loose-group_replication_bootstrap_group=OFF
+bind-address = "0.0.0.0"</pre>
+
+<p>All we’ve changed is the <code>group_replication_local_address</code>; the other settings remain the same. Note that the other MySQL configurations are required for server 2, and we strongly recommend keeping them the same across all nodes.</p>
+
+<p>With the configurations in place, restart the MySQL service:</p>
+
+<pre data-type="programlisting"># <strong>systemctl restart mysqld</strong></pre>
+
+<p>Issue the following commands to configure the credentials for the recovery user on server 2:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="kt">SET</code><code> </code><code class="n">SQL_LOG_BIN</code><code class="o">=</code><code class="mi">0</code><code class="p">;</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">CREATE</code><code> </code><code class="n">USER</code><code> </code><code class="s1">'replication_user'</code><code class="o">@</code><code class="s1">'%'</code><code> </code><code class="n">IDENTIFIED</code><code> </code><code class="k">BY</code><code> </code><code class="s1">'P@ssw0rd!'</code><code class="p">;</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">GRANT</code><code> </code><code class="n">REPLICATION</code><code> </code><code class="n">SLAVE</code><code> </code><code class="k">ON</code><code> </code><code class="o">*</code><code class="p">.</code></strong><code> </code><code class="k">TO</code><code> </code><code class="s1">'replication_user'</code><code class="o">@</code><code class="s1">'%'</code><code class="p">;</code><code class="o">*</code><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="kt">SET</code><code> </code><code class="n">SQL_LOG_BIN</code><code class="o">=</code><code class="mi">1</code><code class="p">;</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">CHANGE</code><code> </code><code class="n">MASTER</code><code> </code><code class="k">TO</code><code> </code><code class="n">MASTER_USER</code><code class="o">=</code><code class="s1">'replication_user'</code><code class="p">,</code><code>
+</code><code class="n">MASTER_PASSWORD</code><code class="o">=</code><code class="s1">'PASSWORD'</code><code> </code><code class="k">FOR</code><code> </code><code class="n">CHANNEL</code><code>
+</code><code class="s1">'group_replication_recovery'</code><code class="p">;</code></strong></pre>
+
+<p>Next, add server 2 to the group that we bootstrapped earlier:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="n">START</code><code> </code><code class="n">GROUP_REPLICATION</code><code class="p">;</code></strong></pre>
+
+<p>And run the query to check the member’s state:</p>
+<pre data-type="programlisting" data-code-language="mysql">
+<code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">SELECT</code><code> </code><code class="o">*</code><code> </code><code class="k">FROM</code><code> </code><code class="n">performance_schema</code><code class="p">.</code><code class="n">replication_group_members</code><code class="p">;</code></strong><code>
+</code></pre>
+
+<pre data-type="programlisting" class="less_space pagebreak-before">+---------------------------+--------------------------------------+...
+| CHANNEL_NAME              | MEMBER_ID                            |...
++---------------------------+--------------------------------------+...
+| group_replication_applier | 9e971ba0-ab9d-11eb-afc6-00163ec43109 |...
+| group_replication_applier | d58b2766-ab90-11eb-ba00-00163ed02a2e |...
++-------------+-------------+--------------+-------------+---------+...
+...+---------------+-------------+--------------+...
+...| MEMBER_HOST   | MEMBER_PORT | MEMBER_STATE |...
+...+---------------+-------------+--------------+...
+...| 10.124.33.90  |        3306 | ONLINE       |...
+...| 10.124.33.139 |        3306 | ONLINE       |...
+...+---------------+-------------+--------------+...
+...+-------------+----------------+
+...| MEMBER_ROLE | MEMBER_VERSION |
+...+-------------+----------------+
+...| SECONDARY   | 8.0.22         |
+...| PRIMARY     | 8.0.22         |
+...+-------------+----------------+
+2 rows in set (0.00 sec)</pre>
+
+<p>Now you can follow the same steps for server 3 as we used for server 2, again updating the local address. When you’re done, you can validate whether all the servers are responsive by inserting some dummy data:</p>
+<pre data-type="programlisting" data-code-language="mysql">
+<code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">CREATE</code><code> </code><code class="k">DATABASE</code><code> </code><code class="n">learning_mysql</code><code class="p">;</code></strong><code>
+</code></pre>
+
+<pre data-type="programlisting">Query OK, 1 row affected (0.00 sec)</pre>
+<pre data-type="programlisting" data-code-language="mysql">
+<code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">USE</code><code> </code><code class="n">learning_mysql</code></strong><code>
+</code></pre>
+
+<pre data-type="programlisting">Database changed</pre>
+<pre data-type="programlisting" data-code-language="mysql">
+<code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">CREATE</code><code> </code><code class="k">TABLE</code><code> </code><code class="nf">test</code><code> </code><code class="p">(</code><code class="n">i</code><code> </code><code class="kt">int</code><code> </code><code class="k">primary</code><code> </code><code class="k">key</code><code class="p">)</code><code class="p">;</code></strong><code>
+</code></pre>
+
+<pre data-type="programlisting">Query OK, 0 rows affected (0.01 sec)</pre>
+<pre data-type="programlisting" data-code-language="mysql">
+<code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">INSERT</code><code> </code><code class="k">INTO</code><code> </code><code class="n">test</code><code> </code><code class="k">VALUES</code><code> </code><code class="p">(</code><code class="mi">1</code><code class="p">)</code><code class="p">;</code></strong><code>
+</code></pre>
+
+<pre data-type="programlisting">Query OK, 1 row affected (0.00 sec)</pre>
+
+<p>Then connect to the other servers to see whether you can visualize the data.<a data-type="indexterm" data-startref="ch13-grp" id="idm46177447353768"/><a data-type="indexterm" data-startref="ch13-grp2" id="idm46177447353128"/><a data-type="indexterm" data-startref="ch13-grp3" id="idm46177447352456"/></p>
+</div></section>
+
+
+
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Synchronous Replication"><div class="sect1" id="idm46177448965288">
+<h1>Synchronous Replication</h1>
+
+<p>Synchronous replication is used by Galera Clusters, where we<a data-type="indexterm" data-primary="high availability" data-secondary="synchronous replication" data-tertiary="about Galera Cluster" id="idm46177447350680"/><a data-type="indexterm" data-primary="synchronous replication" data-secondary="about Galera Cluster" id="idm46177447349432"/><a data-type="indexterm" data-primary="Galera Cluster" data-secondary="about" id="idm46177447348488"/> have more than one MySQl server, but they act as a single entity for the application. <a data-type="xref" href="#FIG-GALERA-TOPOLOGY">Figure 13-2</a> illustrates a Galera Cluster with three nodes.</p>
+
+<figure><div id="FIG-GALERA-TOPOLOGY" class="figure">
+<img src="Images/lm2e_1302.png" alt="lm2e 1302" width="976" height="446"/>
+<h6><span class="label">Figure 13-2. </span>In a Galera Cluster, all nodes communicate with each other</h6>
+</div></figure>
+
+<p>The primary difference between synchronous and<a data-type="indexterm" data-primary="high availability" data-secondary="about" data-tertiary="synchronous versus asynchronous replication" id="idm46177447324376"/><a data-type="indexterm" data-primary="synchronous replication" data-secondary="asynchronous replication versus" id="idm46177447323288"/><a data-type="indexterm" data-primary="asynchronous replication" data-secondary="synchronous replication versus" id="idm46177447322440"/> asynchronous replication is that synchronous replication guarantees that if a change happens on one node in the cluster, then the change will happen on the other nodes in the cluster synchronously, or at the same time. Asynchronous replication gives no guarantees about the delay between applying changes on the source node and propagating those changes to replica nodes. The delay with asynchronous replication can be short or long. This also implies that if the source node crashes in an asynchronous replication topology, some of the latest changes may be lost. This concepts of source and replica do not exist in a Galera Cluster. All nodes can receive reads and writes.</p>
+
+<p>Theoretically, synchronous replication has several advantages over asynchronous 
+<span class="keep-together">replication:</span></p>
+
+<ul>
+<li>
+<p>Clusters utilizing synchronous replication are always highly available. If one of the nodes crashes, then there will be no data loss. Additionally, all cluster nodes are always consistent.</p>
+</li>
+<li>
+<p>Clusters utilizing synchronous replication allow transactions to be executed on all nodes in parallel.</p>
+</li>
+<li>
+<p>Clusters utilizing synchronous replication can guarantee causality across the whole cluster. This means that if a <code>SELECT</code> is executed on one cluster node after a transaction is executed on another cluster node, it should see the effects of that transaction.</p>
+</li>
+</ul>
+
+<p>However, there are disadvantages to synchronous replication as well. Traditionally, eager replication protocols coordinate nodes one operation at a time, using a two-phase commit or distributed locking. Increasing the number of nodes in the cluster leads to growth in the transaction response times and the probability of conflicts and deadlocks among the nodes. This is because all nodes need to certify the transaction and reply with an OK message.</p>
+
+<p>For this reason, asynchronous replication remains the dominant replication protocol for database performance, scalability, and availability. Not understanding or underestimating the impact of synchronous replication is one reason companies sometimes give up using Galera Clusters and go back to using asynchronous replication.</p>
+
+<p>At the time of writing, two companies support the Galera Cluster: Percona and MariaDB. The following example shows how to set up a Percona XtraDB Cluster.</p>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Galera/PXC Cluster"><div class="sect2" id="GALERA-CLUSTER-INTRO">
+<h2>Galera/PXC Cluster</h2>
+
+<p>Installing Percona XtraDB Cluster (PXC) is similar to installing<a data-type="indexterm" data-primary="high availability" data-secondary="synchronous replication" data-tertiary="Percona XtraDB Cluster" id="ch13-pxc"/><a data-type="indexterm" data-primary="synchronous replication" data-secondary="Percona XtraDB Cluster" id="ch13-pxc2"/><a data-type="indexterm" data-primary="Percona XtraDB Cluster" id="ch13-pxc3"/><a data-type="indexterm" data-primary="Galera Cluster" data-secondary="Percona XtraDB Cluster" id="ch13-pxc4"/> Percona Server (the difference is the packages), so we won’t dive into details for all platforms. You may want to revisit <a data-type="xref" href="ch01.xhtml#CH1_INSTALL">Chapter 1</a> to review the installation process. The configuration process we’ll follow here assumes there are three PXC nodes.</p>
+<table>
+<caption><span class="label">Table 13-1. </span>The three PXC nodes</caption>
+<thead>
+<tr>
+<th>Node</th>
+<th>Host</th>
+<th>IP</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><p>Node 1</p></td>
+<td><p>pxc1</p></td>
+<td><p>172.16.2.56</p></td>
+</tr>
+<tr>
+<td><p>Node 2</p></td>
+<td><p>pxc2</p></td>
+<td><p>172.16.2.198</p></td>
+</tr>
+<tr>
+<td><p>Node 3</p></td>
+<td><p>pxc3</p></td>
+<td><p>172.16.3.177</p></td>
+</tr>
+</tbody>
+</table>
+
+<p>Connect to one of the nodes and install the repository:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="c1"># </code><strong><code class="c1">yum install https://repo.percona.com/yum/percona-release-latest.noar
+</code><code class="n">ch</code><code class="p">.</code><code class="n">rpm</code><code> </code><code class="o">-</code><code class="n">y</code></strong></pre>
+
+<p>With the repository installed, install the binaries:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="c1"># </code><strong><code class="c1">yum install Percona-XtraDB-Cluster-57 -y</code></strong></pre>
+
+<p>Next, you can apply the typical configurations that you would use for a regular MySQL process (see Chapter 11). With the changes made, start the <code>mysqld</code> process and get the temporary password:</p>
+<pre data-type="programlisting">
+# <strong>'systemctl start mysqld'</strong>
+# <strong>'grep temporary password'/var/log/mysqld.log'</strong>
+</pre>
+
+<p>Use the previous password to log in as <code>root</code> and change the password:</p>
+
+<pre data-type="programlisting">$ <strong>mysql -u root -p</strong></pre>
+<pre data-type="programlisting" data-code-language="mysql">
+<code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">ALTER</code><code> </code><code class="n">USER</code><code> </code><code class="s1">'root'</code><code class="o">@</code><code class="s1">'localhost'</code><code> </code><code class="n">IDENTIFIED</code><code> </code><code class="k">BY</code><code> </code><code class="s1">'P@ssw0rd!'</code><code class="p">;</code></strong><code>
+</code></pre>
+
+<p>Stop the <code>mysqld</code> process:</p>
+<pre data-type="programlisting">
+# <strong>systemctl stop mysql</strong>
+</pre>
+
+<p>Repeat the previous steps for the other two nodes.</p>
+
+<p>With the binaries and basic configuration in place, we can start working on the cluster parameters.</p>
+
+<p>We need to add the following configuration variables to <em>/etc/my.cnf</em> on the first node:<a data-type="indexterm" data-primary="my.cnf configuration file" data-secondary="synchronous replication" id="idm46177447215448"/></p>
+
+<pre data-type="programlisting">[mysqld]
+ wsrep_provider=/usr/lib64/galera3/libgalera_smm.so
+ wsrep_cluster_name=pxc-cluster
+ wsrep_cluster_address=gcomm://172.16.2.56,172.16.2.198,172.16.3.177
+
+ wsrep_node_name=pxc1
+ wsrep_node_address=172.16.2.56
+
+ wsrep_sst_method=xtrabackup-v2
+ wsrep_sst_auth=sstuser:P@ssw0rd!
+
+ pxc_strict_mode=ENFORCING
+
+ binlog_format=ROW
+ default_storage_engine=InnoDB
+ innodb_autoinc_lock_mode=2</pre>
+
+<p>Use the same configuration for the second and third nodes, except the <code>wsrep_node_name</code> and <code>wsrep_node_address</code> variables.</p>
+
+<p>For the second node, use:</p>
+
+<pre data-type="programlisting">wsrep_node_name=pxc2
+wsrep_node_address=172.16.2.198</pre>
+
+<p>For the third node, use:</p>
+
+<pre data-type="programlisting">wsrep_node_name=pxc3
+wsrep_node_address=172.16.3.177</pre>
+
+<p>Like regular MySQL, Percona XtraDB Cluster has many configurable parameters, and the ones we’ve shown are the minimal settings to start the cluster. We are configuring the node’s name and IP address, the cluster address, and the user that will be used for internal communication among the nodes. You can find more detailed information in the<a data-type="indexterm" data-primary="synchronous replication" data-secondary="Percona XtraDB Cluster" data-tertiary="documentation online" id="idm46177447196680"/><a data-type="indexterm" data-primary="Percona XtraDB Cluster" data-secondary="documentation online" id="idm46177447195592"/><a data-type="indexterm" data-primary="Galera Cluster" data-secondary="Percona XtraDB Cluster" data-tertiary="documentation online" id="idm46177447194744"/> <a href="https://oreil.ly/Ap8Rr">documentation</a>.</p>
+
+<p>We have all the nodes configured at this point, but the <code>mysqld</code> process is not running on any node. PXC requires you to start one node in a cluster as a reference point for the others before the other nodes can join and form the cluster. This node must be started in <em>bootstrap</em> mode. Bootstrapping is an initial step to introduce one server as a primary component so the others can use it as a reference point to sync up data.</p>
+
+<p>Start the first node with the following command:</p>
+
+<pre data-type="programlisting"># <strong>systemctl start mysql@bootstrap</strong></pre>
+
+<p>Before adding other nodes to your new cluster, connect to the node that you just started, create a user for State Snapshot Transfer (SST), and provide the necessary privileges for it. The credentials must match those specified in the <code>wsrep_sst_auth</code> configuration that you set previously:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">CREATE</code><code> </code><code class="n">USER</code><code> </code><code class="s1">'sstuser'</code><code class="o">@</code><code class="s1">'localhost'</code><code> </code><code class="n">IDENTIFIED</code><code> </code><code class="k">BY</code><code> </code><code class="s1">'P@ssw0rd!'</code><code class="p">;</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">GRANT</code><code> </code><code class="n">RELOAD</code><code class="p">,</code><code> </code><code class="k">LOCK</code><code> </code><code class="kp">TABLES</code><code class="p">,</code><code> </code><code class="n">PROCESS</code><code class="p">,</code><code> </code><code class="n">REPLICATION</code><code> </code><code class="n">CLIENT</code><code> </code><code class="k">ON</code><code> </code><code class="p">.</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="k">TO</code><code> </code><code class="s1">'sstuser'</code><code class="o">@</code><code class="s1">'localhost'</code><code class="p">;</code></strong><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="n">FLUSH</code><code> </code><code class="n">PRIVILEGES</code><code class="p">;</code></strong></pre>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>The SST process is used by the cluster to provision nodes by transferring a full data copy from one node to another. When a new node joins the cluster, the new node initiates an SST to synchronize its data with a node that is already part of the cluster.</p>
+</div>
+
+<p>After this, you can initialize the other nodes regularly:</p>
+
+<pre data-type="programlisting"># <strong>systemctl start mysql</strong></pre>
+
+<p>To verify that the cluster is up and running fine, we can perform a few checks, like creating a database on the first node, creating a table and inserting some data on the second node, and retrieving some rows from that table on the third node. First, let’s create the database on the first node (<code>pxc1</code>):</p>
+<pre data-type="programlisting" data-code-language="mysql">
+<code class="n">mysq</code><code class="o">&gt;</code><code> </code><strong><code class="k">CREATE</code><code> </code><code class="k">DATABASE</code><code> </code><code class="n">learning_mysql</code><code class="p">;</code></strong><code>
+</code></pre>
+
+<pre data-type="programlisting">Query ok, 1 row affected (0.01 sec)</pre>
+
+<p>On the second node (<code>pxc2</code>), create a table and insert some data:</p>
+<pre data-type="programlisting" data-code-language="mysql">
+<code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">USE</code><code> </code><code class="n">learning_mysql</code><code class="p">;</code></strong><code>
+</code></pre>
+
+<pre data-type="programlisting">Database changed</pre>
+<pre data-type="programlisting" data-code-language="mysql">
+<code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">CREATE</code><code> </code><code class="k">TABLE</code><code> </code><code class="nf">example</code><code> </code><code class="p">(</code><code class="n">node_id</code><code> </code><code class="kt">INT</code><code> </code><code class="k">PRIMARY</code><code> </code><code class="k">KEY</code><code class="p">,</code><code> </code><code class="n">node_name</code><code> </code><code class="kt">VARCHAR</code><code class="p">(</code><code class="mi">30</code><code class="p">)</code><code class="p">)</code><code class="p">;</code></strong><code>
+</code></pre>
+
+<pre data-type="programlisting">Query ok, 0 rows affected (0.05 sec)</pre>
+<pre data-type="programlisting" data-code-language="mysql">
+<code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">INSERT</code><code> </code><code class="k">INTO</code><code> </code><code class="n">learning_mysql</code><code class="p">.</code><code class="n">example</code><code> </code><code class="k">VALUES</code><code> </code><code class="p">(</code><code class="mi">1</code><code class="p">,</code><code> </code><code class="s2">"Vinicius1"</code><code class="p">)</code><code class="p">;</code></strong><code>
+</code></pre>
+
+<pre data-type="programlisting">Query OK, 1 row affected (0.02 sec)</pre>
+
+<p>Then retrieve some rows from that table on the third node:</p>
+
+<pre data-type="programlisting" data-code-language="mysql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">SELECT</code><code> </code><code class="o">*</code><code> </code><code class="k">FROM</code><code> </code><code class="n">learning_mysql</code><code class="p">.</code><code class="n">example</code><code class="p">;</code></strong></pre>
+
+<pre data-type="programlisting">+---------+-----------+
+| node_id | node_name |
++---------+-----------+
+|       1 | Vinicius1 |
++---------+-----------+
+1 row in set (0.00 sec)</pre>
+
+<p>Another, more elegant solution is checking the <code>wsrep_%</code> global status variables, in particular <code>wsrep_cluster_size</code> and <code>wsrep_cluster_status</code>:</p>
+<pre data-type="programlisting" data-code-language="mysql">
+<code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">SHOW</code><code> </code><code class="n">GLOBAL</code><code> </code><code class="n">STATUS</code><code> </code><code class="k">LIKE</code><code> </code><code class="s1">'wsrep_cluster_size'</code><code class="p">;</code></strong><code>
+</code></pre>
+
+<pre data-type="programlisting">+--------------------+-------+
+| Variable_name      | Value |
++--------------------+-------+
+| wsrep_cluster_size | 3     |
++--------------------+-------+
+1 row in set (0.00 sec)</pre>
+<pre data-type="programlisting" data-code-language="mysql">
+<code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">SHOW</code><code> </code><code class="n">GLOBAL</code><code> </code><code class="n">STATUS</code><code> </code><code class="k">LIKE</code><code> </code><code class="s1">'wsrep_cluster_status'</code><code class="p">;</code></strong><code>
+</code></pre>
+
+<pre data-type="programlisting">+----------------------+---------+
+| Variable_name        | Value   |
++----------------------+---------+
+| wsrep_cluster_status | Primary |
++----------------------+---------+
+1 row in set (0.00 sec)</pre>
+
+<p>The output of these commands tells us that the cluster has three nodes and is in the primary state (it can receive reads and writes).</p>
+
+<p>You might consider using ProxySQL in addition to the Galera Cluster to ensure transparency for the application (see <a data-type="xref" href="ch15.xhtml#CH15_LOAD_BAlANCERS">Chapter 15</a>).<a data-type="indexterm" data-startref="ch13-pxc" id="idm46177446895000"/><a data-type="indexterm" data-startref="ch13-pxc2" id="idm46177446894296"/><a data-type="indexterm" data-startref="ch13-pxc3" id="idm46177446893624"/><a data-type="indexterm" data-startref="ch13-pxc4" id="idm46177446892952"/></p>
+
+<p>The goal of this chapter was just to familiarize you with the different topologies so you know they exist. Cluster maintenance and optimization are advanced topics that are beyond the scope of this book.</p>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+</div></section></div></body></html>
