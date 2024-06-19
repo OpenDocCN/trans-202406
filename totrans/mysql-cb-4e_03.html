@@ -1,0 +1,2034 @@
+<html><head></head><body><div id="sbo-rt-content"><section data-type="chapter" epub:type="chapter" data-pdf-bookmark="Chapter 3. MySQL Replication"><div class="chapter" id="nch-replication"><h1><span class="label">Chapter 3. </span>MySQL Replication</h1><aside data-type="sidebar" epub:type="sidebar"><div class="sidebar" id="idm45820411226816"><h5>A note for Early Release readers</h5><p>With Early Release ebooks, you get books in their earliest form—the author’s raw and unedited content as they write—so you can take advantage of these technologies long before the official release of these titles.</p></div></aside><section data-type="sect1" data-pdf-bookmark="3.0 Introduction"><div class="sect1" id="nch-replication-replication-intro"><h1>3.0 Introduction</h1><p>
+      MySQL replication provides a way to setup a copy (replica) server of the active (source) database, then automatically continuously update such a copy applying all changes which source server receives.
+    </p><p>
+      Replica is useful in many situations, particularly:
+      </p><dl><dt>Hot Standby</dt><dd><p>A server, normally idle, which replaces an active one in case of a failure.</p></dd><dt>Read scale</dt><dd><p>Multiple servers, replicating from the same source, can process more parallel read requests than a single machine.</p></dd><dt>Geographical distribution</dt><dd><p>When application serves users in different regions having database server, located locally can help to retrieve data faster.</p></dd><dt>Analytics server</dt><dd><p>Complicated analytics queries may take hours to run, set plenty of locks and use a lot of resources. Running them on the replica minimizes impact on other parts of the application.</p></dd><dt>Backup server</dt><dd><p>Taking backups from a live database involves high IO resource usage and locking, which is necessary to avoid data inconsistencies between backup and active data set. Taking backups from the dedicated replica reduces impact on production.</p></dd><dt>Delayed copy</dt><dd><p>A replica, applying updates with a delay, configured by the <code>SOURCE_DELAY</code> (<code>MASTER_DELAY</code>) option, allows to rollback human errors, such as removal of an important table.</p></dd></dl><p>
+    </p><div data-type="note" epub:type="note"><h6>Note</h6><p>
+        Historically source server was called a master and replica server was called a slave. Lately it was discovered that terminology master and slave do not correctly reflect how replication works while the words themselves maybe insulting. In the last few years most of the software vendors are performing switch from the old to the new terminology. For MySQL this change started from version 8.0.22 and is still in progress. Not all option names and commands support new syntax. There are also good change that even if your MySQL version fully supports new syntax, you may find legacy terminology on public forums and books, printed earlier. Therefore in this book we use terms source and replica when discuss replication roles. For the commands and variable names that support new syntax we provide both syntaxes first time, the use new syntax. We use legacy syntax if the change is still in progress.
+      </p></div><p>
+      MySQL Replication requires special activities on both servers.
+    </p><p>
+      Source server stores all updates in binary log files. These files contain encoded update events. Source server writes to a single binary log file at the moment. Once it reaches <code>max_binlog_size</code> the binary log is rotated and a new file is created.
+    </p><p>
+      The binary log file supports two formats: <code>STATEMENT</code> and <code>ROW</code>. In the <code>STATEMENT</code> format SQL statements are written as they are and then encoded into binary format. In the <code>ROW</code> format SQL statements are not recorded. Instead, actual updates to table rows are stored. The <code>ROW</code> binary log format is preferred 
+    </p><div data-type="tip"><h6>Tip</h6><p>
+        When using binary log format <code>ROW</code> it could be useful, when troubleshooting replication errors, to know the actual statement received by the source server. Use option <code>binlog_rows_query_log_events</code> to store the information log event with the original query. Such an event is not participating in replication and could be retrieved for informational purposes only.
+      </p></div><p>
+      Replica server continuously requests binary log events from the source server, then stores them in the special files, called relay log files. It has a separate thread, called IO, or connection thread, which is doing only this job. Another thread, or threads, called SQL or applier thread, read events from the relay logs and apply them to the tables.
+    </p><p>
+      Each event in the binary log has its own unique identifier: position. Position is unique per file and resets when a new one is created. Replica may use the binary log file name and position as a unique identifier of the event.
+    </p><p>
+      While binary log position uniquely identifies event in a particular file it cannot be used to identify if particular event was applied on the replica or not. To resolve this problem Global Transaction Identifiers (GTIDs) were introduced. These are unique identifiers, assigned to each transaction. They are unique across all the life of a MySQL installation. They also use mechanism to uniquely identify server, therefore are safe to use even if replication is possible from multiple sources.
+    </p><p>
+      Replica stores information about source binary log coordinates in the special repository, defined by a variable <code>master_info_repository</code>. Such a repository can be stored either in a table or in a file.
+    </p><p>
+      This chapter describes how to setup and use MySQL Replication. It covers all typical replication scenarios, including:
+      </p><ul class="simplelist"><li>Two servers one-way source-replica setup.</li><li>Circular replication</li><li>Multi-source replication</li><li>Semisynchronous replication</li><li>Group replication</li></ul><p>
+    </p></div></section><section data-type="sect1" data-pdf-bookmark="3.1 Configuring the Basic Replication between One Source and One Replica"><div class="sect1" id="nch-replication-replication-configuration"><h1>3.1 Configuring the Basic Replication between One Source and One Replica</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820411205776"><h2>Problem</h2><p>
+        You want to prepare two servers for the replication.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820411204720"><h2>Solution</h2><p>
+        Add configuration option <code>log-bin</code> into the source configuration file, specify unique <code>server_id</code> for both servers, add options to support GTIDs and/or non-default binary log format and create a user with <code>REPLICATION SLAVE</code> privilege on the source.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820408480000"><h2>Discussion</h2><p>
+        First you need to prepare both servers to be able to handle replication events.
+      </p><p>
+        On the source server:
+        </p><ul><li><p>Enable binary log by adding option <code>log-bin</code> into configuration file. Changing this option requires restart. Binary log is enabled by default since version 8.0.</p></li><li><p>Set unique <code>server_id</code>. <code>server_id</code> is dynamic variable and could be changed without taking the server offline, but we strongly recommend to set it in the configuration file too, so it would not be overridden after restart.</p></li><li><p>Create a replication user and grant <code>REPLICATION SLAVE</code> to it: </p><pre data-type="programlisting">mysql&gt; <strong><code>CREATE USER repl@'%' IDENTIFIED BY 'replrepl';</code></strong>
+Query OK, 0 rows affected (0,01 sec)
+
+mysql&gt; <strong><code>GRANT REPLICATION SLAVE ON *.* TO repl@'%';</code></strong>
+Query OK, 0 rows affected (0,03 sec)</pre></li></ul><p>
+      </p><div data-type="warning" epub:type="warning"><h6>Warning</h6><p>
+           In MySQL 8.0 default authentication plugin is <code>caching_sha2_password</code> which requires TLS connection or the source public key. Therefore, if you want to use this plugin, you need to enable TLS connection for the replica as described in <a data-type="xref" href="#nch-replication-replication-ssl">Recipe 3.14</a> or use option <code>SOURCE_PUBLIC_KEY_PATH=1</code> (<code>GET_MASTER_PUBLIC_KEY=1</code>) of the <span class="command"><em>CHANGE REPLICATION SOURCE</em></span> (<span class="command"><em>CHANGE MASTER</em></span>) command.
+         </p></div><p>
+           Alternatively you can use authentication plugin, allowing insecure connections.
+           </p><pre data-type="programlisting">mysql&gt; <strong><code>CREATE USER repl@'%' IDENTIFIED WITH mysql_native_password BY 'replrepl';</code></strong>
+Query OK, 0 rows affected (0,01 sec)
+
+mysql&gt; <strong><code>GRANT REPLICATION SLAVE ON *.* TO repl@'%';</code></strong>
+Query OK, 0 rows affected (0,03 sec)</pre><p>
+         </p><p>
+        On the replica just set unique <code>server_id</code>.
+      </p><div data-type="tip"><h6>Tip</h6><p>
+          Since version 8.0 you can use <span class="command"><em>SET PERSIST</em></span> to save dynamically changed variable permanently:
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>SET PERSIST server_id=200;</code></strong>
+Query OK, 0 rows affected (0,01 sec)</pre><p>
+          See <a href="https://dev.mysql.com/doc/refman/8.0/en/persisted-system-variables.html">Persisted System Variables in the MySQL User Reference Manual</a> for details.
+        </p></div><p>
+        At this stage you can tune other options, which affect replication safety and performance, particularly:
+        </p><dl><dt><code>binlog_format</code></dt><dd><p>Binary log format</p></dd><dt>GTID support</dt><dd><p>Support for global transaction identifiers</p></dd><dt><code>replica_parallel_type </code> (<code>slave_parallel_type</code>) and <code>replica_parallel_workers</code> (<code> slave_parallel_workers</code>)</dt><dd><p>Multi-threaded replica support</p></dd><dt>Binary log on the replica</dt><dd><p>Define if and how replica will use binary log.</p></dd></dl><p>
+         We will cover these options in the following recipes.
+      </p><p>
+        
+      </p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="3.2 Position-Based Replication in the New Installation Environment"><div class="sect1" id="nch-replication-replication-position-new"><h1>3.2 Position-Based Replication in the New Installation Environment</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820408454112"><h2>Problem</h2><p>
+        You want to setup a replica of the just installed MySQL server, using position-based configuration.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820408452960"><h2>Solution</h2><p>
+        Prepare source and replica servers as described in <a data-type="xref" href="#nch-replication-replication-configuration">Recipe 3.1</a>, then obtain current binary log position using <span class="command"><em>SHOW MASTER STATUS</em></span> command on the source server and point the replica to the appropriate position using <span class="command"><em>CHANGE REPLICATION SOURCE ... source_log_file='BINARY LOG FILE NAME', source_log_pos=POSITION;</em></span> (<span class="command"><em>CHANGE MASTER ... master_log_file='BINARY LOG FILE NAME', master_log_pos=POSITION;</em></span>) command.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820408448224"><h2>Discussion</h2><p>
+          For this recipe we assume that you have two freshly installed servers with no user data in them. There is no write activity on any of the servers.
+        </p><p>
+          First, prepare them for the replication use as described at <a data-type="xref" href="#nch-replication-replication-configuration">Recipe 3.1</a>. Then, on the source, run command <span class="command"><em>SHOW MASTER STATUS</em></span>:
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>SHOW MASTER STATUS;</code></strong>
++-------------------+----------+--------------+------------------+-------------------+
+| File              | Position | Binlog_Do_DB | Binlog_Ignore_DB | Executed_Gtid_Set |
++-------------------+----------+--------------+------------------+-------------------+
+| master-bin.000001 |      156 |              |                  |                   |
++-------------------+----------+--------------+------------------+-------------------+
+1 row in set (0.00 sec)</pre><p>
+        </p><p>
+          Field <code>File</code> contains name of the current binary log and field <code>Position</code> contains current position. Record values of these fields.
+        </p><p>
+          On the replica run <a href="https://dev.mysql.com/doc/refman/8.0/en/change-replication-source-to.html"><span class="command"><em>CHANGE REPLICATION SOURCE</em></span> (<span class="command"><em>CHANGE MASTER</em></span>)</a> command:
+          </p><pre data-type="programlisting" data-code-language="sql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="n">CHANGE</code><code> </code><code class="n">REPLICATION</code><code> </code><code class="k">SOURCE</code><code> </code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="k">TO</code><code> </code><code class="n">SOURCE_HOST</code><code class="o">=</code><code class="s1">'sourcehost'</code><code class="p">,</code><code>         </code><code class="c1">-- Host of the source server</code></strong><code class="c1">
+</code><code>    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="n">SOURCE_PORT</code><code class="o">=</code><code class="mi">3306</code><code class="p">,</code><code>                    </code><code class="c1">-- Port of the source server</code></strong><code class="c1">
+</code><code>    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="n">SOURCE_USER</code><code class="o">=</code><code class="s1">'repl'</code><code class="p">,</code><code>                  </code><code class="c1">-- Replication user</code></strong><code class="c1">
+</code><code>    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="n">SOURCE_PASSWORD</code><code class="o">=</code><code class="s1">'replrepl'</code><code class="p">,</code><code>          </code><code class="c1">-- Password</code></strong><code class="c1">
+</code><code>    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="n">SOURCE_LOG_FILE</code><code class="o">=</code><code class="s1">'source-bin.000001'</code><code class="p">,</code><code> </code><code class="c1">-- Binary log file</code></strong><code class="c1">
+</code><code>    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="n">SOURCE_LOG_POS</code><code class="o">=</code><code class="mi">156</code><code class="p">,</code><code>                  </code><code class="c1">-- Start position</code></strong><code class="c1">
+</code><code>    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="n">GET_SOURCE_PUBLIC_KEY</code><code class="o">=</code><code class="mi">1</code><code class="p">;</code></strong><code>
+</code><code class="n">Query</code><code> </code><code class="n">OK</code><code class="p">,</code><code> </code><code class="mi">0</code><code> </code><code class="k">rows</code><code> </code><code class="n">affected</code><code class="p">,</code><code> </code><code class="mi">1</code><code> </code><code class="n">warning</code><code> </code><code class="p">(</code><code class="mi">0</code><code class="p">.</code><code class="mi">06</code><code> </code><code class="n">sec</code><code class="p">)</code></pre><p>
+        </p><p>
+          To start replica use command <span class="command"><em>START REPLICA</em></span> (<span class="command"><em>START SLAVE</em></span>):
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>START REPLICA;</code></strong>
+Query OK, 0 rows affected (0.01 sec)</pre><p>
+        </p><p>
+          To check if replica is running use <span class="command"><em>SHOW REPLICA STATUS</em></span> (<span class="command"><em>SHOW SLAVE STATUS</em></span>):
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>\P grep Running</code></strong>
+PAGER set to 'grep Running'
+mysql&gt; <strong><code>SHOW REPLICA STATUS\G</code></strong>
+           Replica_IO_Running: Yes
+          Replica_SQL_Running: Yes
+    Replica_SQL_Running_State: Slave has read all relay log;↩
+                               waiting for more updates
+1 row in set (0.00 sec)</pre><p>
+        </p><p>
+          Listing above confirms that both IO (connection) and SQL (applier) replica threads are running and replication state is fine. We will discuss full output of the <span class="command"><em>SHOW REPLICA STATUS</em></span> command in <a data-type="xref" href="#nch-replication-replication-troubleshooting">Recipe 3.15</a>
+        </p><p>
+          Now you can enable writes on the source server.
+        </p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="3.3 Setting Up a Position-Based Replica of a MySQL Installation that is Already in Use"><div class="sect1" id="nch-replication-replication-position-existing"><h1>3.3 Setting Up a Position-Based Replica of a MySQL Installation that is Already in Use</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820408345216"><h2>Problem</h2><p>
+        Setting up a replica for the new installed server is different from the case when the future source already has data. In the latter case you need to be especially careful to do not introduce data inconsistency by specifying wrong starting position. In this recipe we provide instructions on how to setup a replica of the MySQL installation in use.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820408305456"><h2>Solution</h2><p>
+        Prepare source and replica servers as described in <a data-type="xref" href="#nch-replication-replication-configuration">Recipe 3.1</a>, stop all writes on the source server, back it up, then obtain current binary log position using <span class="command"><em>SHOW MASTER STATUS</em></span> command that will be used for pointing the replica to the appropriate position using <span class="command"><em>CHANGE REPLICATION SOURCE ... source_log_file='BINARY LOG FILE NAME', source_log_pos=POSITION;</em></span> command.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820408301440"><h2>Discussion</h2><p>
+          As in case of installing a new replica, both servers need to be configured for the replication use as described in <a data-type="xref" href="#nch-replication-replication-configuration">Recipe 3.1</a>. Before initiating setup you need to ensure that both servers have unique <code>server_id</code> and source server has binary logging enabled. You can create replication user at this moment or you can do it before setting up a replica.
+        </p><p>
+          If you have a server which was already running for a while and want to set up a replica of it you need to take backup first, restore it on the replica, then point the replica to the source server. Challenge for this setup is to use correct binary log position: if the server is accepting writes while backup is running position consistently changing. As a result command <span class="command"><em>SHOW MASTER STATUS</em></span> will return wrong result unless you stop all writes while taking backup.
+        </p><p>
+          Standard backup tools support special options when taking backup of the future source server for a replica to bypass this issue.
+        </p><p>
+          <span class="command"><em>mysqldump</em></span>, described in <a data-type="xref" href="ch06.xhtml#nch-tblmgmt-tblmgmt-copy-mysqldump">Recipe 6.6</a>, has the option <code>--source-data</code> (<code>--master-data</code>). If set to 1 <span class="command"><em>CHANGE REPLICATION SOURCE</em></span> statement with coordinates at the time of the backup start will be written into resulting dump file and executed when the dump is loaded.
+        </p><p>
+          </p><pre data-type="programlisting">$ <strong><code>mysqldump --host=127.0.0.1 --user=root \</code></strong>
+&gt; <strong><code> --source-data=1 --all-databases &gt; mydump.sql</code></strong>
+$ <strong><code>grep -b5 "CHANGE REPLICATION SOURCE" -m1 mydump.sql</code></strong>
+906-
+907---
+910--- Position to start replication or point-in-time recovery from
+974---
+977-
+978:CHANGE REPLICATION SOURCE TO SOURCE_LOG_FILE='source-bin.000002',↩
+    SOURCE_LOG_POS=156;
+1052-
+1053---
+1056--- Current Database: `mtr`
+1083---
+1086-</pre><p>
+        </p><div data-type="tip"><h6>Tip</h6><p>
+            If you want to have replication position in the resulting dump file, but do not want <span class="command"><em>CHANGE REPLICATION SOURCE</em></span> command to be automatically executed, set option <code>--source-data</code> to 2: in this case the statement will be written as a comment. You may later execute it manually.
+          </p></div><p>
+          Tools, which make online binary backups, such as <a href="https://www.percona.com/doc/percona-xtrabackup/8.0/index.html">Percona XtraBackup</a> or <a href="https://dev.mysql.com/doc/mysql-enterprise-backup/8.0/en/">MySQL Enterprise Backup</a>, store binary log coordinates in special metadata files. Consult documentation of your backup tool to find out how to safely backup source server.
+        </p><div data-type="tip"><h6>Tip</h6><p>
+            There several kinds of backups for MySQL. Tools that perform online backups, do not require you to stop MySQL server. Logical backups result in a file with set of commands, that allow to restore data. Binary backups copy physical database files. Binary backups are usually much faster than logical. Restore of binary backups is dramatically faster if compare with restore of the logical backups.
+          </p><p>
+            The simplest and fastest binary backup utility is <span class="command"><em>cp</em></span> that requires MySQL server to be stopped. Online backup tools allows you to copy binary data while server is running and preferable solution for large data sets.
+          </p><p>
+            Logical backup solutions, however, are compatible with higher differences between versions and could be used to recover data. They are also handy when you need to migrate small part of data, such as a table or even part of the table.
+          </p></div><p>
+          Once you have a backup restore it on the replica. For <span class="command"><em>mysqldump</em></span> use <span class="command"><em>mysql</em></span> client to load the dump:
+          </p><pre data-type="programlisting">$ <strong><code>mysql &lt; mydump.sql</code></strong></pre><p>
+        </p><p>
+          Once backup is restored start replication using <span class="command"><em>START REPLICA</em></span> command.
+        </p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="3.4 Setting Up GTID-Based Replication"><div class="sect1" id="nch-replication-replication-gtid"><h1>3.4 Setting Up GTID-Based Replication</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820408279232"><h2>Problem</h2><p>
+        You want to setup a replica using global transaction identifiers (GTIDs).
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820408278144"><h2>Solution</h2><p>
+        Add options <code>gtid_mode=ON</code> and <code>enforce_gtid_consistency=ON</code> into both source and replica configuration files, then point the replica to the source server using <span class="command"><em>CHANGE REPLICATION SOURCE ... SOURCE_AUTO_POSITION=1</em></span> command.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820408275264"><h2>Discussion</h2><p>
+        Position-based replication is easy to setup, but is error-prone. What if you mix up and specify a position in the future? In this case some transactions will be missed. Or, what will happen if you specify a position in the past? In this case the same transaction will be applied twice. You will end up with duplicated, missed or corrupted rows.
+      </p><p>
+        To solve this issue Global Transaction Identifiers, or GTIDs, were introduced to uniquely identify each transaction on the server. GTID consists of two parts: unique ID of the server where this transaction were executed first time and unique ID of the transaction on this server. The source server ID is usually the value of the <code>server_uuid</code> global variable and transaction ID is a number, starting from 1.
+        </p><pre data-type="programlisting">mysql&gt; <strong><code>SHOW MASTER STATUS\G</code></strong>
+*************************** 1. row ***************************
+             File: binlog.000001
+         Position: 358
+     Binlog_Do_DB: 
+ Binlog_Ignore_DB: 
+Executed_Gtid_Set: 467ccf91-0341-11eb-a2ae-0242dc638c6c:1
+1 row in set (0.00 sec)
+
+mysql&gt; <strong><code>select @@gtid_executed;</code></strong>
++----------------------------------------+
+| @@gtid_executed                        |
++----------------------------------------+
+| 467ccf91-0341-11eb-a2ae-0242dc638c6c:1 |
++----------------------------------------+
+1 row in set (0.00 sec)</pre><p>
+      </p><p>
+        Transactions, executed by the server, are stored in GTID sets and their GTIDs are visible in the <span class="command"><em>SHOW MASTER STATUS</em></span> output as well as value of <code>gtid_executed</code> variable. The set contains unique ID of the originating server and range of transaction numbers.
+      </p><p>
+        In the example below <code>467ccf91-0341-11eb-a2ae-0242dc638c6c</code> is the source server unique ID and <code>1-299</code> is a range of transaction numbers, which were executed on this server.
+        </p><pre data-type="programlisting">mysql&gt; <strong><code>select @@gtid_executed;</code></strong>
++--------------------------------------------+
+| @@gtid_executed                            |
++--------------------------------------------+
+| 467ccf91-0341-11eb-a2ae-0242dc638c6c:1-299 |
++--------------------------------------------+
+1 row in set (0.00 sec)</pre><p>
+      </p><p>
+        GTID sets can contain ranges, individual transactions and groups of them, separated by a colon symbol. GTIDs with different source ids are separated by a comma:
+        </p><pre data-type="programlisting">mysql&gt; <strong><code>select @@gtid_executed\G</code></strong>
+*************************** 1. row ***************************
+@@gtid_executed: 000bbf91-0341-11eb-a2ae-0242dc638c6c:1,
+467ccf91-0341-11eb-a2ae-0242dc638c6c:1-310:400
+1 row in set (0.00 sec)</pre><p>
+      </p><p>
+        Normally GTIDs are automatically assigned and you do not need to care about their values.
+      </p><p>
+        However, in order to use GTIDs you need to add additional preparation steps for your servers.
+      </p><p>
+	    Two configuration options are required to enable GTIDs: <code>gtid_mode=ON</code> and <code>enforce-gtid-consistency=ON</code>. They must be enabled on both servers before starting replication.
+	  </p><p>
+	    If you are setting up a new replica of a source that is running with GTIDs enabled, just adding these options into the configuration file and restarting the servers is enough. Once done you can enable replication using <span class="command"><em>CHANGE REPLICATION SOURCE ... SOURCE_AUTO_POSITION=1</em></span> command and start it:
+	    </p><pre data-type="programlisting">mysql&gt; <strong><code>CHANGE REPLICATION SOURCE TO</code></strong>
+    -&gt; <strong><code>SOURCE_HOST='sourcehost',    -- Host of the source server</code></strong>
+    -&gt; <strong><code>SOURCE_PORT=3306,            -- Port of the source server</code></strong>
+    -&gt; <strong><code>SOURCE_USER='repl',          -- Replication user</code></strong>
+    -&gt; <strong><code>SOURCE_PASSWORD='replrepl',  -- Password</code></strong>
+    -&gt; <strong><code>GET_SOURCE_PUBLIC_KEY=1,</code></strong>
+    -&gt; <strong><code>SOURCE_AUTO_POSITION=1;</code></strong>
+Query OK, 0 rows affected, 1 warning (0.06 sec)
+
+mysql&gt; <strong><code>START REPLICA;</code></strong>
+Query OK, 0 rows affected (0.01 sec)</pre><p>
+	  </p><p>
+	    However, if replication was already running using position-based setup you need to perform additional steps:
+	    </p><ol><li><p>
+	          Stop all updates, making both servers read only:
+	          </p><pre data-type="programlisting">mysql&gt; <strong><code>SET GLOBAL super_read_only=1;</code></strong>
+Query OK, 0 rows affected (0.01 sec)</pre><p>
+	        </p></li><li><p>
+	          Wait until replica catches up with all updates from the source server: values of <code>File</code> and <code>Position</code> from the <span class="command"><em>SHOW MASTER STATUS</em></span> output on the source server should match values of <code>Relay_Source_Log_File</code> and <code>Exec_Source_Log_Pos</code> of the <span class="command"><em>SHOW REPLICA STATUS</em></span>, taken on the replica.
+	        </p><div data-type="warning" epub:type="warning"><h6>Warning</h6><p>
+	            Do not rely on the <code>Seconds_Behind_Source</code> value, because it is inaccurate.
+	          </p><p>
+	            For example, in the following output on the source server:
+	            </p><pre data-type="programlisting" data-code-language="sql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">SHOW</code><code> </code><code class="n">MASTER</code><code> </code><code class="n">STATUS</code><code class="err">\</code><code class="k">G</code></strong><code>
+</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code> </code><code class="mi">1</code><code class="p">.</code><code> </code><code class="k">row</code><code> </code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code class="o">*</code><code>
+             </code><code class="n">File</code><code class="p">:</code><code> </code><code class="n">master</code><code class="o">-</code><code class="n">bin</code><code class="p">.</code><code class="mi">000001</code><code>
+         </code><code class="k">Position</code><code class="p">:</code><code> </code><code class="mi">9614</code><code>
+     </code><code class="n">Binlog_Do_DB</code><code class="p">:</code><code> 
+ </code><code class="n">Binlog_Ignore_DB</code><code class="p">:</code><code> 
+</code><code class="n">Executed_Gtid_Set</code><code class="p">:</code><code> 
+</code><code class="mi">1</code><code> </code><code class="k">row</code><code> </code><code class="k">in</code><code> </code><code class="k">set</code><code> </code><code class="p">(</code><code class="mi">0</code><code class="p">.</code><code class="mi">00</code><code> </code><code class="n">sec</code><code class="p">)</code></pre><p>
+                binary log position is 7090. 
+              </p><pre data-type="programlisting" data-code-language="sql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="err">\</code><code class="n">P</code><code> </code><code class="n">grep</code><code> </code><code class="o">-</code><code class="n">E</code><code> </code><code class="ss">"Source_Log_Pos|Seconds_Behind_Source"</code></strong><code>
+</code><code class="n">PAGER</code><code> </code><code class="k">set</code><code> </code><code class="k">to</code><code> </code><code class="s1">'grep -E "Source_Log_Pos|Seconds_Behind_Source"'</code><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">SHOW</code><code> </code><code class="n">REPLICA</code><code> </code><code class="n">STATUS</code><code class="err">\</code><code class="k">G</code></strong><code>
+          </code><code class="n">Read_Source_Log_Pos</code><code class="p">:</code><code> </code><code class="mi">9614</code><code>
+          </code><code class="n">Exec_Source_Log_Pos</code><code class="p">:</code><code> </code><code class="mi">7308</code><code>
+        </code><code class="n">Seconds_Behind_Source</code><code class="p">:</code><code> </code><code class="mi">0</code><code>
+</code><code class="mi">1</code><code> </code><code class="k">row</code><code> </code><code class="k">in</code><code> </code><code class="k">set</code><code> </code><code class="p">(</code><code class="mi">0</code><code class="p">.</code><code class="mi">00</code><code> </code><code class="n">sec</code><code class="p">)</code></pre><p>
+                On the replica, instead, position <code>Read_Source_Log_Pos</code> that read by the IO thread, is same as on the source server while value position of the latest executed event <code>Exec_Source_Log_Pos</code> is 7308: somewhere earlier in the binary log file. Value of <code>Seconds_Behind_Source</code> is 0 is normal, because MySQL server can execute thousands of updates per second. Still this does not mean that the replica fully catches up the source server.
+              </p></div></li><li><p>
+	          Once the replica has caught up, stop both servers, enable <code>gtid_mode=ON</code> and <code>enforce-gtid-consistency=ON</code> options, start them and enable replication:
+	    </p><pre data-type="programlisting">mysql&gt; <strong><code>CHANGE REPLICATION SOURCE TO </code></strong>
+    -&gt; <strong><code>SOURCE_HOST='sourcehost',    -- Host of the source server</code></strong>
+    -&gt; <strong><code>SOURCE_PORT=3306,            -- Port of the source server</code></strong>
+    -&gt; <strong><code>SOURCE_USER='repl',          -- Replication user</code></strong>
+    -&gt; <strong><code>SOURCE_PASSWORD='replrepl',  -- Password</code></strong>
+    -&gt; <strong><code>GET_SOURCE_PUBLIC_KEY=1,</code></strong>
+    -&gt; <strong><code>SOURCE_AUTO_POSITION=1;</code></strong>
+Query OK, 0 rows affected, 1 warning (0.06 sec)
+
+mysql&gt; <strong><code>START REPLICA;</code></strong>
+Query OK, 0 rows affected (0.01 sec)</pre><p>
+	        </p></li></ol><p>
+	  </p><div data-type="tip"><h6>Tip</h6><p>
+	      You may omit replication source connection options if they were already known to the replica before you started switching replication from position-based to GTID-based.
+	    </p></div><div data-type="note" epub:type="note"><h6>Note</h6><p>
+		  You are not required to enable binary logging on the replica in order to use GTIDs. But if you are going to write to replica outside of the replication its transactions would not have own GTID assigned. GTIDs will be used only for the replicated events.
+		</p></div></div></section><section data-type="sect2" data-pdf-bookmark="See Also"><div class="sect2" id="idm45820408274800"><h2>See Also</h2><p>For additional information about setting up MySQL replication with GTIDs,
+      see <a href="https://dev.mysql.com/doc/refman/8.0/en/replication-gtids-howto.html">MySQL User Reference Manual</a>.</p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="3.5 Configuring a Binary Log Format"><div class="sect1" id="nch-replication-replication-format"><h1>3.5 Configuring a Binary Log Format</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820408034928"><h2>Problem</h2><p>
+        You want to use a binary log format that is the most suitable for your application.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820408033840"><h2>Solution</h2><p>
+        Decide which format best suites your needs and set it using configuration option <code>binlog_format</code>.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820408032368"><h2>Discussion</h2><p>
+        Default MySQL binary log format is <code>ROW</code> since version 5.7.7. This is the safest possible format, fitting most applications. It stores encoded table row, modified by the binary log event.
+      </p><p>
+        However, binary log format <code>ROW</code> may generate more disk and network traffic than <code>STATEMENT</code> format. This happens, because it stores into binary log file two copies of the modified row: before changes and after the changes. If a table has many columns, values for all of them will be logged two times even if only one column was modified.
+      </p><p>
+        If you want binary log to store only changed column and column which could be used to identify changed rows (normally Primary Key) you can use configuration option <code>binlog_row_image=minimal</code>. This will work perfectly if tables on the source server and its replica are identical, but may cause issues if number of columns, their data types or primary key definitions do not match.
+      </p><p>
+        To store full row, except <code>TEXT</code> or <code>BLOB</code> columns which were not changed by the statement and are not required to uniquely identify modified row use option <code>binlog_row_image=noblob</code>.
+      </p><p>
+        If row format still generates too much traffic you may switch it to the <code>STATEMENT</code>. In this case statements, modifying rows, will be recorded, then executed by the replica. To use binary log format <code>STATEMENT</code> set option <code>binlog_format=STATEMENT</code>.
+      </p><p>
+        <code>STATEMENT</code> format is not recommended safe to use, because some statements can produce different updates on different servers, even if data originally was identical. These statements are called as nondeterministic. In order to deal with this downside MySQL has a special binary log format: <code>MIXED</code> that normally logs events in the <code>STATEMENT</code> format and automatically switches to <code>ROW</code> if a statement is nondeterministic.
+      </p><div data-type="warning" epub:type="warning"><h6>Warning</h6><p>
+          If binary log is enabled on replica it should use either the same binary log format as its source server or <code>MIXED</code> unless you disabled binary logging of the replicated events using option <code>log_replica_updates=OFF</code> (<code>log_slave_updates=OFF</code>). This is required, because replica does not convert binary log format and simply copies received events into its own binary log file. If formats do not match replication will stop with an error.
+        </p></div><p>
+        Binary log format can be changed dynamically on the global or session level. To change format on the global level run:
+        </p><pre data-type="programlisting">mysql&gt; <strong><code>set global binlog_format='statement';</code></strong>
+Query OK, 0 rows affected (0,00 sec)</pre><p>
+        To change format on the global level and store it permanently use:
+        </p><pre data-type="programlisting">mysql&gt; <strong><code>set persist binlog_format='row';</code></strong>
+Query OK, 0 rows affected (0,00 sec)</pre><p>
+        Note that this will not change binary logging format for the existent connections. To change format on the session level execute:
+        </p><pre data-type="programlisting">mysql&gt; <strong><code>set session binlog_format='mixed';</code></strong>
+Query OK, 0 rows affected (0,00 sec)</pre><p>
+      </p><p>
+        While format <code>STATEMENT</code> usually generates less traffic than <code>ROW</code> this is not always the case. For example, complicated statements with long <code>WHERE</code> or <code>IN</code> clauses that modify just a few rows, generate a bigger binary log event with format <code>STATEMENT</code>.
+      </p><p>
+        Another issue with the <code>STATEMENT</code> format is that the replica executes receieved events the same way they were running on the source server. Therefore, if a statement is not effective it will run slow on replica too. For example, statements on large tables which have <code>WHERE</code> clause which cannot be resolved using indexes, usually are slow. In this case switching to <code>ROW</code> format may improve performance.
+      </p><div data-type="warning" epub:type="warning"><h6>Warning</h6><p>
+          Normally <code>ROW</code> events use primary key to find the row on the replica that needs to be updated. If a table has no primary key <code>ROW</code> format can work extremely slow. Older versions of MySQL even could update wrong row, because of, now fixed, bugs. Auto-generated primary key which is used by the InnoDB storage engine is no help here, because it may generate different values on the source and replica servers for the same row. Therefore it is mandatory to define primary key for tables when use binary log format <code>ROW</code>.
+        </p></div></div></section></div></section><section data-type="sect1" data-pdf-bookmark="3.6 Using Replication Filters"><div class="sect1" id="nch-replication-replication-filters"><h1>3.6 Using Replication Filters</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820408008880"><h2>Problem</h2><p>
+        You want to replicate only events for specific databases or tables.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820408007904"><h2>Solution</h2><p>
+        Use replication filters on the source, replica, or both sides.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820408006960"><h2>Discussion</h2><p>
+        MySQL can filter updates to the specific databases or tables. You can setup such filters on the source server to prevent them from being recorded in the binary log or on the replica server, so replication would not execute them.
+      </p><section data-type="sect3" data-pdf-bookmark="Filtering on the source server"><div class="sect3" id="idm45820408005664"><h3>Filtering on the source server</h3><div data-type="warning" epub:type="warning"><h6>Warning</h6><p>
+            Replication filters can cause data loss if setup incorrectly. Study this recipe very carefully and always test how they work for your setup before deploying on production.
+          </p></div><p>
+          To log only updates to a specific database use configuration option <code>binlog-do-db=db_name</code>. There is no corresponding variable for this option, therefore changing binary log filter requires restart. To log updates for two or more specific databases specify option <code>binlog-do-db</code> as many times as needed:
+          </p><pre data-type="programlisting">[mysqld]
+binlog-do-db=cookbook
+binlog-do-db=test</pre><p>
+        </p><p>
+          Binary log filters behave differently for <code>ROW</code> and <code>STATEMENT</code> binary log formats. For the statement-based logging only the default database is taken into account. If you are using fully qualified table names, such as <code>mydatabase.mytable</code> they will be logged based on the default database value and not on the database part of the update.
+        </p><p>
+          Thus, for the configuration file snippet above the following three updates will be logged in the binary log:
+          </p><ul><li><p>
+          </p><pre data-type="programlisting">$ <strong><code>mysql cookbook</code></strong>
+mysql&gt; <strong><code>INSERT INTO limbs (thing, legs, arms) VALUES('horse', 4, 0);</code></strong>
+Query OK, 1 row affected (0,01 sec)</pre><p>
+          </p></li><li><p>
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>USE cookbook</code></strong>
+Database changed
+mysql&gt; <strong><code>DELETE FROM limbs WHERE thing='horse';</code></strong>
+Query OK, 1 row affected (0,00 sec)</pre><p>
+          </p></li><li><p>
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>USE cookbook</code></strong>
+Database changed
+mysql&gt; <strong><code>INSERT INTO donotlog.onlylocal (mysecret) 
+    -&gt; values('I do not want to replicate it!');</code></strong>
+Query OK, 1 row affected (0,01 sec)</pre><p>
+          </p></li></ul><p>
+          However, this update on the cookbook database would not be logged:
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>use donotlog</code></strong>
+Database changed
+mysql&gt; <strong><code>UPDATE cookbook.limbs set arms=8 WHERE thing='squid';</code></strong>
+Query OK, 1 row affected (0,01 sec)
+Rows matched: 1  Changed: 1  Warnings: 0</pre><p>
+        </p><p>
+          When binary log format <code>ROW</code> is used the default database is ignored for fully qualified table names. Thus, all these updates will be logged:
+          </p><pre data-type="programlisting">$ <strong><code>mysql cookbook</code></strong>
+mysql&gt; <strong><code>INSERT INTO limbs (thing, legs, arms) VALUES('horse', 4, 0);</code></strong>
+Query OK, 1 row affected (0,01 sec)
+mysql&gt; <strong><code>USE cookbook</code></strong>
+Database changed
+mysql&gt; <strong><code>DELETE FROM limbs WHERE thing='horse';</code></strong>
+Query OK, 1 row affected (0,00 sec)
+mysql&gt; <strong><code>USE donotlog</code></strong>
+Database changed
+mysql&gt; <strong><code>UPDATE cookbook.limbs SET arms=10 WHERE thing='squid';</code></strong>
+Query OK, 1 row affected (0,01 sec)
+Rows matched: 1  Changed: 1  Warnings: 0</pre><p>
+          However, this statement will not be logged:
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>USE cookbook</code></strong>
+Database changed
+mysql&gt; <strong><code>INSERT INTO donotlog.onlylocal (mysecret) </code></strong>
+    -&gt; <strong><code>VALUES('I do not want to replicate it!');</code></strong>
+Query OK, 1 row affected (0,01 sec)</pre><p>
+        </p><p>
+          For multiple table updates only updates to tables belonging to databases specified by filters are logged. In the following examples only updates to table <code>cookbook.limbs</code> are logged:
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>use donotlog</code></strong>
+Database changed
+mysql&gt; <strong><code>UPDATE cookbook.limbs, donotlog.onlylocal SET arms=1, </code></strong>
+    -&gt; <strong><code>mysecret='I do not want to log it!';</code></strong>
+Query OK, 12 rows affected (0,01 sec)
+Rows matched: 12  Changed: 12  Warnings: 0
+mysql&gt; <strong><code>USE cookbook</code></strong>
+Database changed
+mysql&gt; <strong><code>UPDATE cookbook.limbs, donotlog.onlylocal SET arms=0, </code></strong>
+    -&gt; <strong><code>mysecret='I do not want to log and replicate this!' </code></strong>
+    -&gt; <strong><code>WHERE cookbook.limbs.thing='table';</code></strong>
+Query OK, 2 rows affected (0,00 sec)
+Rows matched: 2  Changed: 2  Warnings: 0</pre><p>
+        </p><div data-type="warning" epub:type="warning"><h6>Warning</h6><p>
+            DDL statements, such as <code>ALTER TABLE</code> are always replicated in the <code>STATEMENT</code> format. Therefore filtering rules for this format applies to them no matter the value of the variable <code>binlog_format</code>.
+          </p></div><p>
+          If you want to log updates to all databases on your server and skip only a few of them use <code>binlog-ignore-db</code> filters. Specify filter multiple times to ignore multiple databases.
+          </p><pre data-type="programlisting">[mysqld]
+binlog-ignore-db=donotlog
+binlog-ignore-db=mysql</pre><p>
+        </p><p>
+          <code>binlog-ignore-db</code> filters work similarly to <code>binlog-do-db</code> filters. In case of <code>STATEMENT</code> binary logging they honor default database and ignore it if <code>ROW</code> binary log format is used. If you did not specify default database and use <code>STATEMENT</code> binary log format all updates will be logged.
+        </p><p>
+          If you use binary log format <code>MIXED</code> filtering rules will be applied depending if the update is stored in the <code>STATEMENT</code> or <code>ROW</code> format.
+        </p><p>
+          To find out which binary log filters are currently in use run <span class="command"><em>SHOW MASTER STATUS</em></span> command:
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>SHOW MASTER STATUS\G</code></strong>
+*************************** 1. row ***************************
+             File: binlog.000008
+         Position: 1202
+     Binlog_Do_DB: cookbook,test
+ Binlog_Ignore_DB: donotlog,mysql
+Executed_Gtid_Set: 
+1 row in set (0,00 sec)</pre><p>
+        </p><div data-type="warning" epub:type="warning"><h6>Warning</h6><p>
+            Binary log files are often used not only for the replication, but also for point-in-time recovery (PITR) from failure. In this case filtered updates cannot be restored, because they are not stored anywhere. If you want to use binary logs for PITR and still filter some databases: log everything on the source server and filter on the replica.
+          </p></div></div></section><section data-type="sect3" data-pdf-bookmark="Filtering on the replica"><div class="sect3" id="idm45820408005200"><h3>Filtering on the replica</h3><p>
+          Replica has more options to filter events. You can filter either specific databases or tables. You can also use wildcards.
+        </p><p>
+          Filtering on the database level works in same fashion as on the source server. It is controlled by options <code>replicate-do-db</code> and <code>replicate-ignore-db</code>. If you want to filter multiple databases specify these option as many times as you need.
+        </p><p>
+          To filter specific tables use options <code>replicate-do-table</code> and <code>replicate-ignore-table</code>. They take fully qualified table name as an argument.
+          </p><pre data-type="programlisting">[mysqld]
+replicate-do-db=cookbook
+replicate-ignore-db=donotlog
+replicate-do-table=donotlog.dataforeveryone
+replicate-ignore-table=cookbook.limbs</pre><p>
+        </p><p>
+          But most flexible and safe syntax for replication filters is <code>replicate-wild-do-table</code> and <code>replicate-wild-ignore-table</code>. As the name suggests they accept wildcards in the arguments. Wildcard syntax is the same as used for the <code>LIKE</code> clause. Refer to <a data-type="xref" href="ch07.xhtml#nch-strings-strings-pat-sql">Recipe 7.10</a> for details on the <code>LIKE</code> clause syntax.
+        </p><p>
+          Symbol <code>_</code> replaces exactly one single character. Thus <code>replicate-wild-ignore-table=cookbook.standings_</code> filters tables <code>cookbook.standings1</code> and <code>cookbook.standings2</code>, but does not filter <code>cookbook.standings12</code> and <code>cookbook.standings</code>.
+        </p><p>
+          Symbol <code>%</code> replaces zero or more characters. Thus <code>replicate-wild-do-table=cookbook.movies%</code> instructs replica to apply updates to tables <code>cookbook.movies</code>, <code>cookbook.movies_actors</code> and <code>cookbook.movies_actors_link</code>.
+        </p><p>
+          If a table name itself contains a wildcard character which you do not want to replace you need to escape it. Thus option <code>replicate-wild-ignore-table=cookbook.trip_l_g</code> will filter tables <code>cookbook.trip_leg</code>, <code>cookbook.trip_log</code>, but also <code>cookbook.tripslag</code> while <code>replicate-wild-ignore-table=cookbook.trip\_l_g</code> will only filter updates to tables <code>cookbook.trip_leg</code> and <code>cookbook.trip_log</code>. Note, if you specify this option on the command line you may need to double escape wildcard characters depending of the <code>SHELL</code> version you use.
+        </p><div data-type="tip"><h6>Tip</h6><p>
+            Table-level fitlers are independent from the default database regardless of the binary log format. Therefore it is safer to use them. If you want to filter all tables in the specific database or databases use wildcards:
+            </p><pre data-type="programlisting">[mysqld]
+replicate-wild-do-table=cookbook.%
+replicate-wild-ignore-table=donotlog.%</pre><p>
+            However, unlike database filters, <code>replicate-wild-do-table</code> and <code>replicate-wild-ignore-table</code> cannot filter stored routines or events. If you need to filter them you have to use database-level filters.
+          </p></div><p>
+          Replication filters can be set for the specific replication channel (<a data-type="xref" href="#nch-replication-replication-multisource">Recipe 3.10</a>). To specify per-channel filter prefix database, table name or wildcard expression with the channel name, followed by a colon:
+          </p><pre data-type="programlisting">[mysqld]
+replicate-do-db=first:cookbook
+replicate-ignore-db=second:donotlog
+replicate-do-table=first:donotlog.dataforeveryone
+replicate-ignore-table=second:cookbook.hitlog
+replicate-wild-do-table=first:cookbook.movies%
+replicate-wild-ignore-table=second:cookbook.movies%</pre><p>
+        </p><p>
+          You can specify replication filters not only via configuration options, but also using <span class="command"><em>CHANGE REPLICATION FILTER</em></span> command:
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>CHANGE REPLICATION FILTER</code></strong>
+    -&gt; <strong><code>REPLICATE_DO_DB = (cookbook),</code></strong>
+    -&gt; <strong><code>REPLICATE_IGNORE_DB = (donotlog),</code></strong>
+    -&gt; <strong><code>REPLICATE_DO_TABLE = (donotlog.dataforeveryone),</code></strong>
+    -&gt; <strong><code>REPLICATE_IGNORE_TABLE = (cookbook.limbs),</code></strong>
+    -&gt; <strong><code>REPLICATE_WILD_DO_TABLE = ('cookbook.%'),</code></strong>
+    -&gt; <strong><code>REPLICATE_WILD_IGNORE_TABLE = ('cookbook.trip\_l_g');</code></strong>
+Query OK, 0 rows affected (0.00 sec)</pre><p>
+        </p><div data-type="tip"><h6>Tip</h6><p>
+            You need to stop replication using <span class="command"><em>STOP REPLICA</em></span> (<span class="command"><em>STOP SLAVE</em></span>) command each time when change replication parameters.
+          </p></div><p>
+          To find out which replication filters are currently applied use <span class="command"><em>SHOW REPLICA STATUS\G</em></span> command or query tables <code>replication_applier_filters</code> and <code>replication_applier_global_filters</code> in Performance Schema.
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>SHOW REPLICA STATUS\G</code></strong>
+*************************** 1. row ***************************
+               Replica_IO_State: 
+                  Source_Host: 127.0.0.1
+                  Source_User: root
+                  Source_Port: 13000
+                Connect_Retry: 60
+              Source_Log_File: binlog.000001
+          Read_Source_Log_Pos: 156
+               Relay_Log_File: Delly-7390-relay-bin.000002
+                Relay_Log_Pos: 365
+        Relay_Source_Log_File: binlog.000001
+             Replica_IO_Running: No
+            Replica_SQL_Running: No
+              Replicate_Do_DB: cookbook
+          Replicate_Ignore_DB: donotlog
+           Replicate_Do_Table: donotlog.dataforeveryone
+       Replicate_Ignore_Table: cookbook.limbs
+      Replicate_Wild_Do_Table: cookbook.%
+  Replicate_Wild_Ignore_Table: cookbook.trip\_l_g
+...
+
+mysql&gt; <strong><code>SELECT * FROM performance_schema.replication_applier_filters\G</code></strong>
+*************************** 1. row ***************************
+ CHANNEL_NAME: 
+  FILTER_NAME: REPLICATE_DO_DB
+  FILTER_RULE: cookbook
+CONFIGURED_BY: CHANGE_REPLICATION_FILTER
+ ACTIVE_SINCE: 2020-10-04 13:43:21.183768
+      COUNTER: 0
+*************************** 2. row ***************************
+ CHANNEL_NAME: 
+  FILTER_NAME: REPLICATE_IGNORE_DB
+  FILTER_RULE: donotlog
+CONFIGURED_BY: CHANGE_REPLICATION_FILTER
+ ACTIVE_SINCE: 2020-10-04 13:43:21.183768
+      COUNTER: 0
+*************************** 3. row ***************************
+ CHANNEL_NAME: 
+  FILTER_NAME: REPLICATE_DO_TABLE
+  FILTER_RULE: donotlog.dataforeveryone
+CONFIGURED_BY: CHANGE_REPLICATION_FILTER
+ ACTIVE_SINCE: 2020-10-04 13:43:21.183768
+      COUNTER: 0
+*************************** 4. row ***************************
+ CHANNEL_NAME: 
+  FILTER_NAME: REPLICATE_IGNORE_TABLE
+  FILTER_RULE: cookbook.limbs
+CONFIGURED_BY: CHANGE_REPLICATION_FILTER
+ ACTIVE_SINCE: 2020-10-04 13:43:21.183768
+      COUNTER: 0
+*************************** 5. row ***************************
+ CHANNEL_NAME: 
+  FILTER_NAME: REPLICATE_WILD_DO_TABLE
+  FILTER_RULE: cookbook.%
+CONFIGURED_BY: CHANGE_REPLICATION_FILTER
+ ACTIVE_SINCE: 2020-10-04 13:43:21.183768
+      COUNTER: 0
+*************************** 6. row ***************************
+ CHANNEL_NAME: 
+  FILTER_NAME: REPLICATE_WILD_IGNORE_TABLE
+  FILTER_RULE: cookbook.trip\_l_g
+CONFIGURED_BY: CHANGE_REPLICATION_FILTER
+ ACTIVE_SINCE: 2020-10-04 13:43:21.183768
+      COUNTER: 0
+6 rows in set (0.00 sec)</pre><p>
+        </p></div></section></div></section><section data-type="sect2" data-pdf-bookmark="See Also"><div class="sect2" id="idm45820407963264"><h2>See Also</h2><p>For additional information about replication filters,
+      see <a href="https://dev.mysql.com/doc/refman/8.0/en/replication-rules.html">How Servers Evaluate Replication Filtering Rules</a>.</p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="3.7 Rewriting a Database on the Replica"><div class="sect1" id="nch-replication-replication-db-rewrite"><h1>3.7 Rewriting a Database on the Replica</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820407923504"><h2>Problem</h2><p>
+        You want to replicate to a database on replica that has different name from the one used on the source server.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820407922384"><h2>Solution</h2><p>
+        Use option <code>replicate-rewrite-db</code> on the replica server.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820407920944"><h2>Discussion</h2><p>
+        MySQL allows rewriting database name on the fly if use replication filter <code>replicate-rewrite-db</code>.
+      </p><p>
+        You can set such a filter in the configuration file, command line:
+        </p><pre data-type="programlisting">[mysqld]
+replicate-rewrite-db=cookbook-&gt;recipes</pre><p>
+        or via <span class="command"><em>CHANGE REPLICATION FILTER</em></span> command:
+        </p><pre data-type="programlisting">mysql&gt; <strong><code>CHANGE REPLICATION FILTER </code></strong>
+    -&gt; <strong><code>REPLICATE_REWRITE_DB=((cookbook,recipes));</code></strong></pre><p>
+        </p><p>
+        Or, for the multiple-channel replica:
+        </p><pre data-type="programlisting">[mysqld]
+replicate-rewrite-db=channel_id:cookbook-&gt;recipes</pre><p>
+        or via <span class="command"><em>CHANGE REPLICATION FILTER</em></span> command:
+        </p><pre data-type="programlisting">mysql&gt; <strong><code>CHANGE REPLICATION FILTER </code></strong>
+    -&gt; <strong><code>REPLICATE_REWRITE_DB=((cookbook,recipes))</code></strong>
+    -&gt; <strong><code>FOR CHANNEL 'channel_id';</code></strong></pre><p>
+        </p><div data-type="warning" epub:type="warning"><h6>Warning</h6><p>
+            Mind double brackets for the filter value and quotes for the channel name.
+          </p></div><p>
+          MySQL does not support <code>RENAME DATABASE</code> operation. Therefore to rename the database you need to create database with the different name first, then restore data of the original database into this new database.
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>CREATE DATABASE recipes;</code></strong>
+$ <strong><code>mysql recipes &lt; cookbook.sql</code></strong></pre><p>
+          You need to take dump with the command <span class="command"><em>mysqldump</em></span> of the single database. If you are dumping with option <code>--databases</code> also specify option <code>--no-create-db</code>, so resulting file would not contain <span class="command"><em>CREATE DATABASE</em></span> statement.
+        </p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="3.8 Using Multithreaded Replica"><div class="sect1" id="nch-replication-replication-multithreaded"><h1>3.8 Using Multithreaded Replica</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820407904016"><h2>Problem</h2><p>
+        Replica is installed on better hardware than the source, network connection between servers is good, but replication lag is increasing.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820407902880"><h2>Solution</h2><p>
+        Use multiple replication applier threads.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820407901936"><h2>Discussion</h2><p>
+        MySQL server is multi-threaded. It applies incoming updates in highly concurrent manner. By default it uses all hardware CPU cores when processing application requests. However, replica by default uses single thread to apply incoming events from the source server. As a result it uses less resources to process replicated events and may delay even on decent hardware.
+      </p><p>
+        To resolve this issue use multiple applier threads. To do so set variable <code>replica_parallel_workers</code> to a value, greater than 1. This specifies number of parallel threads that replica will use to apply events. It makes sense to set value of this variable up to number of virtual CPU cores. Variable has no immediate effect: you have to restart replication to apply the change.
+        </p><pre data-type="programlisting">mysql&gt; <strong><code>SET GLOBAL replica_parallel_workers=8;</code></strong>
+Query OK, 0 rows affected (0.01 sec)
+
+mysql&gt; <strong><code>STOP REPLICA SQL_THREAD;</code></strong>
+Query OK, 0 rows affected (0.01 sec)
+
+mysql&gt; <strong><code>START REPLICA;</code></strong>
+Query OK, 0 rows affected (0.04 sec)</pre><p>
+      </p><p>
+        Not all replication events can be applied in parallel. What if the binary log contains two statements, updating the same row?
+        </p><pre data-type="programlisting">update limbs set arms=8 where thing='squid';
+update limbs set arms=10 where thing='squid';</pre><p>
+        Depending on the order of events table limbs will have either eitght or ten arms for the squid. If these two statements are executed in different order on the source and replica they will end up with different data.
+      </p><p>
+        MySQL uses one of special algorithms for dependency tracking. Current algorithm is set by variables <code>replica_parallel_type</code> on the replica and <code>binlog_transaction_dependency_tracking</code> on the source.
+      </p><p>
+        Default value of the <code>replica_parallel_type</code> variable was <code>DATABASE</code> before 8.0.27 and is <code>LOGICAL_CLOCK</code> since this version. With this value, updates belonging to different databases can be applied in parallel while updates to the same database are applied sequentially. This value does not correlate with <code>binlog_transaction_dependency_tracking</code> on the source.
+      </p><p>
+        Parallelization on the database level does not perform much better for setups which update less databases than number of CPU cores on the replica. To resolve this issue <code>replica_parallel_type=LOGICAL_CLOCK</code> has been introduced. For this type, transactions belonging to the same binary log group commit on the source are applied in parallel.
+      </p><p>
+        After changing variable <code>replica_parallel_type</code> you need to restart the replica.
+      </p><p>
+        Value of variable <code>binlog_transaction_dependency_tracking</code> on the <strong>source</strong> server defines which transactions belong to the same commit group. Default is <code>COMMIT_ORDER</code> which is generated from the source’s timestamps. With this value transactions, committed nearly at the same time on the source server, will be executed in parallel on replica. This mode works perfectly if the source actively executes many small transactions. However, if the source server does not commit often it can happen that replica will execute sequentially even those transactions that cannot interfer with each other and practically executed on the source in parallel, just were committed in different times.
+      </p><p>
+        To resolve this issue <code>binlog_transaction_dependency_tracking</code> modes <code>WRITESET</code> and <code>WRITESET_SESSION</code> were introduced. In these modes MySQL decides if transactions are depend on each other using hashing algorithm, specified by variable <code> transaction_write_set_extraction</code> and can be any of <code>XXHASH64</code>(default) or <code>MURMUR32</code>. This means that if transactions modify set of rows, independent from each other, they could be executed in parallel, no matter how much time passed between commits on each of them.
+      </p><p>
+        With <code>binlog_transaction_dependency_tracking</code> mode, set to <code>WRITESET</code> even transactions originally executed within the same session could be applied in parallel. This may cause issues when replica sees changes in different order than the source in some periods of time. It maybe acceptable or not depending on your application needs. To avoid such a situation you may enable option <code>replica_preserve_commit_order</code> (<code>slave_preserve_commit_order</code>) that instructs replica to apply binary log events in the same order as they were originally executed on the source server. Another solutions is to set <code>binlog_transaction_dependency_tracking</code> to <code>WRITESET_SESSION</code>. This mode ensures that transactions originated from the same session are never applied in parallel.
+      </p><p>
+        Variable <code>binlog_transaction_dependency_tracking</code> is dynamic and you can modify it without stopping the server. You can also set it on the session level for the specific session only.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="See Also"><div class="sect2" id="idm45820407901552"><h2>See Also</h2><p>For additional information about multithreaded replica,
+      see <a href="https://mysqlhighavailability.com/improving-the-parallel-applier-with-writeset-based-dependency-tracking/">Improving the Parallel Applier with Writeset-based Dependency Tracking</a>.</p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="3.9 Setting Up Circular Replication"><div class="sect1" id="nch-replication-replication-circle"><h1>3.9 Setting Up Circular Replication</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820407879408"><h2>Problem</h2><p>
+        You want to setup a chain of servers, which replicate from each other.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820409788176"><h2>Solution</h2><p>
+        Make each server in the chain a source and a replica of its peers.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820409787232"><h2>Discussion</h2><p>
+        Sometimes you may need to write to several MySQL servers and want updates to be visible on each of them. With MySQL replication this is possible. It supports such popular setups as two-server, a chain of servers (<code>A -&gt; B -&gt; C -&gt; D -&gt; ... </code>, circular, <a href="https://en.wikipedia.org/wiki/Star_network">star</a> as well as any creative setup you can imagine. For our example of the circular replication you just need to setup every server as a source and replica of each other.
+      </p><p>
+          You need to be very careful when use such a replication. Because updates are incoming from any server they can conflict with each other.
+      </p><p>
+        Imagine two nodes insert a row with <code>id=42</code> at the same time. First, each node inserts a row, then recieves exactly same event from the binary log. Replication will stop with duplicate key error.
+      </p><p>
+        If then you try to delete a row with <code>id=42</code> on both nodes you will receive an error again! Because at the time when <code>DELETE</code> statement will be received by the replication channel row already will be deleted.
+      </p><p>
+        But the worst can happen if you update a row with same <code>ID</code>. Imagine if <code>node1</code> sets value to <code>42</code> and <code>node2</code> sets value to <code>25</code>. After replication events are applied <code>node1</code> will have a row with value <code>25</code> and <code>node2</code> with value <code>42</code>. Different from what they initally had after local update!
+      </p><p>
+        Still there can be very valid reasons to use circular replication. For example, you may want to use one of nodes mostly for purposes of one application and another one for another application. You can have options and hardware, most suitable for both. Or you may have servers in different geographical locations (e.g. countries) and want to store local data closer to users. Or you can use your servers mostly for reads, but still need to update them. And, finally, you may setup a hot standby server which technically allows writes, but practically receives them only when the main source server dies.
+      </p><p>
+        In this recipe we will discuss how to setup a chain of three servers. You can modify this recipe for two or more servers. Then we will discuss safety considerations, required to use replication chains.
+      </p><section data-type="sect3" data-pdf-bookmark="Setting up circle replication of three servers"><div class="sect3" id="idm45820409777168"><h3>Setting up circle replication of three servers</h3><p>
+          </p><dl><dt>Prepare servers to use in the circular replication</dt><dd><p>
+                  </p><ul><li><p>
+                        Follow instructions in <a data-type="xref" href="#nch-replication-replication-configuration">Recipe 3.1</a> for the source server
+                      </p></li><li><p>
+                        Make sure option <code>log_replica_updates</code> is enabled. Otherwise, if your replication chain includes more than two servers updates would apply only on the neighboring ones.
+                      </p></li><li><p>
+                        Ensure that option <code>replicate-same-server-id</code> is disabled. Otherwise you may end up in a situation when the same update will be applying in loops forever.
+                      </p></li></ul><p>
+                </p></dd><dt>Point nodes to each other</dt><dd><p>
+                  Run on each server <span class="command"><em>CHANGE REPLICATION SOURCE</em></span> command as described in <a data-type="xref" href="#nch-replication-replication-position-new">Recipe 3.2</a> or in <a data-type="xref" href="#nch-replication-replication-gtid">Recipe 3.4</a>. Specify correct connection values. For example, if you want to have a circle of servers <code>hostA -&gt; hostB -&gt; hostC -&gt; hostA</code>, you need to point <code>hostB</code> to <code>hostA</code>, <code>hostA</code> to <code>hostC</code>, and <code>hostC</code> to <code>hostB</code>:
+                  </p><pre data-type="programlisting">hostA&gt; <strong><code>CHANGE REPLICATION SOURCE TO SOURCE_HOST='hostC', ...</code></strong>
+hostB&gt; <strong><code>CHANGE REPLICATION SOURCE TO SOURCE_HOST='hostA', ...</code></strong>
+hostC&gt; <strong><code>CHANGE REPLICATION SOURCE TO SOURCE_HOST='hostB', ...</code></strong></pre><p>
+                </p></dd><dt>Start replication</dt><dd><p>
+                  Start replication using <span class="command"><em>START REPLICA</em></span> command.
+                </p></dd></dl><p>
+        </p></div></section><section data-type="sect3" data-pdf-bookmark="Safety considerations when using replication chains"><div class="sect3" id="idm45820409759216"><h3>Safety considerations when using replication chains</h3><p>
+          When writing to multiple servers, replicating to each other, you need to logically separate objects to which you are going to write. You can do it on different levels.
+          </p><dl><dt>Business Logic</dt><dd><p>
+                  Make sure at the application level that you do not update same rows on multiple servers at the same time.
+                </p></dd><dt>Server</dt><dd><p>
+                  Write to only one server at a time. This is good solution for creating a Hot Standby servers.
+                </p></dd><dt>Databases and Tables</dt><dd><p>
+                  In your applicaiton: assign specific set of tables to each server. For example, write only to tables <code>movies</code>, <code>movies_actors</code>, <code>movies_actors_link</code> on the <code>nodeA</code>; to tables <code>trip_leg</code> and <code>trip_log</code> on the <code>nodeB</code> and to tables <code>weatherdata</code> and <code>weekday</code> on the <code>nodeC</code>.
+                </p></dd><dt>Rows</dt><dd><p>
+                  If you still need to write to the same table on all the servers separate rows which each node can update. If you use integer primary key with <code>AUTO_INCREMENT</code> option you can do it by setting option <code>auto_increment_increment</code> to the number of the servers and setting <code>auto_increment_offset</code> to number of the server in chain, starting from one. For example, on our three-servers setup set <code>auto_increment_increment</code> to 3 and <code>auto_increment_offset</code> to 1 on the <code>nodeA</code>, to 2 on the <code>nodeB</code> and to 3 on the <code>nodeC</code>. We discuss how to tune <code>auto_increment_increment</code> and <code>auto_increment_offset</code> in <a data-type="xref" href="ch15.xhtml#nch-sequences-seq-increment_increment">Recipe 15.14</a>
+                </p><p>
+                  If you do not use <code>AUTO_INCREMENT</code> you need to create a rule at the application level, so identifier will follow its own unique pattern on the each node.
+                </p></dd></dl><p>
+        </p></div></section></div></section></div></section><section data-type="sect1" data-pdf-bookmark="3.10 Using Multisource Replication"><div class="sect1" id="nch-replication-replication-multisource"><h1>3.10 Using Multisource Replication</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820409742560"><h2>Problem</h2><p>
+        You want a replica to apply events from two or more source servers that are independent from each other.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820409741504"><h2>Solution</h2><p>
+        Create multiple replication channels by running command <span class="command"><em>CHANGE REPLICATION SOURCE ... FOR CHANNEL ‘my source’;</em></span> for each of source servers.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820409739584"><h2>Discussion</h2><p>
+        You may want to replicate from multiple servers to one. For example, if separate source servers are updated by different applications and you want to use replica for backups or for analytics. To achieve this you need to use multi-source replica.
+      </p><p>
+        </p><dl><dt>Prepare servers for the replication</dt><dd><p>
+                Prepare source and replica servers as described in <a data-type="xref" href="#nch-replication-replication-configuration">Recipe 3.1</a>. For the replica server add additional step: configure <code>master_info_repository</code> and <code>relay_log_info_repository</code> to use tables:
+                </p><pre data-type="programlisting">mysql&gt; <strong><code>SET PERSIST master_info_repository = 'TABLE';</code></strong>
+mysql&gt; <strong><code>SET PERSIST relay_log_info_repository = 'TABLE';</code></strong></pre><p>
+              </p><aside data-type="sidebar" epub:type="sidebar"><div class="sidebar" id="nch-replication-replication-multisource-coordinates"><h5>Replication Coordinates Storage</h5><p>
+                  MySQL stores information about source server coordinates, credentials, binary log, its position and about current relay log status in the repositories, called <code>master_info_repository</code> and <code>relay_log_info_repository</code> correspondingly. These repositories are physicaly stored either in a file or in a table inside database <code>mysql</code>.
+                </p><p>
+                  File storage for the replication metadata existed since very beginning. But it has a durability issue: when a transaction commits MySQL has to perform synchronization between storage engine and filesystem. They are two completely independent systems, therefore additional safety measures are performed to provide such a synchronization. They affect performance and not atomic, therefore cannot guarantee durability in case of the failure.
+                </p><p>
+                  Since version 5.6 table storage for the replication info repositories was introduced. It stores metadata in the InnoDB table which supports transactions and does not require additional checks to ensure that replication position update is written to the disk. Since then synchronizing changes became safe and fast operation.
+                </p><p>
+                  For multi-source replication, table storage has unique row for each channel, storing replication coordinates for each of the source servers.
+                </p><p>
+                  In version 8.0 file storage for the replication information repositories is deprecated, table storage is default. In version 5.7 and earlier default storage for the replication metadata was file.
+                </p></div></aside></dd><dt>Backup data on the source servers</dt><dd><p>
+                Make full backup or backup only databases which you want to replicate. E.g., if you want to replicate database <code>cookbook</code> from one server and database <code>production</code> from the another one backup only these databases.
+              </p><p>
+                If you are going to use position-based replication use <span class="command"><em>mysqldump</em></span> with option <code>--source-data=2</code> which instructs the tool to log <code>CHANGE REPLICATION SOURCE</code> command, but comment it out.
+                </p><pre data-type="programlisting">$ <strong><code>mysqldump --host=source_cookbook --single-transaction --triggers --routines \</code></strong>
+&gt; <strong><code>--source-data=2 --databases cookbook &gt; cookbook.sql</code></strong></pre><p>
+              </p><p>
+                For the GTID-based replication use option <code>--set-gtid-purged=COMMENTED</code> instead.
+                </p><pre data-type="programlisting">$ <strong><code>mysqldump --host=source_production --single-transaction --triggers --routines \</code></strong>
+&gt; <strong><code>--set-gtid-purged=COMMENTED --databases production &gt; production.sql</code></strong></pre><p>
+              </p><div data-type="tip"><h6>Tip</h6><p>
+                  You can use position-based and GTID-based replication for different channels. You can use different binary log formats on the source servers as well but in this case you need to setbinary log format on the replica to <code>MIXED</code>, so it is able to store updates in any format.
+                </p></div></dd><dt>Restore data on the replica</dt><dd><p>
+                Restore data, collected from the source servers.
+                </p><pre data-type="programlisting">$ <strong><code>mysql &lt; cookbook.sql</code></strong>
+$ <strong><code>mysql &lt; production.sql</code></strong></pre><p>
+              </p><div data-type="warning" epub:type="warning"><h6>Warning</h6><p>
+                  Ensure data on source servers do not have databases with the same name. If they have you need to rename one of the databases and use <code>replicate-rewrite-db</code> filter, which will rewrite database name while applying replication events. See <a data-type="xref" href="#nch-replication-replication-db-rewrite">Recipe 3.7</a> for details.
+                </p></div></dd><dt>Configure replication channels</dt><dd><p>
+                For the position-based replication locate in the dump file <code>CHANGE REPLICATION SOURCE</code> command:
+                </p><pre data-type="programlisting">$ <strong><code>cat cookbook.sql | grep "CHANGE REPLICATION SOURCE"</code></strong>
+-- CHANGE REPLICATION SOURCE TO SOURCE_LOG_FILE='binlog.000008', ↩
+   SOURCE_LOG_POS=2603;</pre><p>
+                and use resulting coordinates to setup replication. Use <code>FOR CHANNEL</code> clause of the <code>CHANGE REPLICATION SOURCE</code> command to specify which channel to use.
+                </p><pre data-type="programlisting">mysql&gt; <strong><code>CHANGE REPLICATION SOURCE TO</code></strong>
+    -&gt; <strong><code>SOURCE_HOST='source_cookbook',</code></strong>
+    -&gt; <strong><code>SOURCE_LOG_FILE='binlog.000008',</code></strong>
+    -&gt; <strong><code>SOURCE_LOG_POS=2603</code></strong>
+    -&gt; <strong><code>FOR CHANNEL 'cookbook_channel';</code></strong></pre><p>
+              </p><p>
+                For the GTID-based replication first locate <code>SET @@GLOBAL.GTID_PURGED</code> statement:
+                </p><pre data-type="programlisting">$ <strong><code>grep GTID_PURGED production.sql</code></strong>
+/* SET @@GLOBAL.GTID_PURGED='+9113f6b1-0751-11eb-9e7d-0242dc638c6c:1-385';*/</pre><p>
+                Do this for all channels which will use GTID-based replication:
+                </p><pre data-type="programlisting">$ <strong><code>grep GTID_PURGED recipes.sql</code></strong>
+/* SET @@GLOBAL.GTID_PURGED='+910c760a-0751-11eb-9da8-0242dc638c6c:1-385';*/</pre><p>
+              </p><p>
+                Then combine them into single set: <code>'9113f6b1-0751-11eb-9e7d-0242dc638c6c:1-385,910c760a-0751-11eb-9da8-0242dc638c6c:1-385'</code>, run <span class="command"><em>RESET MASTER</em></span> to reset GTID execution history and set <code>GTID_PURGED</code> to the set you just compiled:
+                </p><pre data-type="programlisting">mysql&gt; <strong><code>RESET MASTER;</code></strong>
+Query OK, 0 rows affected (0,03 sec)
+
+mysql&gt; <strong><code>SET @@GLOBAL.gtid_purged = '9113f6b1-0751-11eb-9e7d-0242dc638c6c:1-385,</code></strong>
+    '&gt; <strong><code>910c760a-0751-11eb-9da8-0242dc638c6c:1-385';</code></strong>
+Query OK, 0 rows affected (0,00 sec)</pre><p>
+              </p><p>
+                Then use <code>CHANGE REPLICATION SOURCE</code> command to setup new channel:
+                </p><pre data-type="programlisting">mysql&gt; <strong><code>CHANGE REPLICATION SOURCE TO</code></strong>
+    -&gt; <strong><code>SOURCE_HOST='source_production',</code></strong>
+    -&gt; <strong><code>SOURCE_AUTO_POSITION=1</code></strong>
+    -&gt; <strong><code>FOR CHANNEL 'production_channel';</code></strong></pre><p>
+              </p></dd><dt>Start replication</dt><dd><p>
+              Start replication using <span class="command"><em>START REPLICA</em></span> command:
+              </p><pre data-type="programlisting">mysql&gt; <strong><code>START REPLICA FOR CHANNEL'cookbook_channel';</code></strong>
+Query OK, 0 rows affected (0,00 sec)
+
+mysql&gt; <strong><code>START REPLICA FOR CHANNEL 'production_channel';</code></strong>
+Query OK, 0 rows affected (0,00 sec)</pre><p>
+              </p></dd><dt>Confirm replication is running</dt><dd><p>
+                Run <span class="command"><em>SHOW REPLICA STATUS</em></span> and check records for all channels:
+                </p><pre data-type="programlisting">mysql&gt; <strong><code>SHOW REPLICA STATUS\G</code></strong>
+...
+             Replica_IO_Running: Yes
+            Replica_SQL_Running: Yes
+            ...
+                 Channel_Name: cookbook_channel
+           Source_TLS_Version: 
+       Source_public_key_path: 
+        Get_source_public_key: 0
+            Network_Namespace: 
+*************************** 2. row ***************************
+...
+             Replica_IO_Running: Yes
+            Replica_SQL_Running: Yes
+            ...
+                 Channel_Name: production_channel
+           Source_TLS_Version: 
+       Source_public_key_path: 
+        Get_source_public_key: 0
+            Network_Namespace: 
+2 rows in set (0.00 sec)</pre><p>
+              </p><p>
+                Or query Performance Schema:
+                </p><pre data-type="programlisting">mysql&gt; <strong><code>SELECT CHANNEL_NAME, io.SERVICE_STATE as io_status, </code></strong>
+    -&gt; <strong><code>sqlt.SERVICE_STATE as sql_status,</code></strong>
+    -&gt; <strong><code>COUNT_RECEIVED_HEARTBEATS, RECEIVED_TRANSACTION_SET</code></strong>
+    -&gt; <strong><code>FROM performance_schema.replication_connection_status AS io </code></strong>
+    -&gt; <strong><code>JOIN performance_schema.replication_applier_status AS sqlt USING(channel_name)\G</code></strong>
+*************************** 1. row ***************************
+             CHANNEL_NAME: cookbook_channel
+                io_status: ON
+               sql_status: ON
+COUNT_RECEIVED_HEARTBEATS: 11
+ RECEIVED_TRANSACTION_SET: 9113f6b1-0751-11eb-9e7d-0242dc638c6c:1-387
+*************************** 2. row ***************************
+             CHANNEL_NAME: production_channel
+                io_status: ON
+               sql_status: ON
+COUNT_RECEIVED_HEARTBEATS: 11
+ RECEIVED_TRANSACTION_SET: 910c760a-0751-11eb-9da8-0242dc638c6c:1-385
+2 rows in set (0.00 sec)</pre><p>
+              </p></dd></dl><p>
+      </p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="3.11 Using a Semisynchronous Replication Plugin"><div class="sect1" id="nch-replication-replication-semisynchronous"><h1>3.11 Using a Semisynchronous Replication Plugin</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820409681360"><h2>Problem</h2><p>
+        You want to ensure that at least one replica has the update before the client recieves success for the <span class="command"><em>COMMIT</em></span> operation.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820409679472"><h2>Solution</h2><p>
+        Use semisynchronous replication plugin.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820409678464"><h2>Discussion</h2><p>
+        MySQL replication is asynchronous. This means that the source server can accept writes very fast. All it needs is to store data in the tables and write information about changes into binary log file. However, it does not have any idea if any of replicas recieved updates and, if recieved, applied them.
+      </p><p>
+        We cannot guarantee if the asynchronous replica applies updates, but we can set it up to be sure that updates are received and stored in the relay log file. This does not guarantee that the update will be applied or, if applied, it will result in the same values as on the source server, but guarantees that at least two servers will have record of the update which could be applied, say, in case of a disaster recovery. To achieve this use semisynchronous replication plugin.
+      </p><p>
+        The semisynchronous replication plugin should be installed on both source and replica server.
+      </p><p>
+        On the source server run:
+        </p><pre data-type="programlisting">mysql&gt; <strong><code>INSTALL PLUGIN rpl_semi_sync_source SONAME 'semisync_source.so';</code></strong>
+Query OK, 0 rows affected (0.03 sec)</pre><p>
+        On the replica run:
+        </p><pre data-type="programlisting">mysql&gt; <strong><code>INSTALL PLUGIN rpl_semi_sync_replica SONAME 'semisync_replica.so';</code></strong>
+Query OK, 0 rows affected (0.00 sec)</pre><p>
+      </p><p>
+        Once installed, you can enable semisynchronous replication. On the source set global variable <code>rpl_semi_sync_source_enabled</code> to 1. On the replica use variable <code>rpl_semi_sync_replica_enabled</code>.
+      </p><div data-type="warning" epub:type="warning"><h6>Warning</h6><p>
+          Semiynchronous replication works only with the default replication channel. You cannot use it together with multi-source replication.
+        </p></div><p>
+        You can control semisynchronous replication behavior with help of variables, as seen in <a data-type="xref" href="#semisync_variables">Table 3-1</a>:
+        </p><table id="semisync_variables"><caption><span class="label">Table 3-1. </span>Variables, controlling behavior of the semisynchronous replication plugin</caption><thead><tr><th>Variable</th><th>What it controls</th><th>Default value</th></tr></thead><tbody><tr><td><code>rpl_semi_sync_source_timeout</code></td><td>How many milliseconds to wait for response from the replica. If this value is exceeded, replication silently converts to the asynchronous.</td><td>10000</td></tr><tr><td><code>rpl_semi_sync_source_wait_for_replica_count</code></td><td>From which number of replicas the source server need to receive acknowlegement before committing transaction.</td><td>1</td></tr><tr><td><code>rpl_semi_sync_source_wait_no_replica</code></td><td>What will happen if number of connected replicas fail below <code>rpl_semi_sync_source_wait_for_replica_count</code>. As long as these servers later reconnect and  acknowledge the transaction, semisynchronous remains functional. If this variable is <code>OFF</code>, replication is converted to asynchronous as soon as number of replicas drops below <code>rpl_semi_sync_source_wait_for_replica_count</code></td><td>ON</td></tr><tr><td><code>rpl_semi_sync_source_wait_point</code></td><td>At which moment to expect acknowledgement from the replica that it recieved transaction. This variable supports two possible values. In case of <code>AFTER_SYNC</code> the source writes each transaction into the binary log, then syncs it to the disk. The source waits  acknowledgement from the replica about recieved changes, then commits the transaction. In casel of <code>AFTER_COMMIT</code> the source commits the transaction, then waits  acknowledgement from the replica and upon success returns to the client.</td><td><code>AFTER_SYNC</code></td></tr></tbody></table><p>
+      </p><p>
+        To find out status of the semisynchronous replication use variables <code>Rpl_semi_sync_*</code>. Source server has plenty of them.
+        </p><pre data-type="programlisting">mysql&gt; <strong><code>SHOW GLOBAL STATUS LIKE 'Rpl_semi_sync%';</code></strong>
++--------------------------------------------+-------+
+| Variable_name                              | Value |
++--------------------------------------------+-------+
+| Rpl_semi_sync_source_clients               | 1     |
+| Rpl_semi_sync_source_net_avg_wait_time     | 0     |
+| Rpl_semi_sync_source_net_wait_time         | 0     |
+| Rpl_semi_sync_source_net_waits             | 9     |
+| Rpl_semi_sync_source_no_times              | 3     |
+| Rpl_semi_sync_source_no_tx                 | 6     |
+| Rpl_semi_sync_source_status                | ON    |
+| Rpl_semi_sync_source_timefunc_failures     | 0     |
+| Rpl_semi_sync_source_tx_avg_wait_time      | 1021  |
+| Rpl_semi_sync_source_tx_wait_time          | 4087  |
+| Rpl_semi_sync_source_tx_waits              | 4     |
+| Rpl_semi_sync_source_wait_pos_backtraverse | 0     |
+| Rpl_semi_sync_source_wait_sessions         | 0     |
+| Rpl_semi_sync_source_yes_tx                | 4     |
++--------------------------------------------+-------+
+14 rows in set (0.00 sec)</pre><p>
+        The most improtant is <code>Rpl_semi_sync_source_clients</code> which shows if the semisynchronous is currently in use and how many semisynchronous replicas are connected. In case if <code>Rpl_semi_sync_source_clients</code> is zero, no semisynchronous replica is connected and asynchronous replication is used.
+      </p><p>
+        On the replica server only variable <code>Rpl_semi_sync_replica_status</code> (<code>Rpl_semi_sync_slave_status</code>) is available and can have values either <code>ON</code> or <code>OFF</code>.
+      </p><div data-type="warning" epub:type="warning"><h6>Warning</h6><p>
+          If no replica accepts the write in <code>rpl_semi_sync_source_timeout</code> milliseconds, replication will switch to the asynchronous without any message or a warning for the client. Only way to figure out that the replication mode switched to asynchronous is to examine value of the variable <code>Rpl_semi_sync_source_clients</code> or to check error log file for messages like:
+          </p><pre data-type="programlisting">2020-10-12T22:25:17.654563Z 0 [ERROR] [MY-013129] [Server] ↩
+A message intended for a client cannot be sent there as ↩
+no client-session is attached. Therefore, ↩
+we're sending the information to the error-log instead: ↩
+
+MY-001158 - Got an error reading communication packets
+
+2020-10-12T22:25:20.083796Z 198 [Note] [MY-010014] [Repl] ↩
+While initializing dump thread for slave with UUID ↩
+&lt;09bf4498-0cd2-11eb-9161-98af65266957&gt;, ↩
+found a zombie dump thread with the same UUID. ↩
+Master is killing the zombie dump thread(180).
+
+2020-10-12T22:25:20.084088Z 180 [Note] [MY-011171] [Server] ↩
+Stop semi-sync binlog_dump to slave (server_id: 2).
+
+2020-10-12T22:25:20.084204Z 198 [Note] [MY-010462] [Repl] ↩
+Start binlog_dump to master_thread_id(198) slave_server(2), ↩ 
+pos(, 4)
+
+2020-10-12T22:25:20.084248Z 198 [Note] [MY-011170] [Server] ↩
+Start asynchronous binlog_dump to slave (server_id: 2), pos(, 4).
+
+2020-10-12T22:25:20.657800Z 180 [Note] [MY-011155] [Server] ↩
+Semi-sync replication switched OFF.</pre><p>
+          We discuss error log file at <a data-type="xref" href="ch23.xhtml#nch-monitoring-monitoring-sources">Recipe 23.2</a>
+        </p></div></div></section></div></section><section data-type="sect1" data-pdf-bookmark="3.12 Using Group Replication"><div class="sect1" id="nch-replication-replication-synchronous"><h1>3.12 Using Group Replication</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820409650048"><h2>Problem</h2><p>
+        You want to apply updates either on all the nodes or nowhere.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820409649072"><h2>Solution</h2><p>
+        Use Group Replication.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820409648128"><h2>Discussion</h2><p>
+        Starting from version 5.7.17 MySQL supports fully synchronous replication with help of the Group Replication plugin. If the plugin is in use, MySQL servers, called nodes, create a group that commits a transaction together or, if one of members fails to apply transaction, rolls it back. This way the update is either replicated to all group members or nowhere. High availability is ensured.
+      </p><p>
+        You can have up to nine servers in the group. More than nine is not supported. There is a very good reason for this limitation: higher number of servers implies higher replication delay. In case of synchronous replication, all updates are applied to all the nodes before transaction completes. Each update transferred to each node, waits when it is applied and only then commits. Thus replication delay depends on the speed of the slowest member and network transfer rate.
+      </p><p>
+        While it is technically possible to have less than three servers in the Group Replication setup, smaller number does not provide proper high availability. This is because <a href="https://en.wikipedia.org/wiki/Paxos_(computer_science)">Paxos</a> algorithm, used by the <a href="https://dev.mysql.com/doc/refman/8.0/en/group-replication-plugin-architecture.html">Group Communication Engine</a> requires <code>2F + 1</code> nodes to create a quorum where <code>F</code> is any natural number. In other words, in case of a disaster, the number of active nodes should be greater than the number of disconnected nodes. 
+      </p><p>
+        Group Replication has limitations. First, and the most important one, it supports only storage engine InnoDB. You need to disable other storage engines before enabling the plugin. Each replicated table must have primary key. You should put servers into the local network. While having Group Replication across Internet is possible, it may lead to longer time for applying transactions and disconnecting nodes from the group due to network timeouts. Statements <span class="command"><em>LOCK TABLE</em></span> and <span class="command"><em>GET_LOCK</em></span> are not taken into account for the certification process that ensures if the transaction should be applied or rolled back on all nodes, that means they are local to the node and error prone. You may find full list of limitations in the <a href="https://dev.mysql.com/doc/refman/8.0/en/group-replication-limitations.html">Group Replication Limitations</a> user reference manual.
+      </p><p>
+        To enable Group Replication you need to prepare all the participating servers as described in <a data-type="xref" href="#nch-replication-replication-configuration">Recipe 3.1</a> as they are going to act as both source and replica, and perform additional preparations. Do not start repl
+        </p><ol><li><p>
+              Prepare configuration file
+              </p><pre data-type="programlisting">[mysqld]
+# Disable unsupported storage engines
+disabled_storage_engines="MyISAM,BLACKHOLE,FEDERATED,ARCHIVE,MEMORY"
+	
+# Set unique server ID. Each server in the group should have its own ID
+server_id=1
+
+# Enable GTIDs
+gtid_mode=ON
+enforce_gtid_consistency=ON
+
+# Enable replica updates
+log_replica_updates=ON
+
+# Only ROW binary log format supported
+binlog_format=ROW
+
+# For versions before 8.0.21
+binlog_checksum=NONE
+
+# Ensure that replication repository is TABLE
+master_info_repository=TABLE
+relay_log_info_repository=TABLE
+
+# Ensure that transaction_write_set_extraction is enabled
+# This option is deprecated starting from version 8.0.26
+transaction_write_set_extraction=XXHASH64
+
+# Add Group Replication options
+plugin_load_add='group_replication.so'
+
+# Any valid UUID, should be same for all group members.
+# Use SELECT UUID() to generate a UUID
+group_replication_group_name="dc527338-13d1-11eb-abf7-98af65266957"
+
+# Host of the local node and port which will be used 
+# for communication between members
+# Put either hostname (in our case node1) or IP address here
+# Port number should be different from from the one, used for serving clients
+# E.g., if default MySQL port is 3306, specify any different number here
+group_replication_local_address= "node1:33061"
+
+# Ports and addresses of all nodes in the group. 
+# Should be same on all nodes
+group_replication_group_seeds= "node1:33061,node2:33061,node3:33061"
+
+# Since we did not setup Group replication at this stage,
+# it should not be started on boot
+# You may set this option ON after bootstrapping the group
+group_replication_start_on_boot=off
+group_replication_bootstrap_group=off
+
+# Request source server public key for 
+#the authentication plugin caching_sha2_password
+group_replication_recovery_get_public_key=1</pre><p>
+            </p></li><li><p>
+              Start servers. Do not enable replication yet.
+            </p></li><li><p>
+              Choose a node which will be the first node in the group.
+            </p></li><li><p>
+              Create replication user only on the first member as described in <a data-type="xref" href="#nch-replication-replication-configuration">Recipe 3.1</a> and additionally grant <code>BACKUP_ADMIN</code> to it.
+              </p><pre data-type="programlisting">node1&gt; <strong><code>CREATE USER repl@'%' IDENTIFIED BY 'replrepl';</code></strong>
+Query OK, 0 rows affected (0,01 sec) 
+
+node1&gt; <strong><code>GRANT REPLICATION SLAVE, BACKUP_ADMIN ON *.* TO repl@'%';</code></strong>
+Query OK, 0 rows affected (0,03 sec)</pre><p>
+              You do not need to create replication user on other group members, because <span class="command"><em>CREATE USER</em></span> statement will be replicated.
+            </p></li><li><p>
+              Setup replication on the first member to use this user:
+              </p><pre data-type="programlisting">node1&gt; <strong><code>CHANGE REPLICATION SOURCE TO SOURCE_USER='repl',</code></strong>
+    -&gt; <strong><code>SOURCE_PASSWORD='replrepl' </code></strong>
+    -&gt; <strong><code>FOR CHANNEL 'group_replication_recovery';</code></strong>
+Query OK, 0 rows affected (0,01 sec)</pre><p>
+              Channel name <code>group_replication_recovery</code> is the special built-in name of the Group Replication channel.
+              </p><div data-type="tip"><h6>Tip</h6><p>
+                  If you do not want replication credentials to be stored as plain text in the replication repository skip this step and provide credentials later when run <span class="command"><em>START GROUP_REPLICATION</em></span>. See also <a data-type="xref" href="#nch-replication-replication-security">Recipe 3.13</a>
+                </p></div><p>
+            </p></li><li><p>
+               Bootstrap the node.
+              </p><pre data-type="programlisting">node1&gt; <strong><code>SET GLOBAL group_replication_bootstrap_group=ON;</code></strong>
+Query OK, 0 rows affected (0,00 sec) 
+
+node1&gt; <strong><code>START GROUP_REPLICATION;</code></strong>
+Query OK, 0 rows affected (0,00 sec) 
+
+node1&gt; <strong><code>SET GLOBAL group_replication_bootstrap_group=OFF;</code></strong>
+Query OK, 0 rows affected (0,00 sec)</pre><p>
+            </p></li><li><p>
+              Check Group Replication status by selecting from <code>performance_schema.replication_group_members</code>.
+              </p><pre data-type="programlisting">node1&gt; <strong><code>SELECT * FROM performance_schema.replication_group_members\G</code></strong>
+*************************** 1. row ***************************
+  CHANNEL_NAME: group_replication_applier
+     MEMBER_ID: d8a706aa-16ee-11eb-ba5a-98af65266957
+   MEMBER_HOST: node1
+   MEMBER_PORT: 33361
+  MEMBER_STATE: ONLINE
+   MEMBER_ROLE: PRIMARY
+MEMBER_VERSION: 8.0.21
+1 row in set (0.00 sec)</pre><p>
+              And wait when the first member state becames <code>ONLINE</code>.
+            </p></li><li><p>
+              Start replication on the second and the third nodes.
+              </p><pre data-type="programlisting">node2&gt; <strong><code>CHANGE REPLICATION SOURCE TO SOURCE_USER='repl',</code></strong>
+    -&gt; <strong><code>SOURCE_PASSWORD='replrepl' </code></strong>
+    -&gt; <strong><code>FOR CHANNEL 'group_replication_recovery';</code></strong>
+Query OK, 0 rows affected (0,01 sec) 
+
+node2&gt; <strong><code>START GROUP_REPLICATION;</code></strong>
+Query OK, 0 rows affected (0,00 sec)</pre><p>
+            </p></li></ol><p>
+      </p><p>
+        Once you confirm that all members are in state <code>ONLINE</code> you can use Group Replication. Query table <code>performance_schema.replication_group_members</code> to get this information. Healthy setup will output something like this:
+        </p><pre data-type="programlisting">node1&gt; <strong><code>SELECT * FROM performance_schema.replication_group_members\G</code></strong>
+*************************** 1. row ***************************
+  CHANNEL_NAME: group_replication_applier
+     MEMBER_ID: d8a706aa-16ee-11eb-ba5a-98af65266957
+   MEMBER_HOST: node1
+   MEMBER_PORT: 33061
+  MEMBER_STATE: ONLINE
+   MEMBER_ROLE: PRIMARY
+MEMBER_VERSION: 8.0.21
+*************************** 2. row ***************************
+  CHANNEL_NAME: group_replication_applier
+     MEMBER_ID: e14043d7-16ee-11eb-b77a-98af65266957
+   MEMBER_HOST: node2
+   MEMBER_PORT: 33061
+  MEMBER_STATE: ONLINE
+   MEMBER_ROLE: SECONDARY
+MEMBER_VERSION: 8.0.21
+*************************** 3. row ***************************
+  CHANNEL_NAME: group_replication_applier
+     MEMBER_ID: ea775284-16ee-11eb-8762-98af65266957
+   MEMBER_HOST: node3
+   MEMBER_PORT: 33061
+  MEMBER_STATE: ONLINE
+   MEMBER_ROLE: SECONDARY
+MEMBER_VERSION: 8.0.21
+3 rows in set (0.00 sec)</pre><p>
+      </p><div data-type="warning" epub:type="warning"><h6>Warning</h6><p>
+          Command <span class="command"><em>SHOW REPLICA STATUS</em></span> does not work with Group Replication.
+        </p></div><p>
+        If you want to start Group Replication with existent data restore it on the first node before bootstraping it. Data will be copied when other nodes join the group.
+      </p><p>
+        Finally, enable option <code>group_replication_start_on_boot=on</code> in the node configuration files, so replication would be enabled after the node restart.
+      </p><div data-type="tip"><h6>Tip</h6><p>
+          In this recipe we started Group Replication in the single-primary mode. This mode allows writes only on one member of the group. This is the safest and recommended option. However, if you want to write on multiple nodes, you may switch to multi-primary node by using function <span class="command"><em>group_replication_switch_to_multi_primary_mode</em></span>:
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>SELECT group_replication_switch_to_multi_primary_mode();</code></strong>
++--------------------------------------------------+
+| group_replication_switch_to_multi_primary_mode() |
++--------------------------------------------------+
+| Mode switched to multi-primary successfully.     |
++--------------------------------------------------+
+1 row in set (1.01 sec)
+
+mysql&gt; <strong><code>SELECT * FROM performance_schema.replication_group</code></strong> ↩
+<strong><code>_members\G</code></strong>
+*************************** 1. row ***************************
+  CHANNEL_NAME: group_replication_applier
+     MEMBER_ID: d8a706aa-16ee-11eb-ba5a-98af65266957
+   MEMBER_HOST: node1
+   MEMBER_PORT: 33061
+  MEMBER_STATE: ONLINE
+   MEMBER_ROLE: PRIMARY
+MEMBER_VERSION: 8.0.21
+*************************** 2. row ***************************
+  CHANNEL_NAME: group_replication_applier
+     MEMBER_ID: e14043d7-16ee-11eb-b77a-98af65266957
+   MEMBER_HOST: node2
+   MEMBER_PORT: 33061
+  MEMBER_STATE: ONLINE
+   MEMBER_ROLE: PRIMARY
+MEMBER_VERSION: 8.0.21
+*************************** 3. row ***************************
+  CHANNEL_NAME: group_replication_applier
+     MEMBER_ID: ea775284-16ee-11eb-8762-98af65266957
+   MEMBER_HOST: node3
+   MEMBER_PORT: 33061
+  MEMBER_STATE: ONLINE
+   MEMBER_ROLE: PRIMARY
+MEMBER_VERSION: 8.0.21
+3 rows in set (0.00 sec)</pre><p>
+          For more details check <a href="https://dev.mysql.com/doc/refman/8.0/en/group-replication-changing-group-mode.html">Changing a Group’s Mode User Manual</a>.
+        </p></div></div></section><section data-type="sect2" data-pdf-bookmark="See Also"><div class="sect2" id="idm45820409602624"><h2>See Also</h2><p>For additional information about group replication,
+      see <a href="https://dev.mysql.com/doc/refman/8.0/en/group-replication.html">Group Replication in the User Reference Manual</a>.</p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="3.13 Storing Replication Credentials Securely"><div class="sect1" id="nch-replication-replication-security"><h1>3.13 Storing Replication Credentials Securely</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820409599808"><h2>Problem</h2><p>
+        By default replication credentials are visible in the replication info repository if specified as part of <span class="command"><em>CHANGE REPLICATION SOURCE</em></span> command. You want to hide them from the occasional access by not authorized users.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820409597648"><h2>Solution</h2><p>
+        Use options <code>USER</code> and <code>PASSWORD</code> of the <span class="command"><em>START REPLICA</em></span> command.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820409594992"><h2>Discussion</h2><p>
+        When you specify replication user credentials using <span class="command"><em>CHANGE REPLICATION SOURCE</em></span> command they are stored in plain text, unencrypted, regardless of the <code>master_info_repository</code> option.
+      </p><p>
+        Thus, if <code>master_info_repository='TABLE'</code>, which is default since version 8.0, any user with read access to the <code>mysql</code> database can query table <code>slave_master_info</code> and read the password:
+        </p><pre data-type="programlisting">mysql&gt; <strong><code>SELECT User_name, User_password FROM slave_master_info;</code></strong>
++-----------+---------------+
+| User_name | User_password |
++-----------+---------------+
+| repl      | replrepl      |
++-----------+---------------+
+1 row in set (0.00 sec)</pre><p>
+      </p><p>
+        Or, if <code>master_info_repository='FILE'</code>, any operating system user who can access the file, by default located in the MySQL data directory, can get replication credentials:
+        </p><pre data-type="programlisting">$ <strong><code>head -n6 var/mysqld.3/data/master.info</code></strong>
+31
+binlog.000001
+688
+127.0.0.1
+repl
+replrepl</pre><p>
+      </p><p>
+        If this is not desirable behavior you may specify replication credentials as part of the <span class="command"><em>START REPLICA</em></span> or <span class="command"><em>START GROUP_REPLICATION</em></span> command:
+        </p><pre data-type="programlisting">mysql&gt; <strong><code>START REPLICA USER='repl' PASSWORD='replrepl';</code></strong>
+Query OK, 0 rows affected (0.01 sec)</pre><p>
+      </p><p>
+        However, if you previously specified replication credentials as part of the <span class="command"><em>CHANGE MASTER</em></span> command, they will remain visible in the master info repository. To clear previously entered user and password run <span class="command"><em>CHANGE MASTER</em></span> command with empty arguments for <code>MASTER_USER</code> and <code>MASTER_PASSWORD</code>:
+        </p><pre data-type="programlisting">mysql&gt; <strong><code>SELECT User_name, User_password FROM slave_master_info;</code></strong>
++-----------+---------------+
+| User_name | User_password |
++-----------+---------------+
+| repl      | replrepl      |
++-----------+---------------+
+1 row in set (0.00 sec)
+
+mysql&gt; <strong><code>CHANGE REPLICATION SOURCE TO SOURCE_USER='', SOURCE_PASSWORD='';</code></strong>
+Query OK, 0 rows affected, 1 warning (0.01 sec)
+
+mysql&gt; <strong><code>START REPLICA USER='repl' PASSWORD='replrepl';</code></strong>
+Query OK, 0 rows affected (0.01 sec)
+
+mysql&gt; <strong><code>SELECT User_name, User_password FROM slave_master_info;</code></strong>
++-----------+---------------+
+| User_name | User_password |
++-----------+---------------+
+|           |               |
++-----------+---------------+
+1 row in set (0.00 sec)</pre><p>
+      </p><div data-type="warning" epub:type="warning"><h6>Warning</h6><p>
+          Once you cleared replication credentials from the spurce info repository they are not stored anywhere and you will need to provide them each time when restart replication.
+        </p></div></div></section></div></section><section data-type="sect1" data-pdf-bookmark="3.14 Using TLS (SSL) for Replication"><div class="sect1" id="nch-replication-replication-ssl"><h1>3.14 Using TLS (SSL) for Replication</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820409574864"><h2>Problem</h2><p>
+        You want to transfer data between source and replica securely.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820409573920"><h2>Solution</h2><p>
+        Setup TLS (<a href="https://en.wikipedia.org/wiki/Transport_Layer_Security">Transport Layer Security</a>) connections for the replication channel.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820409572016"><h2>Discussion</h2><p>
+        Connection between source and replica servers is technically similar to any other client connections to the MySQL server. Therefore encrypting it via TLS requires preparations, similar to encrypting client connections as described in <a data-type="xref" href="ch24.xhtml#nch-security-security-ssl">Recipe 24.10</a>.
+      </p><p>
+        To create encrypted replication setup follow these steps.
+        </p><ol><li><p>
+              Obtain or create TLS keys and certificates as described at <a data-type="xref" href="ch24.xhtml#nch-security-security-ssl">Recipe 24.10</a>.
+            </p></li><li><p>
+              Ensure that the source server has TLS configuration parameters under [mysqld] section:
+              
+              </p><div data-type="note" epub:type="note"><h6>Note</h6><p>
+                  While MySQL uses modern safer TLS protocol in the latest versions its configuration options still use abbreviation SSL. MySQL User Reference Manual also often refers TLS as SSL.
+                </p></div><p>
+              
+              </p><pre data-type="programlisting">[mysqld]
+ssl_ca=ca.pem
+ssl_cert=server-cert.pem
+ssl_key=server-key.pem</pre><p>
+              You may check if TLS enabled if check value of the system variable <code>have_ssl</code>:
+              </p><pre data-type="programlisting">mysql&gt; <strong><code>SHOW VARIABLES LIKE 'have_ssl';</code></strong>
++---------------+-------+
+| Variable_name | Value |
++---------------+-------+
+| have_ssl      | YES   |
++---------------+-------+
+1 row in set (0,01 sec)</pre><p>
+            </p></li><li><p>
+              If insecure replication is running, stop the replica IO thread:
+              </p><pre data-type="programlisting">mysql&gt; <strong><code>STOP REPLICA IO_THREAD; -- (STOP SLAVE IO_THREAD;)</code></strong>
+Query OK, 0 rows affected (0.00 sec)</pre><p>
+            </p></li><li><p>
+              On the replica server put paths to TLS client key and certificate under <code>[client]</code> of the configuration file:
+              </p><pre data-type="programlisting">[client]
+ssl-ca=ca.pem
+ssl-cert=client-cert.pem
+ssl-key=client-key.pem</pre><p>
+              and specify option <code>SOURCE_SSL=1</code> for the <span class="command"><em>CHANGE REPLICATION SOURCE</em></span> command:
+              </p><pre data-type="programlisting">mysql&gt; <strong><code>CHANGE REPLICATION SOURCE TO SOURCE_SSL=1;</code></strong>
+Query OK, 0 rows affected (0.03 sec</pre><p>
+            </p><p>
+              Alternatively you can specify paths to the client key and certificate as part of the <span class="command"><em>CHANGE REPLICATION SOURCE</em></span> command:
+              </p><pre data-type="programlisting">mysql&gt; <strong><code>CHANGE REPLICATION SOURCE TO</code></strong>
+    -&gt; <strong><code>SOURCE_SSL_CA='ca.pem',</code></strong>
+    -&gt; <strong><code>SOURCE_SSL_CERT='client-cert.pem',</code></strong>
+    -&gt; <strong><code>SOURCE_SSL_KEY='client-key.pem',</code></strong>
+    -&gt; <strong><code>SOURCE_SSL=1;</code></strong>
+Query OK, 0 rows affected (0.02 sec)</pre><p>
+            </p><div data-type="note" epub:type="note"><h6>Note</h6><p>
+                We intentionally omitted other parameters of the <span class="command"><em>CHANGE REPLICATION SOURCE</em></span> command, such as <code>SOURCE_HOST</code> for brevity. But you need to use them as described in <a data-type="xref" href="#nch-replication-replication-position-new">Recipe 3.2</a> or <a data-type="xref" href="#nch-replication-replication-gtid">Recipe 3.4</a>
+              </p></div></li><li><p>
+              Start replication:
+              </p><pre data-type="programlisting">mysql&gt; <strong><code>START REPLICA;</code></strong>
+Query OK, 0 rows affected (0.00 sec)</pre><p>
+            </p></li></ol><p>
+      </p><p>
+        <span class="command"><em>CHANGE REPLICATION SOURCE</em></span> command supports other TLS modifiers, compatible with regular client connection encryption options. For example, you can specify a gipher to use with clause <code>SOURCE_SSL_CIPHER</code> or enforce source server certificate verification with clause <code>SOURCE_SSL_VERIFY_SERVER_CERT</code>.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="See Also"><div class="sect2" id="idm45820409542656"><h2>See Also</h2><p>For additional information about securing connections between the source and replica servers,
+      see <a href="https://dev.mysql.com/doc/refman/8.0/en/replication-solutions-encrypted-connections.html">Setting Up Replication to Use Encrypted Connections</a>.</p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="3.15 Replication Troubleshooting"><div class="sect1" id="nch-replication-replication-troubleshooting"><h1>3.15 Replication Troubleshooting</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820409539712"><h2>Problem</h2><p>
+        Replication is not working and you want to fix it.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820409538736"><h2>Solution</h2><p>
+        Use <span class="command"><em>SHOW REPLICA STATUS</em></span> command, query replication tables in Performance Schema, and check the error log file to undertstand why the replication failed, then fix it.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820409536672"><h2>Discussion</h2><p>
+        Replication is managed by two kinds of threads: IO and SQL (or connection and applier). IO, or connection, thread is responsible for connecting to the source server, retrieving updates and storing them in the relay log file. There is always one IO thread per replication channel. SQL, or applier, thread reads data from the relay log file and applies changes to the tables. One replication channel may have multiple SQL threads. Connection and applier threads are totally independent and their errors are reported by different replication diagnostic instruments.
+      </p><p>
+        There are two main instruments to diagnose replication errors: <span class="command"><em>SHOW REPLICA STATUS</em></span> command and replication tables in Performance Schema. <span class="command"><em>SHOW REPLICA STATUS</em></span> existed since very beginning while replication tables in the Performance Schema were added in version 5.7. You will get very similar information by using these two instruments and which to use depends on your preferences. In our opinion <span class="command"><em>SHOW REPLICA STATUS</em></span> is good for manual review in the command line while it is much easier to write monitoring alerts, querying Performance Schema rather than parse <span class="command"><em>SHOW REPLICA STATUS</em></span> output.
+      </p><section data-type="sect3" data-pdf-bookmark="SHOW REPLICA STATUS"><div class="sect3" id="nch-replication-replication-troubleshooting-show_slave_status"><h3>SHOW REPLICA STATUS</h3><p>
+          <span class="command"><em>SHOW REPLICA STATUS</em></span> contains all the information about IO and SQL threads configuration, status and errors. All data is printed in the single row. However, this row is formatted with spaces and newlines. You may examine it comfortably by using <code>\G</code> modifier of the <span class="command"><em>mysql</em></span> client. For multi-source replica <span class="command"><em>SHOW REPLICA STATUS</em></span> prints information about each channel in the separate row.
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>SHOW REPLICA STATUS\G</code></strong>
+*************************** 1. row ***************************
+               Replica_IO_State: Waiting for master to send event
+                  Source_Host: 127.0.0.1
+                  Source_User: root
+                  Source_Port: 13000
+                Connect_Retry: 60
+              Source_Log_File: binlog.000001
+          Read_Source_Log_Pos: 156
+               Relay_Log_File: Delly-7390-relay-bin-cookbook.000002
+                Relay_Log_Pos: 365
+        Relay_Source_Log_File: binlog.000001
+             Replica_IO_Running: Yes
+            Replica_SQL_Running: Yes
+            ...
+                 Channel_Name: cookbook
+           Source_TLS_Version: 
+       Source_public_key_path: 
+        Get_source_public_key: 0
+            Network_Namespace: 
+*************************** 2. row ***************************
+               Replica_IO_State: Waiting for master to send event
+                  Source_Host: 127.0.0.1
+                  Source_User: root
+                  Source_Port: 13004
+                Connect_Retry: 60
+              Source_Log_File: binlog.000001
+          Read_Source_Log_Pos: 156
+               Relay_Log_File: Delly-7390-relay-bin-test.000002
+                Relay_Log_Pos: 365
+        Relay_Source_Log_File: binlog.000001
+             Replica_IO_Running: Yes
+            Replica_SQL_Running: Yes
+            ...
+                 Channel_Name: test
+           Source_TLS_Version: 
+       Source_public_key_path: 
+        Get_source_public_key: 0
+            Network_Namespace: 
+2 rows in set (0.00 sec)</pre><p>
+          We intentionally skipped part of the output for brevity. We will not describe each field, but only those required for handling stopped replication (see <a data-type="xref" href="#nch-replication-replication-troubleshooting-show_slave_status-details">Table 3-2</a>). If you are curious what other fields mean consult <a href="https://dev.mysql.com/doc/refman/8.0/en/show-replica-status.html">SHOW REPLICA STATUS Statement</a> User Reference Manual.
+        </p><table id="nch-replication-replication-troubleshooting-show_slave_status-details"><caption><span class="label">Table 3-2. </span>Meaning of fields of the <span class="command"><em>SHOW REPLICA STATUS</em></span>, required to understand and fix an error</caption><thead><tr><th>Field</th><th>Description</th><th>Subsystem</th></tr></thead><tbody><tr><td><code>Replica_IO_State</code> (<code>Slave_IO_State</code>)</td><td>Status of the IO thread. Contains information on what the connection thread is doing when running, empty if IO thread is stopped and <code>Connecting</code> if connection is not yet established.</td><td>IO thread status</td></tr><tr><td><code>Source_Host</code> (<code>Master_Host</code>)</td><td>Host of the source server.</td><td>IO thread configuration</td></tr><tr><td><code>Source_User</code> (<code>Master_User</code>)</td><td>Replication user.</td><td>IO thread configuration</td></tr><tr><td><code>Source_Port</code> (<code>Master_Port</code>)</td><td>Port of the source server</td><td>IO thread configuration</td></tr><tr><td><code>Source_Log_File</code> (<code>Master_Log_File</code>)</td><td>Binary log on the source server from which IO thread is currently reading.</td><td>IO thread status</td></tr><tr><td><code>Read_Source_Log_Pos</code> (<code>Read_Master_Log_Pos</code>)</td><td>Position in the binary log file on the source server from which IO thread is reading.</td><td>IO thread status</td></tr><tr><td><code>Relay_Log_File</code></td><td>Current relay log file: the file the SQL thread is currently executing from.</td><td>IO thread status</td></tr><tr><td><code>Relay_Log_Pos</code></td><td>The position in the relay log file the SQL thread has executed up to.</td><td>IO thread status</td></tr><tr><td><code>Relay_Source_Log_File</code> (<code>Relay_Master_Log_File</code>)</td><td>Binary log on the source server from which SQL thread is executing events.</td><td>SQL thead status</td></tr><tr><td><code>Replica_IO_Running</code> (<code>Slave_IO_Running</code>)</td><td>If IO thread is running. Use this field to quickly identify health of the connection thread.</td><td>IO thread status.</td></tr><tr><td><code>Replica_SQL_Running</code> (<code>Slave_SQL_Running</code>)</td><td>If SQL thread is running. Use to quickly identify health of the applier thread.</td><td>SQL thread status</td></tr><tr><td><code>Replicate_*</code></td><td>Replication filters.</td><td>SQL thread configuration</td></tr><tr><td><code>Exec_Source_Log_Pos</code> (<code>Exec_Master_Log_Pos</code>)</td><td>Position of the binary log file on the source up to which SQL thread executed events.</td><td>SQL thread state</td></tr><tr><td><code>Until_Condition</code></td><td>Until conditions if any.</td><td>SQL thread configuration</td></tr><tr><td><code>Source_SSL_*</code> (<code>Master_SSL_*</code>)</td><td>SSL options for connecting to the source server.</td><td>IO thread configuration</td></tr><tr><td><code>Seconds_Behind_Source</code> (<code>Seconds_Behind_Master</code>)</td><td>Estimated delay between source server and replica.</td><td>SQL thread status</td></tr><tr><td><code>Last_IO_Errno</code></td><td>Last error number of the IO thread. Cleared once resolved.</td><td>IO thread status</td></tr><tr><td><code>Last_IO_Error</code></td><td>Latest error on the IO thread. Cleared once resolved.</td><td>IO thread status</td></tr><tr><td><code>Last_Errno</code>, <code>Last_SQL_Errno</code></td><td>Number of the last error, received by SQL thread. Creared once resolved.</td><td>SQL thead status</td></tr><tr><td><code>Last_Error</code>, <code>Last_SQL_Error</code></td><td>Last error of the SQL thread. Cleared once resolved.</td><td>SQL thread status</td></tr><tr><td><code>Replica_SQL_Running_State</code> (<code>Slave_SQL_Running_State</code>)</td><td>Status of the SQL thread. Empty if stopped.</td><td>SQL thread status</td></tr><tr><td><code>Last_IO_Error_Timestamp</code></td><td>Time when last IO error happened. Cleared once resolved.</td><td>IO thread status</td></tr><tr><td><code>Last_SQL_Error_Timestamp</code></td><td>Time when last SQL error happened. Cleared once resolved.</td><td>SQL thread state</td></tr><tr><td><code>Retrieved_Gtid_Set</code></td><td>GTIDs, retrieved by the connection thread.</td><td>IO thread status</td></tr><tr><td><code>Executed_Gtid_Set</code></td><td>GTIDs, executed by the SQL thread.</td><td>SQL thread state.</td></tr><tr><td><code>Channel_Name</code></td><td>Name of the replication channel.</td><td>IO and SQL threads configuration</td></tr></tbody></table><p>
+          We will refer to this table when discuss how to deal with specific IO and SQL threads errors.
+        </p></div></section><section data-type="sect3" data-pdf-bookmark="Replication tables in performance schema"><div class="sect3" id="nch-replication-replication-troubleshooting-performance_schema"><h3>Replication tables in performance schema</h3><p>
+          Alternative diagnostic solution: tables in Performance Schema, unlike <span class="command"><em>SHOW REPLICA STATUS</em></span>, do not store all the information in the single place, but have it in separate spaces.
+        </p><p>
+          Information about IO thread configuration is stored in the table <code>replication_connection_configuration</code> and information about its status is in the table <code>replication_connection_status</code>.
+        </p><p>
+          Information about SQL threads is stored in six tables as shown in <a data-type="xref" href="#nch-replication-replication-troubleshooting-P_S-applier">Table 3-3</a>
+          </p><table id="nch-replication-replication-troubleshooting-P_S-applier"><caption><span class="label">Table 3-3. </span>Tables with information, specific to SQL thread(s)</caption><thead><tr><th>Table Name</th><th>Description</th></tr></thead><tbody><tr><td><code>replication_applier_configuration</code></td><td>SQL thread configuration.</td></tr><tr><td><code>replication_applier_global_filters</code></td><td>Global replication filters: filters, applicable for all channels.</td></tr><tr><td><code>replication_applier_filters</code></td><td>Replication filters, specific to particular channels.</td></tr><tr><td><code>replication_applier_status</code></td><td>Status for the SQL thread, global.</td></tr><tr><td><code>replication_applier_status_by_worker</code></td><td>For multi-threaded replica: status of each SQL thread.</td></tr><tr><td><code>replication_applier_status_by_coordinator</code></td><td>For multi-threaded replica: status of the SQL thread as seen by the coordinator.</td></tr></tbody></table><p>
+        </p><p>
+          Finally, you will find Group Replication network configuration and status in <code>replication_group_members</code> table and statistics of the Group Replication members in table <code>replication_group_member_stats</code>.
+        </p></div></section><section data-type="sect3" data-pdf-bookmark="Troubleshooting IO thread"><div class="sect3" id="nch-replication-replication-troubleshooting-io_thread"><h3>Troubleshooting IO thread</h3><p>
+          You can find if replication IO thread is having issues by checking value of the <code>Replica_IO_Running</code> field of the <span class="command"><em>SHOW REPLICA STATUS</em></span>. If value is not <code>Yes</code> connection thread, likely, experiences issues. Reason why this happens could be found in the <code>Last_IO_Errno</code> and <code>Last_IO_Error</code> fields.
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>SHOW REPLICA STATUS\G</code></strong>
+*************************** 1. row ***************************
+...
+             Replica_IO_Running: Connecting
+            Replica_SQL_Running: Yes
+...
+                Last_IO_Errno: 1045
+                Last_IO_Error: error connecting to master 'repl@127.0.0.1:13000' - ↩
+                               retry-time: 60 retries: 1 message: ↩
+                               Access denied for user 'repl'@'localhost'↩
+                               (using password: NO)
+...</pre><p>
+          Like in the example above replica cannot connect to the source server, because access denied for the user <code>'repl'@'localhost'</code>. IO thread is still running and will retry connection attempt in 60 seconds (<code>retry-time: 60</code>). Reason for such a failure is clear: either user does not exist on the source server or it does not have enough privileges. You need to connect to the source server and fix the user account. Once it is fixed next connection attempt will succeed.
+        </p><p>
+          Alernatively you may query table <code>replication_connection_status</code> in Performance Schema:
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>SELECT SERVICE_STATE, LAST_ERROR_NUMBER,</code></strong>
+    -&gt; <strong><code>LAST_ERROR_MESSAGE, LAST_ERROR_TIMESTAMP</code></strong>
+    -&gt; <strong><code>FROM performance_schema.replication_connection_status\G</code></strong>
+*************************** 1. row ***************************
+       SERVICE_STATE: CONNECTING
+   LAST_ERROR_NUMBER: 2061
+  LAST_ERROR_MESSAGE: error connecting to master 'repl@127.0.0.1:13000' -↩
+                      retry-time: 60 retries: 1 ↩
+                      message: Authentication plugin 'caching_sha2_password' ↩
+                      reported error: Authentication requires secure connection.
+LAST_ERROR_TIMESTAMP: 2020-10-17 13:23:03.663994
+1 row in set (0.00 sec)</pre><p>
+          In this example field <code>LAST_ERROR_MESSAGE</code> contains the reason why the IO thread failed to connect: user account on the source server uses authentication plugin <code>caching_sha2_password</code> which requires secure connection. To fix this error you need to stop replication, then run <span class="command"><em>CHANGE REPLICATION SOURCE</em></span> with parameters either <code>SOURCE_SSL=1</code> or <code>GET_SOURCE_PUBLIC_KEY=1</code>. In the latter case traffic between replica and source server will stay insecure and only password exchange communication will be secured. See <a data-type="xref" href="#nch-replication-replication-ssl">Recipe 3.14</a> for details.
+        </p></div></section><section data-type="sect3" data-pdf-bookmark="Trobuleshooting SQL thread"><div class="sect3" id="nch-replication-replication-troubleshooting-sql_thread"><h3>Trobuleshooting SQL thread</h3><p>
+          To find out why applier thread had stopped check <code>Replica_SQL_Running</code>, <code>Last_SQL_Errno</code> and <code>Last_SQL_Error</code> fields:
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>SHOW REPLICA STATUS\G</code></strong>
+*************************** 1. row ***************************
+...
+            Replica_SQL_Running: No
+...
+               Last_SQL_Errno: 1007
+               Last_SQL_Error: Error 'Can't create database 'cookbook'; ↩
+                               database exists' on query. ↩
+                               Default database: 'cookbook'. ↩
+                               Query: 'create database cookbook'</pre><p>
+          In the listing above error message shows that <span class="command"><em>CREATE DATABASE</em></span> command failed, because such a database already exists on the replica.
+        </p><p>
+          Same information could be found in the table <code>replication_applier_status_by_worker</code> in Performance Schema:
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>SELECT SERVICE_STATE, LAST_ERROR_NUMBER,</code></strong>
+    -&gt; <strong><code>LAST_ERROR_MESSAGE, LAST_ERROR_TIMESTAMP</code></strong>
+    -&gt; <strong><code>FROM performance_schema.replication_applier_status_by_worker\G</code></strong>
+*************************** 1. row ***************************
+       SERVICE_STATE: OFF
+   LAST_ERROR_NUMBER: 1007
+  LAST_ERROR_MESSAGE: Error 'Can't create database 'cookbook'; ↩
+                      database exists' on query. ↩
+                      Default database: 'cookbook'.↩
+                      Query: 'create database cookbook'
+LAST_ERROR_TIMESTAMP: 2020-10-17 13:58:12.115821
+1 row in set (0.01 sec)</pre><p>
+        </p><p>
+          There are few ways to resolve this issue. First, you may simply drop the database on the replica and restart SQL thread:
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>DROP DATABASE cookbook;</code></strong>
+Query OK, 0 rows affected (0.04 sec)
+
+mysql&gt; <strong><code>START REPLICA SQL_THREAD;</code></strong>
+Query OK, 0 rows affected (0.01 sec)</pre><p>
+          Disable binary log if it is enabled on the replica.
+        </p><p>
+          In case if you want to keep database on the replica: for example, in a case if it supposed to have extra tables which do not exist on the source server, you may skip replicated event.
+        </p><p>
+          If you use position-based replication use variable <code>sql_replica_skip_counter</code> (<code>sql_slave_skip_counter</code>):
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>SET GLOBAL sql_replica_skip_counter=1;</code></strong>
+Query OK, 0 rows affected (0.00 sec)
+
+mysql&gt; <strong><code>START REPLICA SQL_THREAD;</code></strong>
+Query OK, 0 rows affected (0.01 sec)</pre><p>
+          In this example we skipped one event from the binary log, then restarted replication.
+        </p><p>
+          For GTID-based replication setting <code>sql_replica_skip_counter</code> would not work, because it does not include GTID information. Instead, you need to generate empty transaction with GTID of the transaction which replica could not execute. To find out failed GTID check <code>Retrieved_Gtid_Set</code> and <code>Executed_Gtid_Set</code> fields of the <span class="command"><em>SHOW REPLICA STATUS</em></span>:
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>SHOW REPLICA STATUS\G</code></strong>
+*************************** 1. row ***************************
+...
+           Retrieved_Gtid_Set: de7e85f9-1060-11eb-8b8f-98af65266957:1-5
+            Executed_Gtid_Set: de7e85f9-1060-11eb-8b8f-98af65266957:1-4,
+de8d356e-1060-11eb-a568-98af65266957:1-3
+...</pre><p>
+          In this example <code>Retrieved_Gtid_Set</code> contains transactions <code>de7e85f9-1060-11eb-8b8f-98af65266957:1-5</code> while <code>Executed_Gtid_Set</code> only transactions <code>de7e85f9-1060-11eb-8b8f-98af65266957:1-4</code>. It is clear that transcation <code>de7e85f9-1060-11eb-8b8f-98af65266957:5</code> was not executed. Transactions with UUID <code>de8d356e-1060-11eb-a568-98af65266957</code> are local and not executed by the replication applier thread.
+        </p><p>
+          You may also find failing transaction if query <code>APPLYING_TRANSACTION</code> field of the <code>replication_applier_status_by_worker</code> table:
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>select LAST_APPLIED_TRANSACTION, APPLYING_TRANSACTION</code></strong>
+    -&gt; <strong><code>from performance_schema.replication_applier_status_by_worker\G</code></strong>
+*************************** 1. row ***************************
+LAST_APPLIED_TRANSACTION: de7e85f9-1060-11eb-8b8f-98af65266957:4
+    APPLYING_TRANSACTION: de7e85f9-1060-11eb-8b8f-98af65266957:5
+1 row in set (0.00 sec)</pre><p>
+        </p><p>
+          Once failing transaction found inject empty transaction with same GTID and restart the SQL thread.
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>-- set explicit GTID</code></strong>
+mysql&gt; <strong><code>SET gtid_next='de7e85f9-1060-11eb-8b8f-98af65266957:5';</code></strong>
+Query OK, 0 rows affected (0.00 sec)
+
+mysql&gt; <strong><code>-- inject empty transaction</code></strong>
+mysql&gt; <strong><code>BEGIN;COMMIT;</code></strong>
+Query OK, 0 rows affected (0.00 sec)
+
+Query OK, 0 rows affected (0.00 sec)
+
+mysql&gt; <strong><code>-- revert GTID generation back to automatic</code></strong>
+mysql&gt; <strong><code>SET gtid_next='automatic';</code></strong>
+Query OK, 0 rows affected (0.00 sec)
+
+mysql&gt; <strong><code>-- restart SQL thread</code></strong>
+mysql&gt; <strong><code>START REPLICA SQL_THREAD;</code></strong>
+Query OK, 0 rows affected (0.01 sec)</pre><p>
+        </p><div data-type="warning" epub:type="warning"><h6>Warning</h6><p>
+            While skipping binary log event or transaction helps to restart replication at the moment, it may cause bigger issue and lead to data inconsistency between source and replica and, as a result, to future errors. Always analyze why error happened in the first place and try to fix the reason, not simply skip the event.
+          </p></div><p>
+          While <span class="command"><em>SHOW REPLICA STATUS</em></span> and table <code>replication_applier_status_by_worker</code> both store error messages if you use multi-threaded replica the table can have better information about what happened. Like in this example error message does not give the full understanding of the reason for the failure:
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>SHOW REPLICA STATUS\G</code></strong>
+*************************** 1. row ***************************
+...
+               Last_SQL_Errno: 1146
+               Last_SQL_Error: Coordinator stopped because there were error(s) ↩
+                               in the worker(s). The most recent failure being: ↩
+                               Worker 8 failed executing transaction ↩
+                               'de7e85f9-1060-11eb-8b8f-98af65266957:7' at ↩
+                               master log binlog.000001, end_log_pos 1818. ↩
+                               See error log and/or performance_schema.↩
+                               replication_applier_status_by_worker table ↩
+                               for more details about this failure or others, if any.
+...</pre><p>
+          It reports that worker 8 failed, but does not tell why. Query on <code>replication_applier_status_by_worker</code> returns this information:
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>select SERVICE_STATE, LAST_ERROR_NUMBER, LAST_ERROR_MESSAGE, LAST_ERROR_TIMESTAMP</code></strong>
+    -&gt; <strong><code>from performance_schema.replication_applier_status_by_worker where worker_id=8\G</code></strong>
+*************************** 1. row ***************************
+       SERVICE_STATE: OFF
+   LAST_ERROR_NUMBER: 1146
+  LAST_ERROR_MESSAGE: Worker 8 failed executing transaction ↩
+                     'de7e85f9-1060-11eb-8b8f-98af65266957:7' at master log↩
+                     binlog.000001, end_log_pos 1818; Error executing row event: ↩
+                     'Table 'cookbook.limbs' doesn't exist'
+LAST_ERROR_TIMESTAMP: 2020-10-17 14:28:01.144521
+1 row in set (0.00 sec)</pre><p>
+          Now it is clear that a specific table does not exist. You may analyze why this is the case and correct the error.
+        </p></div></section><section data-type="sect3" data-pdf-bookmark="Troubleshooting Group Replication"><div class="sect3" id="nch-replication-replication-troubleshooting-group"><h3>Troubleshooting Group Replication</h3><p>
+          <span class="command"><em>SHOW REPLICA STATUS</em></span> is not available for Group Replication. Therefore you need to use Performance Schema to troubleshoot issues with it. Performance Schema has two special tables for Group Replication only: <code>replication_group_members</code>, showing details of all members and <code>replication_group_member_stats</code>, displaying statistics for them. However, these tables do not have information about IO and SQL thread errors. These details are available in tables which we discussed for the standard asynchronous replication.
+        </p><p>
+          Let’s have a closer look to the Group Replication troubleshooting options.
+        </p><p>
+          Quick way to identify if something is wrong with Group replication is a <code>replication_group_members</code> table.
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>SELECT * FROM performance_schema.replication_group_members\G</code></strong>
+*************************** 1. row ***************************
+  CHANNEL_NAME: group_replication_applier
+     MEMBER_ID: de5b65cb-16ae-11eb-826c-98af65266957
+   MEMBER_HOST: Delly-7390
+   MEMBER_PORT: 33361
+  MEMBER_STATE: ONLINE
+   MEMBER_ROLE: PRIMARY
+MEMBER_VERSION: 8.0.21
+*************************** 2. row ***************************
+  CHANNEL_NAME: group_replication_applier
+     MEMBER_ID: e9514d63-16ae-11eb-8f6e-98af65266957
+   MEMBER_HOST: Delly-7390
+   MEMBER_PORT: 33362
+  MEMBER_STATE: RECOVERING
+   MEMBER_ROLE: SECONDARY
+MEMBER_VERSION: 8.0.21
+*************************** 3. row ***************************
+  CHANNEL_NAME: group_replication_applier
+     MEMBER_ID: f1e717ab-16ae-11eb-bfd2-98af65266957
+   MEMBER_HOST: Delly-7390
+   MEMBER_PORT: 33363
+  MEMBER_STATE: RECOVERING
+   MEMBER_ROLE: SECONDARY
+MEMBER_VERSION: 8.0.21
+3 rows in set (0.00 sec)</pre><p>
+          In the listing above only <code>PRIMARY</code> member is in <code>MEMBER_STATE: ONLINE</code> that means it is healthy. Both <code>SECONDARY</code> members are in <code>RECOVERING</code> state and are having troubles to join the group.
+        </p><p>
+          Failing member will stay in the <code>RECOVERING</code> state for some time, while Group Replication tries to recover itself and, if the error cannot be automatically recovered, leave the group and stay in the <code>ERROR</code> state.
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>SELECT * FROM performance_schema.replication_group_members\G</code></strong>
+*************************** 1. row ***************************
+  CHANNEL_NAME: group_replication_applier
+     MEMBER_ID: e9514d63-16ae-11eb-8f6e-98af65266957
+   MEMBER_HOST: Delly-7390
+   MEMBER_PORT: 33362
+  MEMBER_STATE: ERROR
+   MEMBER_ROLE: 
+MEMBER_VERSION: 8.0.21
+1 row in set (0.00 sec)</pre><p>
+          Both listings were taken on the same secondary member of the group, but after it left the group it reports only itself as a Group Replication member and does not display information about other members.
+        </p><p>
+          To find reason of the failure you need to examine tables <code>replication_connection_status</code> and <code>replication_applier_status_by_worker</code>.
+        </p><p>
+          In our example member <code>e9514d63-16ae-11eb-8f6e-98af65266957</code> stopped with SQL error. You will find error details in the <code>replication_applier_status_by_worker</code> table:
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>SELECT CHANNEL_NAME, LAST_ERROR_NUMBER,</code></strong>
+    -&gt; <strong><code>LAST_ERROR_MESSAGE, LAST_ERROR_TIMESTAMP,</code></strong>
+    -&gt; <strong><code>APPLYING_TRANSACTION </code></strong>
+    -&gt; <strong><code>FROM performance_schema.replication_applier_status_by_worker\G</code></strong>
+*************************** 1. row ***************************
+        CHANNEL_NAME: group_replication_recovery
+   LAST_ERROR_NUMBER: 3635
+  LAST_ERROR_MESSAGE: The table in transaction de5b65cb-16ae-11eb-826c-98af65266957:15 ↩
+                      does not comply with the requirements by an external plugin.
+LAST_ERROR_TIMESTAMP: 2020-10-25 20:31:27.718638
+APPLYING_TRANSACTION: de5b65cb-16ae-11eb-826c-98af65266957:15
+*************************** 2. row ***************************
+        CHANNEL_NAME: group_replication_applier
+   LAST_ERROR_NUMBER: 0
+  LAST_ERROR_MESSAGE: 
+LAST_ERROR_TIMESTAMP: 0000-00-00 00:00:00.000000
+APPLYING_TRANSACTION: 
+2 rows in set (0.00 sec)</pre><p>
+          Error message says that the definition of the table in the transaction <code>de5b65cb-16ae-11eb-826c-98af65266957:15</code> is not compatible with Group Replication plugin. To find out why check <a href="https://dev.mysql.com/doc/refman/8.0/en/group-replication-requirements-and-limitations.html">Group Replication Requirements and Limitations</a>, identify the table used in the transaction and fix the error.
+        </p><p>
+          Error message in the <code>replication_applier_status_by_worker</code> table does not have any hint on which table was used in the transaction. But error log file may have. Open error log file, search for the <code>LAST_ERROR_TIMESTAMP</code> and <code>LAST_ERROR_NUMBER</code> to identify the error and check if previous or next rows have more information.
+          </p><pre data-type="programlisting">2020-10-25T17:31:27.718600Z 71 [ERROR] [MY-011542] [Repl] Plugin group_replication↩
+reported: 'Table al_winner does not have any PRIMARY KEY. This is not compatible↩
+with Group Replication.'
+2020-10-25T17:31:27.718644Z 71 [ERROR] [MY-010584] [Repl] Slave SQL for channel↩
+'group_replication_recovery': The table in transaction↩
+de5b65cb-16ae-11eb-826c-98af65266957:15 does not comply with the requirements↩
+by an external plugin. Error_code: MY-003635</pre><p>
+          In this example error message on the previous row contains the table name: <code>al_winner</code>, and the reason why it is not compatible with Group Replication: the table has not primary key.
+        </p><p>
+          To fix the error you need to fix table definition on the <code>PRIMARY</code> and failing <code>SECONDARY</code> node.
+        </p><p>
+          First, login to the <code>PRIMARY</code> node, and add surrogate primary key:
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>set sql_log_bin=0;</code></strong>
+Query OK, 0 rows affected (0.00 sec)
+
+mysql&gt; <strong><code>alter table al_winner add id int not null auto_increment primary key;</code></strong>
+Query OK, 0 rows affected (0.09 sec)
+Records: 0  Duplicates: 0  Warnings: 0
+
+mysql&gt; <strong><code>set sql_log_bin=1;</code></strong>
+Query OK, 0 rows affected (0.01 sec)</pre><p>
+          You need to disable binary logging, because otherwise this change will be replicated to the secondary members and replication will stop with the duplicate column name error.
+        </p><p>
+          Then run same command on the secondary to fix the table definition and restart Group Replication.
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>set global super_read_only=0;</code></strong>
+Query OK, 0 rows affected (0.00 sec)
+
+mysql&gt; <strong><code>set sql_log_bin=0;</code></strong>
+Query OK, 0 rows affected (0.00 sec)
+
+mysql&gt; <strong><code>alter table al_winner add id int not null auto_increment primary key;</code></strong>
+Query OK, 0 rows affected (0.09 sec)
+Records: 0  Duplicates: 0  Warnings: 0
+
+mysql&gt; <strong><code>set sql_log_bin=1;</code></strong>
+Query OK, 0 rows affected (0.01 sec)
+
+mysql&gt; <strong><code>stop group_replication;</code></strong>
+Query OK, 0 rows affected (1.02 sec)
+
+mysql&gt; <strong><code>start group_replication;</code></strong>
+Query OK, 0 rows affected (3.22 sec)</pre><p>
+          You need to disable <code>super_read_only</code> first which is set by the Group Replication plugin if nodes are running in single-primary mode.
+        </p><p>
+          Once the error is fixed the node joins the group and reports its state as <code>ONLINE</code>.
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>SELECT * FROM performance_schema.replication_group_members\G</code></strong>
+*************************** 1. row ***************************
+  CHANNEL_NAME: group_replication_applier
+     MEMBER_ID: d8a706aa-16ee-11eb-ba5a-98af65266957
+   MEMBER_HOST: Delly-7390
+   MEMBER_PORT: 33361
+  MEMBER_STATE: ONLINE
+   MEMBER_ROLE: PRIMARY
+MEMBER_VERSION: 8.0.21
+*************************** 2. row ***************************
+  CHANNEL_NAME: group_replication_applier
+     MEMBER_ID: e14043d7-16ee-11eb-b77a-98af65266957
+   MEMBER_HOST: Delly-7390
+   MEMBER_PORT: 33362
+  MEMBER_STATE: ONLINE
+   MEMBER_ROLE: SECONDARY
+MEMBER_VERSION: 8.0.21
+2 rows in set (0.00 sec)</pre><p>
+        </p><div data-type="tip"><h6>Tip</h6><p>
+            You can find what the failing transaction is doing by running mysqlbinlog command with option <code>verbose</code>:
+            </p><pre data-type="programlisting">$ <strong><code>mysqlbinlog data1/binlog.000001 </code></strong>
+&gt; <strong><code>--include-gtids=de5b65cb-16ae-11eb-826c-98af65266957:15 --verbose</code></strong>
+...
+SET @@SESSION.GTID_NEXT= 'de5b65cb-16ae-11eb-826c-98af65266957:15'/*!*/;
+# at 4015
+#201025 13:44:34 server id 1  end_log_pos 4094 CRC32 0xad05e64e 	Query ↩
+thread_id=10	exec_time=0	error_code=0
+SET TIMESTAMP=1603622674/*!*/;
+...
+### INSERT INTO `cookbook`.`al_winner`
+### SET
+###   @1='Mulder, Mark' /* STRING(120) meta=65144 nullable=1 is_null=0 */
+###   @2=21 /* INT meta=0 nullable=1 is_null=0 */
+### INSERT INTO `cookbook`.`al_winner`
+### SET
+###   @1='Clemens, Roger' /* STRING(120) meta=65144 nullable=1 is_null=0 */
+###   @2=20 /* INT meta=0 nullable=1 is_null=0 */
+### INSERT INTO `cookbook`.`al_winner`
+...
+### INSERT INTO `cookbook`.`al_winner`
+### SET
+###   @1='Sele, Aaron' /* STRING(120) meta=65144 nullable=1 is_null=0 */
+###   @2=15 /* INT meta=0 nullable=1 is_null=0 */
+# at 4469
+#201025 13:44:34 server id 1  end_log_pos 4500 CRC32 0xddd32d63 	Xid = 74
+COMMIT/*!*/;
+SET @@SESSION.GTID_NEXT= 'AUTOMATIC' /* added by mysqlbinlog */ /*!*/;
+DELIMITER ;
+# End of log file
+/*!50003 SET COMPLETION_TYPE=@OLD_COMPLETION_TYPE*/;
+/*!50530 SET @@SESSION.PSEUDO_SLAVE_MODE=0*/;</pre><p>
+            Option <code>verbose</code> required to decode row events.
+          </p></div><p>
+          We fixed error on one node, but the third node did not join the group. After examining content of the table <code>performance_schema.replication_connection_status</code> we found that replication connection options were not setup correctly:
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>SELECT CHANNEL_NAME, LAST_ERROR_NUMBER, LAST_ERROR_MESSAGE, LAST_ERROR_TIMESTAMP</code></strong>
+    -&gt; <strong><code>FROM performance_schema.replication_connection_status\G</code></strong>
+*************************** 1. row ***************************
+        CHANNEL_NAME: group_replication_applier
+   LAST_ERROR_NUMBER: 0
+  LAST_ERROR_MESSAGE: 
+LAST_ERROR_TIMESTAMP: 0000-00-00 00:00:00.000000
+*************************** 2. row ***************************
+        CHANNEL_NAME: group_replication_recovery
+   LAST_ERROR_NUMBER: 13117
+  LAST_ERROR_MESSAGE: Fatal error: Invalid (empty) username when attempting ↩
+                      to connect to the master server. Connection attempt terminated.
+LAST_ERROR_TIMESTAMP: 2020-10-25 21:31:31.413876
+2 rows in set (0.00 sec)</pre><p>
+        </p><p>
+          To fix this we need to run correct <span class="command"><em>CHANGE REPLICATION SOURCE</em></span> command:
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>STOP GROUP_REPLICATION;</code></strong>
+Query OK, 0 rows affected (1.01 sec)
+
+mysql&gt; <strong><code>CHANGE REPLICATION SOURCE TO SOURCE_USER='repl', SOURCE_PASSWORD='replrepl'</code></strong>
+    -&gt; <strong><code>FOR CHANNEL 'group_replication_recovery';</code></strong>
+Query OK, 0 rows affected, 2 warnings (0.03 sec)
+
+mysql&gt; <strong><code>START GROUP_REPLICATION;</code></strong>
+Query OK, 0 rows affected (2.40 sec)</pre><p>
+        </p><p>
+          Once fixed the node will fail with the same SQL error as the previous one, that has to be fixed the way we described above. Finally, after SQL error is recovered, the node will join the cluster and will be reported as <code>ONLINE</code>.
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>SELECT * FROM performance_schema.replication_group_members\G</code></strong>
+*************************** 1. row ***************************
+  CHANNEL_NAME: group_replication_applier
+     MEMBER_ID: d8a706aa-16ee-11eb-ba5a-98af65266957
+   MEMBER_HOST: Delly-7390
+   MEMBER_PORT: 33361
+  MEMBER_STATE: ONLINE
+   MEMBER_ROLE: PRIMARY
+MEMBER_VERSION: 8.0.21
+*************************** 2. row ***************************
+  CHANNEL_NAME: group_replication_applier
+     MEMBER_ID: e14043d7-16ee-11eb-b77a-98af65266957
+   MEMBER_HOST: Delly-7390
+   MEMBER_PORT: 33362
+  MEMBER_STATE: ONLINE
+   MEMBER_ROLE: SECONDARY
+MEMBER_VERSION: 8.0.21
+*************************** 3. row ***************************
+  CHANNEL_NAME: group_replication_applier
+     MEMBER_ID: ea775284-16ee-11eb-8762-98af65266957
+   MEMBER_HOST: Delly-7390
+   MEMBER_PORT: 33363
+  MEMBER_STATE: ONLINE
+   MEMBER_ROLE: SECONDARY
+MEMBER_VERSION: 8.0.21
+3 rows in set (0.00 sec)</pre><p>
+        </p><p>
+          To check performance of the Group Replication query table <code>performance_schema.replication_group_member_stats</code>. 
+          </p><pre data-type="programlisting">mysql&gt; <strong><code>SELECT * FROM performance_schema.replication_group_member_stats\G</code></strong>
+*************************** 1. row ***************************
+                              CHANNEL_NAME: group_replication_applier
+                                   VIEW_ID: 16036502905383892:9
+                                 MEMBER_ID: d8a706aa-16ee-11eb-ba5a-98af65266957
+               COUNT_TRANSACTIONS_IN_QUEUE: 0
+                COUNT_TRANSACTIONS_CHECKED: 10154
+                  COUNT_CONFLICTS_DETECTED: 0
+        COUNT_TRANSACTIONS_ROWS_VALIDATING: 9247
+        TRANSACTIONS_COMMITTED_ALL_MEMBERS: d8a706aa-16ee-11eb-ba5a-98af65266957:1-18,
+dc527338-13d1-11eb-abf7-98af65266957:1-1588
+            LAST_CONFLICT_FREE_TRANSACTION: dc527338-13d1-11eb-abf7-98af65266957:10160
+COUNT_TRANSACTIONS_REMOTE_IN_APPLIER_QUEUE: 0
+         COUNT_TRANSACTIONS_REMOTE_APPLIED: 5
+         COUNT_TRANSACTIONS_LOCAL_PROPOSED: 10154
+         COUNT_TRANSACTIONS_LOCAL_ROLLBACK: 0
+*************************** 2. row ***************************
+                              CHANNEL_NAME: group_replication_applier
+                                   VIEW_ID: 16036502905383892:9
+                                 MEMBER_ID: e14043d7-16ee-11eb-b77a-98af65266957
+               COUNT_TRANSACTIONS_IN_QUEUE: 0
+                COUNT_TRANSACTIONS_CHECKED: 10037
+                  COUNT_CONFLICTS_DETECTED: 0
+        COUNT_TRANSACTIONS_ROWS_VALIDATING: 9218
+        TRANSACTIONS_COMMITTED_ALL_MEMBERS: d8a706aa-16ee-11eb-ba5a-98af65266957:1-18,
+dc527338-13d1-11eb-abf7-98af65266957:1-1588
+            LAST_CONFLICT_FREE_TRANSACTION: dc527338-13d1-11eb-abf7-98af65266957:8030
+COUNT_TRANSACTIONS_REMOTE_IN_APPLIER_QUEUE: 5859
+         COUNT_TRANSACTIONS_REMOTE_APPLIED: 4180
+         COUNT_TRANSACTIONS_LOCAL_PROPOSED: 0
+         COUNT_TRANSACTIONS_LOCAL_ROLLBACK: 0
+*************************** 3. row ***************************
+                              CHANNEL_NAME: group_replication_applier
+                                   VIEW_ID: 16036502905383892:9
+                                 MEMBER_ID: ea775284-16ee-11eb-8762-98af65266957
+               COUNT_TRANSACTIONS_IN_QUEUE: 0
+                COUNT_TRANSACTIONS_CHECKED: 10037
+                  COUNT_CONFLICTS_DETECTED: 0
+        COUNT_TRANSACTIONS_ROWS_VALIDATING: 9218
+        TRANSACTIONS_COMMITTED_ALL_MEMBERS: d8a706aa-16ee-11eb-ba5a-98af65266957:1-18,
+dc527338-13d1-11eb-abf7-98af65266957:1-37
+            LAST_CONFLICT_FREE_TRANSACTION: dc527338-13d1-11eb-abf7-98af65266957:6581
+COUNT_TRANSACTIONS_REMOTE_IN_APPLIER_QUEUE: 5828
+         COUNT_TRANSACTIONS_REMOTE_APPLIED: 4209
+         COUNT_TRANSACTIONS_LOCAL_PROPOSED: 0
+         COUNT_TRANSACTIONS_LOCAL_ROLLBACK: 0
+3 rows in set (0.00 sec)</pre><p>
+          Important fields are <code>COUNT_TRANSACTIONS_REMOTE_IN_APPLIER_QUEUE</code> that show how many transactions are waiting in the queue on the secondary node to apply, and <code>TRANSACTIONS_COMMITTED_ALL_MEMBERS</code> which show that transactions were applied on all members. For more details consult <a href="https://dev.mysql.com/doc/refman/8.0/en/performance-schema-replication-group-member-stats-table.html">User Reference Manual</a>.
+        </p></div></section></div></section></div></section><section data-type="sect1" data-pdf-bookmark="3.16 Using Processlist to Understand Replication Performance"><div class="sect1" id="nch-replication-replication-performance"><h1>3.16 Using Processlist to Understand Replication Performance</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820409355152"><h2>Problem</h2><p>
+        Replica is behind the source server and lag is increasing. You want to undertsand what is going on.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820409354080"><h2>Solution</h2><p>
+        Examine status of the SQL threads using replication tables in Performance Schema as well as regular MySQL performance instrumentation.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820409352976"><h2>Discussion</h2><p>
+        Replica may fall behind the source if SQL threads are applying updates slower than the source server. This may happen because updates on the source are running concurrently, while on the replica less threads are used to process the same workload. This difference may happen even on replicas with the same or higher number of CPU cores than the the source either because you set up less <code>replica_parallel_workers</code> than active threads on the source server, or because they are not used fully due to safety measures used to prevent replica from applying updates in the wrong order.
+      </p><p>
+        To understand how many parallel workers are active you may query table <code>replication_applier_status_by_worker</code>.
+        </p><pre data-type="programlisting">mysql&gt; <strong><code>SELECT WORKER_ID, LAST_APPLIED_TRANSACTION, APPLYING_TRANSACTION </code></strong>
+    -&gt; <strong><code>FROM performance_schema.replication_applier_status_by_worker;</code></strong>
++-----------+---------------------------------+---------------------------------+
+| WORKER_ID | LAST_APPLIED_TRANSACTION        | APPLYING_TRANSACTION            |
++-----------+---------------------------------+---------------------------------+
+|         1 | de7e85f9-...-98af65266957:26075 | de7e85f9-...-98af65266957:26077 |
+|         2 | de7e85f9-...-98af65266957:26076 | de7e85f9-...-98af65266957:26078 |
+|         3 | de7e85f9-...-98af65266957:26068 | de7e85f9-...-98af65266957:26079 |
+|         4 | de7e85f9-...-98af65266957:26069 |                                 |
+|         5 | de7e85f9-...-98af65266957:26070 |                                 |
+|         6 | de7e85f9-...-98af65266957:26071 |                                 |
+|         7 | de7e85f9-...-98af65266957:25931 |                                 |
+|         8 | de7e85f9-...-98af65266957:21638 |                                 |
++-----------+---------------------------------+---------------------------------+
+8 rows in set (0.01 sec)</pre><p>
+        In the listing above you may notice that only three threads are currently applying a transaction while others are idle. This is not stable information and you need to run the same query several times to find out if this is a tendency.
+      </p><p>
+        Table <code>threads</code> in Performance Schema contains a list of all threads currently running on the MySQL server, including background ones. It has a field <code>name</code> which value is <code>thread/sql/replica_worker</code> (<code>thread/sql/slave_worker</code>) in case of the replication SQL thread. You can query it and find more details on what each of the SQL thread workers is doing.
+        </p><pre data-type="programlisting">mysql&gt; <strong><code>SELECT THREAD_ID AS TID, PROCESSLIST_ID AS PID,</code></strong>
+    -&gt; <strong><code>PROCESSLIST_DB, PROCESSLIST_STATE</code></strong>
+    -&gt; <strong><code>FROM performance_schema.threads WHERE NAME = 'thread/sql/replica_worker';</code></strong>
++-----+-----+----------------+----------------------------------------+
+| TID | PID | PROCESSLIST_DB | PROCESSLIST_STATE                      |
++-----+-----+----------------+----------------------------------------+
+|  54 |  13 | NULL           | waiting for handler commit             |
+|  55 |  14 | sbtest         | Applying batch of row changes (update) |
+|  56 |  15 | sbtest         | Applying batch of row changes (delete) |
+|  57 |  16 | NULL           | Waiting for an event from Coordinator  |
+|  58 |  17 | NULL           | Waiting for an event from Coordinator  |
+|  59 |  18 | NULL           | Waiting for an event from Coordinator  |
+|  60 |  19 | NULL           | Waiting for an event from Coordinator  |
+|  61 |  20 | NULL           | Waiting for an event from Coordinator  |
++-----+-----+----------------+----------------------------------------+
+8 rows in set (0.00 sec)</pre><p>
+        In the listing above thread 54 is waiting for a transaction commit, threads 55 and 56 are applying a batch of row changes, while other threads are waiting for an event from the Coordinator.
+      </p><p>
+        Since the source server applies changes in high number of threads we may notice that the replication lag is increasing.
+        </p><pre data-type="programlisting">mysql&gt; <strong><code>\P grep Seconds_Behind_Source</code></strong>
+PAGER set to 'grep Seconds_Behind_Source'
+mysql&gt; <strong><code>SHOW REPLICA STATUS\G SELECT SLEEP(60); SHOW REPLICA STATUS\G</code></strong>
+        Seconds_Behind_Source: 232
+1 row in set (0.00 sec)
+
+1 row in set (1 min 0.00 sec)
+
+        Seconds_Behind_Source: 238
+1 row in set (0.00 sec)</pre><p>
+      </p><p>
+        One of the resolutions for such issues is to set option <code>binlog_transaction_dependency_tracking</code> on the source server to <code>WRITESET_SESSION</code> or <code>WRITESET</code>. These options are discussed in <a data-type="xref" href="#nch-replication-replication-multithreaded">Recipe 3.8</a> and allow to have higher parallelization on the replica. Note that changes would not take immediate effect, because replica will have to apply binary log events, recorded with default <code>binlog_transaction_dependency_tracking</code> value <code>COMMIT_ORDER</code>.
+      </p><p>
+        Still, after a while, you may notice that all SQL thread workers became active and replica lag started decreasing.
+        </p><pre data-type="programlisting">mysql&gt; <strong><code>SELECT WORKER_ID, LAST_APPLIED_TRANSACTION, APPLYING_TRANSACTION</code></strong>
+    -&gt; <strong><code>FROM performance_schema.replication_applier_status_by_worker;</code></strong>
++-----------+----------------------------------+-----------------------------------+
+| WORKER_ID | LAST_APPLIED_TRANSACTION         | APPLYING_TRANSACTION                        |
++-----------+----------------------------------+-----------------------------------+
+|         1 | de7e85f9-...-98af65266957:170966 | de7e85f9-...-98af65266957:170976 |
+|         2 | de7e85f9-...-98af65266957:170970 | de7e85f9-...-98af65266957:170973 |
+|         3 | de7e85f9-...-98af65266957:170968 | de7e85f9-...-98af65266957:170975 |
+|         4 | de7e85f9-...-98af65266957:170960 | de7e85f9-...-98af65266957:170967 |
+|         5 | de7e85f9-...-98af65266957:170964 | de7e85f9-...-98af65266957:170972 |
+|         6 | de7e85f9-...-98af65266957:170962 | de7e85f9-...-98af65266957:170969 |
+|         7 | de7e85f9-...-98af65266957:170971 | de7e85f9-...-98af65266957:170977 |
+|         8 | de7e85f9-...-98af65266957:170965 | de7e85f9-...-98af65266957:170974 |
++-----------+----------------------------------+-----------------------------------+
+8 rows in set (0.00 sec)
+
+mysql&gt; <strong><code>SELECT THREAD_ID, PROCESSLIST_ID, PROCESSLIST_DB, PROCESSLIST_STATE</code></strong>
+    -&gt; <strong><code>FROM performance_schema.threads WHERE NAME = 'thread/sql/replica_worker';</code></strong>
++-----------+----------------+----------------+----------------------------------------+
+| thread_id | PROCESSLIST_ID | PROCESSLIST_DB | PROCESSLIST_STATE                      |
++-----------+----------------+----------------+----------------------------------------+
+|        54 |             13 | sbtest         | Applying batch of row changes (update) |
+|        55 |             14 | NULL           | waiting for handler commit             |
+|        56 |             15 | sbtest         | Applying batch of row changes (delete) |
+|        57 |             16 | sbtest         | Applying batch of row changes (delete) |
+|        58 |             17 | sbtest         | Applying batch of row changes (update) |
+|        59 |             18 | sbtest         | Applying batch of row changes (delete) |
+|        60 |             19 | sbtest         | Applying batch of row changes (update) |
+|        61 |             20 | sbtest         | Applying batch of row changes (write)  |
++-----------+----------------+----------------+----------------------------------------+
+8 rows in set (0.00 sec)
+
+mysql&gt; <strong><code>\P grep Seconds_Behind_Source</code></strong>
+PAGER set to 'grep Seconds_Behind_Source'
+mysql&gt; <strong><code>SHOW REPLICATION SOURCE STATUS\G SELECT SLEEP(60); SHOW REPLICA STATUS\G</code></strong>
+        Seconds_Behind_Source: 285
+1 row in set (0.00 sec)
+
+1 row in set (1 min 0.00 sec)
+
+        Seconds_Behind_Source: 275
+1 row in set (0.00 sec)</pre><p>
+      </p><p>
+        Another common reason for the replication lag is a local command, affecting tables, updated by the replication. You may notice that this is the case if query table <code>replication_applier_status_by_worker</code> and compare value of the <code>APPLYING_TRANSACTION_START_APPLY_TIMESTAMP</code> field with current time:
+        </p><pre data-type="programlisting">mysql&gt; <strong><code>SELECT WORKER_ID, APPLYING_TRANSACTION, TIMEDIFF(NOW(),</code></strong>
+    -&gt; <strong><code>APPLYING_TRANSACTION_START_APPLY_TIMESTAMP) AS exec_time</code></strong>
+    -&gt; <strong><code>FROM performance_schema.replication_applier_status_by_worker;</code></strong>
++-----------+---------------------------------------------+-----------------+
+| WORKER_ID | APPLYING_TRANSACTION                        | exec_time       |
++-----------+---------------------------------------------+-----------------+
+|         1 | de7e85f9-1060-11eb-8b8f-98af65266957:226091 | 00:05:14.367275 |
+|         2 | de7e85f9-1060-11eb-8b8f-98af65266957:226087 | 00:05:14.768701 |
+|         3 | de7e85f9-1060-11eb-8b8f-98af65266957:226090 | 00:05:14.501099 |
+|         4 | de7e85f9-1060-11eb-8b8f-98af65266957:226097 | 00:05:14.232062 |
+|         5 | de7e85f9-1060-11eb-8b8f-98af65266957:226086 | 00:05:14.773958 |
+|         6 | de7e85f9-1060-11eb-8b8f-98af65266957:226083 | 00:05:14.782274 |
+|         7 | de7e85f9-1060-11eb-8b8f-98af65266957:226080 | 00:05:14.843808 |
+|         8 | de7e85f9-1060-11eb-8b8f-98af65266957:226094 | 00:05:14.327028 |
++-----------+---------------------------------------------+-----------------+
+8 rows in set (0.00 sec)</pre><p>
+        In the listing above transaction execution time is similar for all threads and around five minutes. That is ridiculously long!
+      </p><p>
+        To find out why transactions are executing for such a long time query table <code>threads</code> in the Performance Schema:
+        </p><pre data-type="programlisting">mysql&gt; <strong><code>SELECT THREAD_ID, PROCESSLIST_ID, PROCESSLIST_DB, PROCESSLIST_STATE</code></strong>
+    -&gt; <strong><code>FROM performance_schema.threads WHERE NAME = 'thread/sql/replica_worker';</code></strong>
++-----------+----------------+----------------+------------------------------+
+| thread_id | PROCESSLIST_ID | PROCESSLIST_DB | PROCESSLIST_STATE            |
++-----------+----------------+----------------+------------------------------+
+|        54 |             13 | NULL           | Waiting for global read lock |
+|        55 |             14 | NULL           | Waiting for global read lock |
+|        56 |             15 | NULL           | Waiting for global read lock |
+|        57 |             16 | NULL           | Waiting for global read lock |
+|        58 |             17 | NULL           | Waiting for global read lock |
+|        59 |             18 | NULL           | Waiting for global read lock |
+|        60 |             19 | NULL           | Waiting for global read lock |
+|        61 |             20 | NULL           | Waiting for global read lock |
++-----------+----------------+----------------+------------------------------+
+8 rows in set (0.00 sec)</pre><p>
+        It is clear that the replication SQL threads are not doing any useful job and just waiting for a global read lock.
+      </p><p>
+        To find out which thread is holding a global read lock try querying table <code>threads</code> in the Performance Schema, but this time filter out replica threads:
+        </p><pre data-type="programlisting">mysql&gt; <strong><code>SELECT THREAD_ID, PROCESSLIST_ID, PROCESSLIST_DB, </code></strong>
+    -&gt; <strong><code>PROCESSLIST_STATE, PROCESSLIST_INFO</code></strong>
+    -&gt; <strong><code>FROM performance_schema.threads</code></strong>
+    -&gt; <strong><code>WHERE NAME != 'thread/sql/replica_worker' AND PROCESSLIST_ID IS NOT NULL\G</code></strong>
+*************************** 1. row ***************************
+        thread_id: 46
+   PROCESSLIST_ID: 7
+   PROCESSLIST_DB: NULL
+PROCESSLIST_STATE: Waiting on empty queue 
+ PROCESSLIST_INFO: NULL
+*************************** 2. row ***************************
+        thread_id: 50
+   PROCESSLIST_ID: 9
+   PROCESSLIST_DB: NULL
+PROCESSLIST_STATE: Suspending
+ PROCESSLIST_INFO: NULL
+*************************** 3. row ***************************
+        thread_id: 52
+   PROCESSLIST_ID: 11
+   PROCESSLIST_DB: NULL
+PROCESSLIST_STATE: Waiting for master to send event 
+ PROCESSLIST_INFO: NULL
+*************************** 4. row ***************************
+        thread_id: 53
+   PROCESSLIST_ID: 12
+   PROCESSLIST_DB: NULL
+PROCESSLIST_STATE: Waiting for slave workers to process their queues
+ PROCESSLIST_INFO: NULL
+*************************** 5. row ***************************
+        thread_id: 64
+   PROCESSLIST_ID: 23
+   PROCESSLIST_DB: performance_schema
+PROCESSLIST_STATE: executing
+ PROCESSLIST_INFO: SELECT THREAD_ID, PROCESSLIST_ID, PROCESSLIST_DB, PROCESSLIST_STATE, ↩
+                   PROCESSLIST_INFO FROM performance_schema.threads WHERE ↩
+                   NAME != 'thread/sql/slave_worker' AND PROCESSLIST_ID IS NOT NULL
+*************************** 6. row ***************************
+        thread_id: 65
+   PROCESSLIST_ID: 24
+   PROCESSLIST_DB: NULL
+PROCESSLIST_STATE: NULL
+ PROCESSLIST_INFO: flush tables with read lock
+6 rows in set (0.00 sec)</pre><p>
+      </p><p>
+        In our example offending thread is the thread executed <span class="command"><em>FLUSH TABLES WITH READ LOCK</em></span>. This is a common safety lock, performed by backup programs. Since we know the reason of the replica stall, we can either wait until this job finishes or kill the thread. Once done, replica will continue executing updates.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="See Also"><div class="sect2" id="idm45820409352512"><h2>See Also</h2><p>Troubleshooting performance is a long topic and further detail is outside the scope of this book. For additional information about troubleshooting,
+      see <a href="https://www.oreilly.com/library/view/mysql-troubleshooting/9781449317836/">MySQL Troubleshooting</a>.</p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="3.17 Setting Up Automated Replication"><div class="sect1" id="nch-replication-replication-automation"><h1>3.17 Setting Up Automated Replication</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820409312432"><h2>Problem</h2><p>
+        You want to setup replication, but do not want to configure it manually.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820409311344"><h2>Solution</h2><p>
+        Use MySQL Admin API, available in MySQL Shell (<a data-type="xref" href="ch02.xhtml#nch-mysqlshell">Chapter 2</a>).
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820409309360"><h2>Discussion</h2><p>
+        MySQL Shell provides MySQL Admin API that allows you to automate standard replication administrative tasks, such as creating a ReplicaSet of a source server with one or more replicas. Or create InnoDB Cluster, using Group Replication.
+      </p><section data-type="sect3" data-pdf-bookmark="InnoDB ReplicaSet"><div class="sect3" id="nch-replication-replication-automation-replicaset"><h3>InnoDB ReplicaSet</h3><p>
+          If you want to automate replication setup use MySQL Admin API inside MySQL Shell and InnoDB ReplicaSet. InnoDB ReplicaSet allows you to create a single-primary replication topology with as many secondary read-only servers as you wish. You may later promote one of the secondary servers to primary. Multiple-primary setups, replication filters and automatic failovers are not supported.
+        </p><p>
+          First you need to prepare the servers. Ensure that:
+          </p><ol><li><p>MySQL is of version 8.0 or newer</p></li><li><p>GTID options <code>gtid_mode</code> and <code>enforce_gtid_consistency</code> are enabled</p></li><li><p>Binary log format is <code>ROW</code></p></li><li><p>Default storage engine is InnoDB: set option <code>default_storage_engine=InnoDB</code></p></li><li><p>
+                Parallel-replication related options:
+                </p><pre data-type="programlisting" data-code-language="bash"><code class="nv">binlog_transaction_dependency_tracking</code><code class="o">=</code>WRITESET
+<code class="nv">replica_preserve_commit_order</code><code class="o">=</code>ON
+<code class="nv">replica_parallel_type</code><code class="o">=</code>LOGICAL_CLOCK</pre><p>
+              </p></li></ol><p>&gt;
+          
+          </p><div data-type="warning" epub:type="warning"><h6>Warning</h6><p>
+              If you are using Ubuntu and want to setup ReplicaSet on the local machine edit <code>/etc/hosts</code> file and either remove loopback address <code>127.0.1.1</code> or replace it with <code>127.0.0.1</code>. Loopback addresses, other than <code>127.0.0.1</code> are not supported by MySQL Shell.
+            </p></div><p>
+        </p><p>
+          Once servers are prepared for the replication you can start configuring them with MySQL Shell:
+          </p><pre data-type="programlisting"> MySQL  JS &gt; <strong><code>\c root@127.0.0.1:13000</code></strong>
+Creating a session to 'root@127.0.0.1:13000'
+Fetching schema names for autocompletion... Press ^C to stop.
+Your MySQL connection id is 12
+Server version: 8.0.28 MySQL Community Server - GPL
+No default schema selected; type \use &lt;schema&gt; to set one.
+ MySQL  127.0.0.1:13000 ssl  JS &gt; <strong><code>dba.configureReplicaSetInstance(</code></strong>
+                               -&gt; <strong><code>'root@127.0.0.1:13000', {clusterAdmin: "'repl'@'%'"})</code></strong>
+                               -&gt;
+Please provide the password for 'root@127.0.0.1:13000': 
+Save password for 'root@127.0.0.1:13000'? [Y]es/[N]o/Ne[v]er (default No): 
+Configuring local MySQL instance listening at port 13000 for use in an InnoDB ReplicaSet...
+
+This instance reports its own address as Delly-7390:13000
+Clients and other cluster members will communicate with it through↩
+this address by default. If this is not correct,  ↩
+the report_host MySQL system variable should be changed.
+Password for new account: ********
+Confirm password: ********
+
+applierWorkerThreads will be set to the default value of 4.
+
+The instance 'Delly-7390:13000' is valid to be used in an InnoDB ReplicaSet.
+Cluster admin user 'repl'@'%' created.
+The instance 'Delly-7390:13000' is already ready to be used in an InnoDB ReplicaSet.
+
+Successfully enabled parallel appliers.</pre><p>
+          Command <span class="command"><em>dba.configureReplicaSetInstance</em></span> takes two parameters: URI to connect to the server and configuration options. Option <code>clusterAdmin</code> instructs to create a replication user. Then you may provide a password when prompted.
+        </p><p>
+          Repeat configuration step for all servers in the ReplicaSet. Specify same replication username and password.
+        </p><p>
+          Once all instances are configured, create a ReplicaSet:
+          </p><pre data-type="programlisting"> MySQL  127.0.0.1:13000 ssl  JS &gt; <strong><code>var rs = dba.createReplicaSet("cookbook")</code></strong>
+ A new replicaset with instance 'Delly-7390:13000' will be created.
+
+* Checking MySQL instance at Delly-7390:13000
+
+This instance reports its own address as Delly-7390:13000
+Delly-7390:13000: Instance configuration is suitable.
+
+* Updating metadata...
+
+ReplicaSet object successfully created for Delly-7390:13000.
+Use rs.addInstance() to add more asynchronously replicated instances to this  ↩
+replicaset and rs.status() to check its status.</pre><p>
+          Command <span class="command"><em>dba.createReplicaSet</em></span> creates named ReplicaSet and returns ReplicaSet object. Save it into a variable to perform further management.
+        </p><p>
+          Internally it creates a database <code>mysql_innodb_cluster_metadata</code> with tables, describing ReplicaSet setup in the instance MySQL Shell connected to. Same time this first instance is set up as a PRIMARY ReplicaSet member. You may check it if run command <span class="command"><em>rs.status()</em></span>:
+          </p><pre data-type="programlisting"> MySQL  127.0.0.1:13000 ssl  JS &gt; <strong><code>rs.status()</code></strong>
+{
+    "replicaSet": {
+        "name": "cookbook", 
+        "primary": "Delly-7390:13000", 
+        "status": "AVAILABLE", 
+        "statusText": "All instances available.", 
+        "topology": {
+            "Delly-7390:13000": {
+                "address": "Delly-7390:13000", 
+                "instanceRole": "PRIMARY", 
+                "mode": "R/W", 
+                "status": "ONLINE"
+            }
+        }, 
+        "type": "ASYNC"
+    }
+}</pre><p>
+        </p><p>
+          Once PRIMARY instance set up add as many secondary instances as desired:
+          </p><pre data-type="programlisting"> MySQL  127.0.0.1:13000 ssl  JS &gt; <strong><code>rs.addInstance('root@127.0.0.1:13002')</code></strong>
+Adding instance to the replicaset...
+
+* Performing validation checks
+
+This instance reports its own address as Delly-7390:13002
+Delly-7390:13002: Instance configuration is suitable.
+
+* Checking async replication topology...
+
+* Checking transaction state of the instance...
+
+NOTE: The target instance 'Delly-7390:13002' has not been pre-provisioned  ↩
+(GTID set is empty). The Shell is unable to decide whether replication can  ↩
+completely recover its state.
+The safest and most convenient way to provision a new instance is through  ↩
+automatic clone provisioning, which will completely overwrite the state of  ↩
+'Delly-7390:13002' with a physical snapshot from an existing replicaset member.  ↩
+To use this method by default, set the 'recoveryMethod' option to 'clone'.
+
+WARNING: It should be safe to rely on replication to incrementally recover  ↩
+the state of the new instance if you are sure all updates ever executed in  ↩
+the replicaset were done with GTIDs enabled, there are no purged transactions  ↩ 
+and the new instance contains the same GTID set as the replicaset or a subset  ↩
+of it. To use this method by default, set the 'recoveryMethod' option to 'incremental'.
+
+
+Please select a recovery method [C]lone/[I]ncremental recovery/[A]bort (default Clone): 
+* Updating topology
+Waiting for clone process of the new member to complete. Press ^C to abort the operation.
+* Waiting for clone to finish...
+NOTE: Delly-7390:13002 is being cloned from delly-7390:13000
+** Stage DROP DATA: Completed
+** Clone Transfer  
+    FILE COPY  ########################################################  100%  Completed
+    PAGE COPY  ########################################################  100%  Completed
+    REDO COPY  ########################################################  100%  Completed
+
+NOTE: Delly-7390:13002 is shutting down...
+
+* Waiting for server restart... ready
+* Delly-7390:13002 has restarted, waiting for clone to finish...
+** Stage RESTART: Completed
+* Clone process has finished: 60.00 MB transferred in about 1 second (~60.00 MB/s)
+
+** Configuring Delly-7390:13002 to replicate from Delly-7390:13000
+** Waiting for new instance to synchronize with PRIMARY...
+
+The instance 'Delly-7390:13002' was added to the replicaset and is replicating 
+from Delly-7390:13000.</pre><p>
+          Each secondary instance performs initial data copy from the PRIMARY member. It can copy data using either <code>clone</code> plugin or incremental recovery from the binary logs. For the server which already has data method <code>clone</code> is preferrable. But you may need to manually restart the server to finish the installation. If you have chosen incremental recovery ensure that no binary log, containing data, is purged. Otherwise replication setup will fail.
+        </p><p>
+          Once all secondary members are added ReplicaSet is ready and can be used for writes and reads. You can check its status by running command <span class="command"><em>rs.status()</em></span>. It supports option <code>extended</code>, controlling verbosity of the output. Still it does not show all the information about replication health. If you want to have all the details use <span class="command"><em>SHOW REPLICA STATUS</em></span> command or query Performance Schema.
+        </p><p>
+          If you want to change which server is a PRIMARY use <span class="command"><em>rs.setPrimaryInstance</em></span> command. Thus, <span class="command"><em>rs.setPrimaryInstance(“127.0.0.1:13002”)</em></span> switches PRIMARY server from the server, running on the port 13000 to the server, listening port 13002.
+        </p><p>
+          If you disconnected from a server, participating in the ReplicaSet or destroyed <code>ReplicaSet</code> object, reconnect to one of ReplicaSet members and run command <span class="command"><em>rs=dba.getReplicaSet()</em></span> to re-create ReplicaSet object.
+        </p><div data-type="warning" epub:type="warning"><h6>Warning</h6><p>
+            If you want to manage ReplicaSet with MySQL Shell do not modify replication setup directly by running <span class="command"><em>CHANGE REPLICATION SOURCE</em></span> command. All management should happen via Admin API in MySQL Shell.
+          </p></div></div></section><section data-type="sect3" data-pdf-bookmark="InnoDB Cluster"><div class="sect3" id="nch-replication-replication-automation-innodbcluster"><h3>InnoDB Cluster</h3><p>
+          To automate Group Replication create <a href="https://dev.mysql.com/doc/refman/8.0/en/mysql-innodb-cluster-introduction.html">MySQL InnoDB Cluster</a>. InnoDB Cluster is a complete high availability solution that allows you to easily configure and administer a group of at least three MySQL Servers.
+        </p><p>
+          Before setting up InnoDB Cluster prepare the servers. Each of the servers in the group should have:
+          </p><ol><li><p>Unique server id</p></li><li><p>GTID enabled</p></li><li><p>Option <code>disabled_storage_engines</code> set to <code>"MyISAM,BLACKHOLE,FEDERATED,ARCHIVE,MEMORY"</code></p></li><li><p>Option <code>log_replica_updates</code> enabled</p></li><li><p>User account with administrative privileges</p></li><li><p>
+                Parallel-replication related options:
+                </p><pre data-type="programlisting" data-code-language="bash"><code class="nv">binlog_transaction_dependency_tracking</code><code class="o">=</code>WRITESET
+<code class="nv">replica_preserve_commit_order</code><code class="o">=</code>ON
+<code class="nv">replica_parallel_type</code><code class="o">=</code>LOGICAL_CLOCK
+<code class="nv">transaction_write_set_extraction</code><code class="o">=</code>XXHASH64</pre><p>
+              </p></li></ol><p>
+          You may set other options (<a data-type="xref" href="#nch-replication-replication-synchronous">Recipe 3.12</a>), required for the group replication, but they can also be configured by the MySQL Shell.
+        </p><p>
+          Once you setup and started MySQL instances connect MySQL Shell to the one you want to make PRIMARY and configure them. You need to use an account (in our case <code>root</code>) with administrative privileges to start theconfiguration process.
+          </p><pre data-type="programlisting"> MySQL  127.0.0.1:33367 ssl  JS &gt; <strong><code>dba.configureInstance('root@127.0.0.1:33367', </code></strong>
+                               -&gt; <strong><code>{clusterAdmin: "grepl", </code></strong>
+                               -&gt; <strong><code>clusterAdminPassword: "greplgrepl"})</code></strong>
+                               -&gt;
+Please provide the password for 'root@127.0.0.1:33367': 
+Configuring local MySQL instance listening at port 33367 for use in an InnoDB cluster...
+
+This instance reports its own address as Delly-7390:33367
+Clients and other cluster members will communicate with it through this address by default. 
+If this is not correct, the report_host MySQL system variable should be changed.
+Assuming full account name 'grepl'@'%' for grepl
+
+The instance 'Delly-7390:33367' is valid to be used in an InnoDB cluster.
+
+Cluster admin user 'grepl'@'%' created.
+The instance 'Delly-7390:33367' is already ready to be used in an InnoDB cluster.</pre><p>
+          Repeat configuration for other instances in the cluster.
+          </p><div data-type="warning" epub:type="warning"><h6>Warning</h6><p>
+              If an instance is manually configured for Group Replication MySQL Shell would not be able to update its options and would not ensure that the group replication configuration persist after restart. Always run <span class="command"><em>dba.configureInstance</em></span> before setting up InnoDB Cluster.
+            </p></div><p>
+        </p><p>
+          After instances are configured create a cluster:
+          </p><pre data-type="programlisting"> MySQL  127.0.0.1:33367 ssl  JS &gt; <strong><code>var cluster = dba.createCluster('cookbook', </code></strong>
+                               -&gt; <strong><code>{localAddress: ":34367"})</code></strong>
+                               -&gt;
+A new InnoDB cluster will be created on instance '127.0.0.1:33367'.
+
+Validating instance configuration at 127.0.0.1:33367...
+
+This instance reports its own address as Delly-7390:33367
+
+Instance configuration is suitable.
+Creating InnoDB cluster 'cookbook' on 'Delly-7390:33367'...
+
+Adding Seed Instance...
+Cluster successfully created. Use Cluster.addInstance() to add MySQL instances.
+At least 3 instances are needed for the cluster to be able to withstand up to
+one server failure.</pre><p>
+          Then add instances to it:  <span class="command"><em>cluster.addInstance('root@127.0.0.1:33368', {localAddress: “:34368"})</em></span>. When MySQL Shell asks you to select a recovery method choose “Clone”. Then, depending if your server supports <span class="command"><em>RESTART</em></span> command either wait when it is back online or start the node manually. In case of success you will see a message, similar to:
+          </p><pre data-type="programlisting">State recovery already finished for 'Delly-7390:33368'
+
+The instance '127.0.0.1:33368' was successfully added to the cluster.</pre><p>
+          Add other instances to the cluster.
+        </p><div data-type="tip"><h6>Tip</h6><p>
+            MySQL Shell constructs a local address which Group nodes use to communicate with each other by using the system variable <code>report_host</code> for the host address and formula <code>(current port of the instance) * 10 + 1</code> for the port number. If the auto-generated value exceeds 65535 the instance cannot be added to the cluster. Therefore, if you use non-standard ports, specify the custom value for the option <code>localAddress</code>.
+          </p></div><p>
+          After instances are added InnoDB Cluster is ready to use. To examine its status use <span class="command"><em>cluster.status()</em></span> command which supports <code>extended</code> key, controlling verbosity of the output. Default is 0: only basic information printed. With option 2 and 3 you may examine which transactions are received and applied on each member. Command <span class="command"><em>cluster.describe()</em></span> gives a short overview of the cluster topology.
+          </p><pre data-type="programlisting"> MySQL  127.0.0.1:33367 ssl  JS &gt; <strong><code>cluster.describe()</code></strong>
+{
+    "clusterName": "cookbook", 
+    "defaultReplicaSet": {
+        "name": "default", 
+        "topology": [
+            {
+                "address": "Delly-7390:33367", 
+                "label": "Delly-7390:33367", 
+                "role": "HA"
+            }, 
+            {
+                "address": "Delly-7390:33368", 
+                "label": "Delly-7390:33368", 
+                "role": "HA"
+            }, 
+            {
+                "address": "Delly-7390:33369", 
+                "label": "Delly-7390:33369", 
+                "role": "HA"
+            }
+        ], 
+        "topologyMode": "Single-Primary"
+    }
+}</pre><p>
+        </p><p>
+          If you destroyed the Cluster object, for example, by closing the session, reconnect to one of the cluster members and re-create it by running command <span class="command"><em>cluster = dba.getCluster()</em></span>.
+        </p><div data-type="note" epub:type="note"><h6>Note</h6><p>
+            Both InnoDB ReplicaSet and InnoDB Cluster support software router <a href="https://dev.mysql.com/doc/mysql-router/8.0/en/">MySQL Router</a> which you can use for load balancing. We skipped this part, because this is outside of the scope of the book. For the information on how to setup MySQL Router together with InnoDB ReplicaSet and InnoDB Cluster consult the User Reference Manual. 
+          </p></div></div></section></div></section><section data-type="sect2" data-pdf-bookmark="See Also"><div class="sect2" id="idm45820409244848"><h2>See Also</h2><p>For additional information about replication automation,
+      see <a href="https://dev.mysql.com/doc/mysql-shell/8.0/en/">MySQL Shell User Reference Manual</a>.</p></div></section></div></section></div></section></div></body></html>

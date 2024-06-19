@@ -1,0 +1,1074 @@
+<html><head></head><body><div id="sbo-rt-content"><section data-type="chapter" epub:type="chapter" data-pdf-bookmark="Chapter 13. Importing and Exporting Data"><div class="chapter" id="nch-xfer"><h1><span class="label">Chapter 13. </span>Importing and Exporting Data</h1><aside data-type="sidebar" epub:type="sidebar"><div class="sidebar" id="idm45820354276352"><h5>A note for Early Release readers</h5><p>With Early Release ebooks, you get books in their earliest form—the author’s raw and unedited content as they write—so you can take advantage of these technologies long before the official release of these titles.</p></div></aside><section data-type="sect1" data-pdf-bookmark="13.0 Introduction"><div class="sect1" id="nch-xfer-xfer-intro"><h1>13.0 Introduction</h1><p>Suppose that a file named <em class="filename">somedata.csv</em>
+    contains 12 data columns in comma-separated values (CSV) format. From this
+    file you want to extract only columns 2, 11, 5, and 9, and use them to
+    create database rows in a MySQL table that contains <code>name</code>, <code>birth</code>,
+    <code>height</code>, and <code>weight</code> columns. You must make sure that the
+    height and weight are positive integers, and convert the birth dates from
+    <em><code>MM/DD/YY</code></em> format to
+    <em><code>YYYY-MM-DD</code></em> format. How can you do this?</p><p>Data transfer problems with specific requirements occur
+    frequently when you transfer data into MySQL. Datafiles are not always
+    formatted for being ready to load into MySQL with no preparation. As a
+    result, it’s often necessary to preprocess information to put it into a
+    format acceptable for MySQL. The reverse also is true; data exported from
+    MySQL may need massaging to be useful for other programs.</p><p>Although some data preparation operations
+    require a great deal of hand checking and reformatting, in most cases you
+    can do at least part of the job automatically. Virtually all such problems
+    involve at least some elements of a common set of conversion issues. This
+    chapter and the next discuss what these issues are, how to deal with them
+    by taking advantage of the existing tools at your disposal, and how to
+    write your own tools when necessary. The idea is not to cover all possible
+    situations (an impossible task), but to show representative techniques and
+    utilities. Use them as is or adapt them. (There are commercial data-handling tools, but our purpose here is
+    to enable you to do things yourself.) With respect to the problem posed at
+    the beginning of this Introduction, see <a data-type="xref" href="ch14.xhtml#nch-format-format-epilog">Recipe 14.18</a> for the solution we arrived
+    at.</p><p>The discussion on how to transfer data to and from MySQL begins with native MySQL facilities for importing
+    data (the <code>LOAD</code> <code>DATA</code> statement and the <span class="command"><em>mysqlimport</em></span> command-line program), and for
+    exporting data (the <code>SELECT</code> … <code>INTO</code> <code>OUTFILE</code>
+    statement). For situations where the native facilities do not suffice, we
+    move on to cover techniques for using external supporting utilities (such
+    as <span class="command"><em>sed</em></span> and <span class="command"><em>tr</em></span>) and for writing your own. There are two
+    broad sets of issues to consider:</p><ul><li><p>How to manipulate the <em>structure</em> of
+        datafiles. When a file is in a format not suitable for import, you
+        must convert it to a different format. This may involve issues such as
+        changing the column delimiters or line-ending sequences, or removing
+        or rearranging columns in the file. This chapter covers such
+        techniques.</p></li><li><p>How to manipulate the <em>content</em> of datafiles.
+        If you don’t know whether the values contained in a file are legal,
+        you may want to preprocess it to check or reformat them. Numeric
+        values may need verification as lying within a specific range, dates
+        may need conversion to or from ISO format, and so forth. <a data-type="xref" href="ch14.xhtml#nch-format">Chapter 14</a> covers those techniques.</p></li></ul><p>Source code for program fragments and scripts discussed in this
+    chapter is located in the <em class="filename">transfer</em>
+    directory of the <code>recipes</code>
+    distribution.</p><section data-type="sect2" data-pdf-bookmark="General Import and Export Issues"><div class="sect2" id="idm45820354285984"><h2>General Import and Export Issues</h2><p>Incompatible datafile formats and differing rules for interpreting various kinds
+      of values cause headaches when transferring data between programs.
+      Nevertheless, certain issues recur frequently. Be aware of them and you
+      can identify more easily what must be done to solve particular import or
+      export problems.</p><p>In its most basic form, an input stream is just a set of bytes
+      with no particular meaning. Successful import into MySQL requires
+      recognizing which bytes represent structural information and which
+      represent the data values framed by that structure. Because such
+      recognition is key to decomposing the input into appropriate units, the
+      most fundamental import issues are these:</p><ul><li><p>What is the record separator? Knowing this enables you to
+          partition the input stream into records.</p></li><li><p>What is the field delimiter? Knowing this enables you to
+          partition each record into field values. Identifying the data values
+          also might include stripping quotes from around the values or
+          recognizing escape sequences within them.</p></li></ul><p>The ability to break the input into records and fields is
+      important for extracting the data values from it. If the values are
+      still not in a form that can be used directly, you may need to consider
+      other issues:</p><ul><li><p>Do the order and number of columns match the structure of the
+          database table? Mismatches require rearranging or skipping
+          columns.</p></li><li><p>How should <code>NULL</code> or empty
+          values be handled? Are they permitted? Can <code>NULL</code> values even be detected? (Some
+          systems export <code>NULL</code> values as
+          empty strings, making it impossible to distinguish them.)</p></li><li><p>Do data values require validation or reformatting? If the
+          values are in a format that matches MySQL’s expectations, no further
+          processing is necessary. Otherwise, they must be checked and
+          possibly rewritten.</p></li></ul><p>For export from MySQL, the issues are somewhat the reverse. You
+      can assume that values stored in the database are valid, but it’s
+      necessary to add column and record delimiters to form an output stream
+      that has a structure other programs can recognize, and values may
+      require reformatting for use by other programs.</p></div></section><section data-type="sect2" data-pdf-bookmark="File Formats"><div class="sect2" id="idm45820354351664"><h2>File Formats</h2><p>Datafiles come in many formats, two of which appear frequently in this
+      chapter:</p><dl><dt>Tab-delimited or tab-separated values (TSV) format</dt><dd><p>This is one of the simplest file structures; lines contain values separated by
+            tab characters. A short tab-delimited file might look like this,
+            where the whitespace between column values represents single tab
+            characters:</p><pre data-type="programlisting">a       b       c
+a,b,c   d e     f</pre></dd><dt>Comma-separated values (CSV) format</dt><dd><p>Files written in CSV format vary somewhat; there is apparently no formal
+            standard describing the format. However, the general idea is that
+            lines consist of values separated by commas, and values containing
+            internal commas are enclosed within quotes to prevent the commas
+            from being interpreted as value delimiters. It’s also common for
+            values containing spaces to be quoted as well. In this example,
+            each line contains three values:</p><pre data-type="programlisting">a,b,c
+"a,b,c","d e",f</pre><p>It’s trickier to process CSV files than tab-delimited files
+            because characters like quotes and commas have a dual meaning:
+            they may represent file structure or be included in the content of
+            data values.</p></dd></dl><p>Another important datafile characteristic is the line-ending
+      sequence. The most common sequences are carriage return (CR), linefeed (LF) and carriage return/linefeed (CRLF) pair.</p><p>Datafiles often begin with a row of column labels. For some import
+      operations, the row of labels must be discarded to avoid having it be
+      loaded into your table as data. In other cases, the labels are quite
+      useful:</p><ul><li><p>For import into existing tables, the labels help you match
+          datafile columns with the table columns if they are not necessarily
+          in the same order.</p></li><li><p>The labels can be used for column names when creating a new
+          table automatically or semiautomatically from a datafile. For
+          example, <a data-type="xref" href="#nch-xfer-xfer-guess">Recipe 13.20</a> discusses a utility
+          that examines a datafile and guesses the <code>CREATE</code> <code>TABLE</code> statement to use to create a table
+          from the file. If a label row is present, the utility uses the
+          labels for column names.</p></li></ul><aside data-type="sidebar" epub:type="sidebar"><div class="sidebar" id="idm45820354344480"><h5>Tab-Delimited, Linefeed-Terminated Format</h5><p>Although datafiles may be written in many formats, it’s unwieldy
+        to include machinery for reading multiple formats within each
+        file-processing utility you write. For that reason, many of the
+        utilities described in this chapter assume for simplicity that their
+        input is in tab-delimited, linefeed-terminated format. (This is also
+        the default format for MySQL’s <code>LOAD</code> <code>DATA</code> statement.) By making this assumption,
+        it becomes easier to write programs that read files.</p><p>On the other hand, <em>something</em> has to be able
+        to read data in other formats. To handle that problem, we’ll develop a
+        <span class="command"><em>cvt_file.pl</em></span> script that can read
+        several types of files. The script is based on the Perl
+        Text::CSV_XS module, which despite its name is useful for much more than just
+        CSV data. <span class="command"><em>cvt_file.pl</em></span> can convert
+        between many file types, making it possible for other programs that
+        require tab-delimited lines to be used with files not originally
+        written in that format. In other words, you can use <span class="command"><em>cvt_file.pl</em></span> to convert a file to
+        tab-delimited, linefeed-terminated format, and then any program that
+        expects that format can process the file. The file is available in the recipes distribution.</p></div></aside></div></section><section data-type="sect2" data-pdf-bookmark="Notes on Invoking Shell Commands"><div class="sect2" id="idm45820354339312"><h2>Notes on Invoking Shell Commands</h2><p>This chapter shows a number of programs that you invoke from the
+      command line using a shell like <span class="command"><em>bash</em></span>
+      or <span class="command"><em>tcsh</em></span> under Unix or <span class="command"><em>cmd.exe</em></span>
+      (<q>the command prompt</q>) under Windows. Many of the example
+      commands for these programs use quotes around option values, and
+      sometimes an option value is itself a quote character. Quoting
+      conventions vary from one shell to another, but the following rules seem
+      to work with most of them (including <span class="command"><em>cmd.exe</em></span> under Windows):</p><ul><li><p>For an argument that contains spaces, enclose it within
+          double quotes to prevent the shell from interpreting
+          it as multiple separate arguments. The shell strips the quotes and
+          passes the argument to the command intact.</p></li><li><p>To include a double-quote character in the argument itself,
+          precede it with a <span class="keep-together">backslash.</span></p></li></ul><p>Some shell commands in this chapter are so long that they’re shown
+      as you would enter them using several lines, with a backslash character
+      as the line-continuation character:</p><pre data-type="programlisting">% <em><code>prog_name</code></em> \
+    <em><code>argument1</code></em> \
+    <em><code>argument2 ...</code></em></pre><p>That works for Unix. On Windows, the continuation character is <code>^</code> (or
+      <code>`</code> for PowerShell). Alternatively, on
+      any platform, enter the entire command on one line:</p><pre data-type="programlisting">C:\&gt; <em><code>prog_name argument1 argument2 ...</code></em></pre></div></section></div></section><section data-type="sect1" data-pdf-bookmark="13.1 Importing Data with LOAD DATA and mysqlimport"><div class="sect1" id="nch-xfer-xfer-load-data"><h1>13.1 Importing Data with LOAD DATA and mysqlimport</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820354327344"><h2>Problem</h2><p>You want to load a datafile into a table using MySQL’s built-in import
+      capabilities.</p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820354326288"><h2>Solution</h2><p>Use the <code>LOAD</code> <code>DATA</code> statement or the <span class="command"><em>mysqlimport</em></span> command-line program.</p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820354323568"><h2>Discussion</h2><p>MySQL provides a <code>LOAD</code> <code>DATA</code> statement that acts as a bulk data
+      loader. Here’s an example statement that reads a file <em class="filename">mytbl.txt</em> from your current directory (the directory from which you call <span class="command"><em>mysql</em></span> client) and
+      loads it into the table <code>mytbl</code> in the
+      default database:</p><pre data-type="programlisting">mysql&gt; <strong><code>LOAD DATA LOCAL INFILE 'mytbl.txt' INTO TABLE mytbl;</code></strong></pre><div data-type="warning" epub:type="warning"><h6>Warning</h6><p>
+          Since MySQL 8.0, the <code>LOCAL</code> loading capability is
+          disabled by default for security reasons. 
+        </p><p>
+          To enable it on the test server, set variable <code>local_infile</code> to <code>ON</code>:
+          </p><pre data-type="programlisting" data-code-language="sql"><code class="k">SET</code> <code class="k">GLOBAL</code> <code class="n">local_infile</code> <code class="o">=</code> <code class="mi">1</code><code class="p">;</code></pre><p> and start <span class="command"><em>mysql</em></span> client with option <code>--local-infile</code>:
+          </p><pre data-type="programlisting" data-code-language="bash">mysql -ucbuser -p --local-infile</pre><p>
+        </p><p>
+          Alternatively, omit
+          <code>LOCAL</code> from the statement and specify
+          the full pathname to the file, which must be readable by the server.
+          Local versus nonlocal data loading is discussed shortly.
+        </p></div><p>The MySQL utility program <span class="command"><em>mysqlimport</em></span> acts as a wrapper around <code>LOAD</code> <code>DATA</code>
+      so that you can load input files directly from the command line. The
+      <span class="command"><em>mysqlimport</em></span> command that is
+      equivalent to the preceding <code>LOAD</code>
+      <code>DATA</code> statement looks like this,
+      assuming that <code>mytbl</code> is in the
+      <code>cookbook</code> database:</p><pre data-type="programlisting">$ <strong><code>mysqlimport --local cookbook mytbl.txt</code></strong></pre><p>For <span class="command"><em>mysqlimport</em></span>, as with other
+      MySQL programs, you may need to specify connection parameter options
+      such as <code class="option">--user</code> or <code class="option">--host</code> (see <a data-type="xref" href="ch01.xhtml#nch-mysql-mysql-options">Recipe 1.4</a>).</p><p><code>LOAD</code> <code>DATA</code> provides options to address many of the
+      import issues mentioned in the chapter introduction, such as the
+      line-ending sequence for recognizing how to break input into records,
+      the column value delimiter that permits records to be broken into
+      separate values, the quoting character that may enclose column values,
+      quoting and escaping conventions within values, and <code>NULL</code> value representation.</p><p>The following list describes <code>LOAD</code> <code>DATA</code>’s
+      general characteristics and capabilities; <span class="command"><em>mysqlimport</em></span> shares most of these behaviors.
+      We’ll note some differences as we go along, but for the most, what can
+      be done with <code>LOAD</code> <code>DATA</code> can be done with <span class="command"><em>mysqlimport</em></span> as well.</p><ul><li><p>By default, <code>LOAD</code> <code>DATA</code> expects the datafile to have the same
+          number of columns as the table into which you load it, with the
+          columns present in the same order as in the table. If the file
+          column number or order differ from the table, you can specify which
+          columns are present and their order. If the datafile contains fewer
+          columns than the table, MySQL assigns default values for the missing
+          columns.</p></li><li><p><code>LOAD</code> <code>DATA</code> assumes that data values are
+          separated by tab characters and that lines end with linefeeds
+          (newlines). If a file doesn’t conform to these conventions, you can
+          specify its format explicitly.</p></li><li><p>You can indicate that data values may have quotes around them
+          that should be stripped, and you can specify the quote
+          character.</p></li><li><p>Several special escape sequences are recognized and converted during input
+          processing. The default escape character is backslash (<code>\</code>), but you can change it. The <code>\N</code> sequence is interpreted as a <code>NULL</code> value. The <code>\b</code>, <code>\n</code>,
+          <code>\r</code>, <code>\t</code>, <code>\\</code>,
+          and <code>\0</code> sequences are interpreted
+          as backspace, linefeed, carriage return, tab, backslash, and
+          ASCII NUL characters. (NUL is a zero-valued byte; it
+          differs from the SQL <code>NULL</code>
+          value.)</p></li><li><p><code>LOAD</code> <code>DATA</code> provides diagnostic information about
+          which input values cause problems. To display this information,
+          execute a <code>SHOW</code>
+          <code>WARNINGS</code> statement after the
+          <code>LOAD</code> <code>DATA</code> statement.</p></li></ul><p>This and following eigth recipes describe how to handle these issues
+      using <code>LOAD</code> <code>DATA</code> or <span class="command"><em>mysqlimport</em></span>. It’s lengthy because there’s a
+      lot to cover.</p><section data-type="sect3" data-pdf-bookmark="Specifying the datafile location"><div class="sect3" id="idm45820354532064"><h3>Specifying the datafile location</h3><p>You can load files located either on the server host, or on the client host
+        from which you issue the <code>LOAD</code>
+        <code>DATA</code> statement. Telling MySQL where
+        to find your datafile is a matter of knowing the rules that determine
+        where it looks for the file (particularly important for files not in
+        your current directory).</p><p>By default, the MySQL server assumes that the datafile is
+        located on the server host. You can load local files that are located
+        on the client host using <code>LOAD</code>
+        <code>DATA</code> <code>LOCAL</code> rather than <code>LOAD</code> <code>DATA</code>, unless <code>LOCAL</code> capability is disabled by default.</p><div data-type="note" epub:type="note"><h6>Note</h6><p>Many of the examples in this chapter assume that <code>LOCAL</code> can be used. If that’s not true for
+          your system, adapt the examples: omit <code>LOCAL</code> from the statement, make sure that
+          the file is located on the MySQL server host and readable to the
+          server.</p></div><p>If the <code>LOAD</code> <code>DATA</code> statement includes no <code>LOCAL</code> keyword, the
+        MySQL server looks for the file on the server host using the following
+        rules:</p><ul><li><p>Your MySQL account must have the <code>FILE</code>
+            privilege, and the file to be loaded must be either located in the
+            data directory for the default database or world readable.</p></li><li><p>An absolute pathname fully specifies the location of the file in
+            the filesystem and the server reads it from the given
+            location.</p></li><li><p>A relative pathname is interpreted two ways, depending on whether it has a
+            single component or multiple components. For a single-component
+            filename such as <em class="filename">mytbl.txt</em>,
+            the server looks for the file in the database directory for the
+            default database. (The operation fails if you have not selected a
+            default database.) For a multiple-component filename such as
+            <em class="filename">xyz/mytbl.txt</em>, the server
+            looks for the file beginning in the MySQL data directory. That is,
+            it expects to find <em class="filename">mytbl.txt</em>
+            in a directory named <em class="filename">xyz</em>.</p></li><li><p>
+              If option <code>secure_file_priv</code> is set to a directory path, MySQL is able to access import and export files only in this directory. Specify absolute path if you use <code>secure_file_priv</code>.
+            </p></li></ul><p>Database directories are located directly under the server’s
+        data directory, so these two statements are equivalent if the default
+        database is <code>cookbook</code>:</p><pre data-type="programlisting">mysql&gt; <strong><code>LOAD DATA INFILE 'mytbl.txt' INTO TABLE mytbl;</code></strong>
+mysql&gt; <strong><code>LOAD DATA INFILE 'cookbook/mytbl.txt' INTO TABLE mytbl;</code></strong></pre><p>If the <code>LOAD</code> <code>DATA</code> statement includes the <code>LOCAL</code> keyword, your client program reads the
+        file on the client host and sends its contents to the server. The
+        client interprets the pathname like this:</p><ul><li><p>An absolute pathname fully specifies the location of the
+            file in the filesystem.</p></li><li><p>A relative pathname specifies the file location relative to
+            the directory from which you stated the <span class="command"><em>mysql</em></span> client.</p></li></ul><p>If your file is located on the client host, but you forget to
+        indicate that it’s local, an error occurs:</p><pre data-type="programlisting">mysql&gt; <strong><code>LOAD DATA 'mytbl.txt' INTO TABLE mytbl;</code></strong>
+ERROR 1045 (28000): Access denied for user: '<em><code>user_name</code></em>@<em><code>host_name</code></em>'
+(Using password: YES)</pre><p>That <code>Access</code> <code>denied</code> message can be confusing: if you’re able to connect to the
+        server and issue the <code>LOAD</code> <code>DATA</code> statement, it would seem that you’ve
+        already gained access to MySQL, right? The error message means the
+        server (not the client) tried to open <em class="filename">mytbl.txt</em> on the server host and could not
+        access it.</p><p>If your MySQL server runs on the host from which you issue the
+        <code>LOAD</code> <code>DATA</code> statement, <q>remote</q> and
+        <q>local</q> refer to the same host. But the rules just
+        discussed for locating datafiles still apply. Without <code>LOCAL</code>, the server reads the datafile
+        directly. With <code>LOCAL</code>, the client
+        program reads the file and sends its contents to the server.</p><p><span class="command"><em>mysqlimport</em></span> uses the same
+        rules for finding files as <code>LOAD</code>
+        <code>DATA</code>. By default, it assumes that
+        the datafile is located on the server host. To indicate that the file
+        is local to the client host, specify the <code class="option">--local</code> (or
+        <code class="option">-L</code>) option on the command line.</p><p><code>LOAD</code> <code>DATA</code> assumes that the table is located in
+        the default database. To load a file into a specific database, qualify
+        the table name with the database name. The following statement
+        indicates that the <code>mytbl</code> table is
+        located in the <code>other_db</code>
+        database:</p><pre data-type="programlisting">mysql&gt; <strong><code>LOAD DATA LOCAL 'mytbl.txt' INTO TABLE other_db.mytbl;</code></strong></pre><p><span class="command"><em>mysqlimport</em></span> always requires a
+        database argument:</p><pre data-type="programlisting">$ <strong><code>mysqlimport --local cookbook mytbl.txt</code></strong></pre><p><code>LOAD</code> <code>DATA</code> assumes no relationship between the
+        name of the datafile and the name of the table into which you load the
+        file’s contents. <span class="command"><em>mysqlimport</em></span>
+        assumes a fixed relationship between the datafile name and the table
+        name. Specifically, it uses the last component of the filename to
+        determine the table name. For example, <span class="command"><em>mysqlimport</em></span> interprets <em class="filename">mytbl,</em> <em class="filename">mytbl.dat</em>, <em class="filename">/home/paul/mytbl.csv</em>, and <em class="filename">C:\projects\mytbl.txt</em> all as files
+        containing data for the <code>mytbl</code> table.</p><aside data-type="sidebar" epub:type="sidebar"><div class="sidebar" id="idm45820354494112"><h5>Naming Datafiles Under Windows</h5><p>Windows systems use <code>\</code> as
+          the pathname separator in filenames. That’s a bit of a
+          problem because MySQL interprets backslash as the escape character
+          in string values. To specify a Windows pathname, use either doubled
+          backslashes or forward slashes. These two statements show two ways
+          of referring to the same Windows file:</p><pre data-type="programlisting">mysql&gt; <strong><code>LOAD DATA LOCAL INFILE 'C:\\projects\\mydata.txt' INTO mytbl;</code></strong>
+mysql&gt; <strong><code>LOAD DATA LOCAL INFILE 'C:/projects/mydata.txt' INTO mytbl;</code></strong></pre><p>If the <code>NO_BACKSLASH_ESCAPES</code>
+          SQL mode is enabled, backslash is not special, and you do not
+          double it:</p><pre data-type="programlisting">mysql&gt; <strong><code>SET sql_mode = CONCAT('NO_BACKSLASH_ESCAPES,', @@sql_mode);</code></strong>
+mysql&gt; <strong><code>LOAD DATA LOCAL INFILE 'C:\projects\mydata.txt' INTO mytbl;</code></strong></pre></div></aside></div></section></div></section></div></section><section data-type="sect1" data-pdf-bookmark="13.2 Specifying Column and Line Delimiters"><div class="sect1" id="nch-xfer-xfer-load-data-delimiters"><h1>13.2 Specifying Column and Line Delimiters</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820354482576"><h2>Problem</h2><p>
+            Your datafile uses non-standard column or line delimitrs.
+          </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820354481696"><h2>Solution</h2><p>
+            Use clauses <code>FIELDS TERMINATED BY</code> and <code>LINES TERMINATED BY</code> for the <code>LOAD DATA INFILE</code> statement and options <code>--fields-terminated-by</code> and <code>--lines-terminated-by</code> for <span class="command"><em>mysqlimport</em></span>.
+          </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820354480768"><h2>Discussion</h2><p>By default, <code>LOAD</code> <code>DATA</code> assumes that datafile lines are terminated by linefeed (newline)
+        characters and that values within a line are separated by tab
+        characters. To provide explicit information about datafile format, use
+        a <code>FIELDS</code> clause to
+        describe the characteristics of fields within a line, and a <code>LINES</code> clause to
+        specify the line-ending sequence. The following <code>LOAD</code> <code>DATA</code>
+        statement indicates that the input file contains data values separated
+        by colons and lines terminated by carriage returns:</p><pre data-type="programlisting">mysql&gt; <strong><code>LOAD DATA LOCAL INFILE 'mytbl.txt' INTO TABLE mytbl</code></strong>
+    -&gt; <strong><code>FIELDS TERMINATED BY ':' LINES TERMINATED BY '\r';</code></strong></pre><p>Each clause follows the table name. If both are present,
+        <code>FIELDS</code> must precede <code>LINES</code>. The line and field termination
+        indicators can contain multiple characters. For example, <code>\r\n</code> indicates that lines are terminated by
+        carriage return/linefeed pairs.</p><p>The <code>LINES</code> clause also
+        has a <code>STARTING</code>
+        <code>BY</code> subclause. It specifies the
+        sequence to be stripped from each input record. (Everything
+        <em>up</em> <em>to</em> the given sequence is
+        stripped. If you specify <code>STARTING</code>
+        <code>BY</code> <code>'X'</code> and a record begins with <code>abcX</code>, all four leading characters are
+        stripped.) Like <code>TERMINATED</code> <code>BY</code>, the sequence can have multiple characters. If <code>TERMINATED</code> <code>BY</code> and <code>STARTING</code> <code>BY</code> both are present in the <code>LINES</code> clause, they can appear in any
+        order.</p><p>For <span class="command"><em>mysqlimport</em></span>, command
+        options provide the format specifiers. Commands that correspond to the
+        preceding two <code>LOAD</code> <code>DATA</code> statements look like this:</p><pre data-type="programlisting">$ <strong><code>mysqlimport --local cookbook mytbl.txt</code></strong>
+$ <strong><code>mysqlimport --local --fields-terminated-by=":" --lines-terminated-by="\r" \</code></strong>
+    <strong><code>cookbook mytbl.txt</code></strong></pre><p>Option order doesn’t matter for <span class="command"><em>mysqlimport</em></span>.</p><p>The <code>FIELDS</code> and <code>LINES</code> clauses understand hex notation to
+        specify arbitrary format characters, which is useful for loading
+        datafiles that use binary format codes. Suppose that a datafile has
+        lines with Ctrl-A between fields and Ctrl-B at the end of lines. The
+        ASCII values for Ctrl-A and Ctrl-B are 1 and 2, so you represent them
+        as <code>0x01</code> and <code>0x02</code>:</p><pre data-type="programlisting">FIELDS TERMINATED BY 0x01 LINES TERMINATED BY 0x02</pre><p><span class="command"><em>mysqlimport</em></span> also understands
+        hex constants for format specifiers. You may find this capability
+        helpful if you don’t like remembering how to type escape sequences on
+        the command line or when it’s necessary to use quotes around them. Tab
+        is <code>0x09</code>, linefeed is <code>0x0a</code>, and carriage return is <code>0x0d</code>. This command indicates that the
+        datafile contains tab-delimited lines terminated by CRLF pairs:</p><pre data-type="programlisting">$ <strong><code>mysqlimport --local --fields-terminated-by=0x09 \</code></strong>
+    <strong><code>--lines-terminated-by=0x0d0a cookbook mytbl.txt</code></strong></pre><p>When you import datafiles, don’t assume that <code>LOAD</code> <code>DATA</code>
+        (or <span class="command"><em>mysqlimport</em></span>) knows more than it
+        does. Some <code>LOAD</code> <code>DATA</code> frustrations occur because people
+        expect MySQL to know more than it possibly can. Keep in mind that
+        <code>LOAD</code> <code>DATA</code> has no idea at all about the format of
+        your datafile. It makes certain assumptions about the input structure,
+        represented as the default settings for the line and field
+        terminators, and for the quote and escape character settings. If your
+        input differs from those assumptions, you must tell MySQL so.</p><p>The line-ending sequence used in a datafile typically is
+        determined by the system from which the file originated. Unix files
+        normally have lines terminated by linefeeds, which you indicate
+        like this:</p><pre data-type="programlisting">LINES TERMINATED BY '\n'</pre><p>Because <code>\n</code> happens to be the
+        default line terminator, you need not specify that clause in this case
+        unless you want to indicate the line-ending sequence explicitly. If
+        files on your system don’t use the Unix default (linefeed), you must
+        specify the line terminator explicitly. For files that have lines
+        ending in carriage returns or carriage return/linefeed pairs,
+        respectively, use the appropriate <code>LINES</code> <code>TERMINATED</code> <code>BY</code> clause:</p><pre data-type="programlisting">LINES TERMINATED BY '\r'
+LINES TERMINATED BY '\r\n'</pre><p>For example, to load a Windows file that contains tab-delimited fields and lines ending
+        with CRLF pairs, use this <code>LOAD</code>
+        <code>DATA</code> statement:</p><pre data-type="programlisting">mysql&gt; <strong><code>LOAD DATA LOCAL INFILE 'mytbl.txt' INTO TABLE mytbl</code></strong>
+    -&gt; <strong><code>LINES TERMINATED BY '\r\n';</code></strong></pre><p>The corresponding <span class="command"><em>mysqlimport</em></span>
+        command is:</p><pre data-type="programlisting">$ <strong><code>mysqlimport --local --lines-terminated-by="\r\n" cookbook mytbl.txt</code></strong></pre><p>If the file has been transferred from one machine to another,
+        its contents may have been changed in subtle ways of which you’re not
+        aware. For example, an FTP transfer between machines running different
+        operating systems typically translates line endings to those that are
+        appropriate for the destination machine if the transfer is performed
+        in text mode rather than in binary (image) mode.</p><p>When in doubt, check the contents of your datafile using a hex
+        dump program or other utility that displays a visible representation
+        of whitespace characters like tab, carriage return, and linefeed.
+        Under Unix, programs such as <span class="command"><em>od</em></span> or
+        <span class="command"><em>hexdump</em></span> can display file contents
+        in a variety of formats. If you don’t have these or some comparable
+        utility, the <em class="filename">transfer</em> directory
+        of the <code>recipes</code> distribution
+        contains hex dumpers written in Perl, Ruby, and Python (<span class="command"><em>hexdump.pl</em></span>, <span class="command"><em>hexdump.rb</em></span>, and <span class="command"><em>hexdump.py</em></span>), as well as programs that
+        display printable representations of all characters of a file
+        (<span class="command"><em>see.pl</em></span>, <span class="command"><em>see.rb</em></span>, and <span class="command"><em>see.py</em></span>). You may find them useful for
+        examining files to see what they really contain.</p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="13.3 Dealing with Quotes and Special Characters"><div class="sect1" id="nch-xfer-xfer-load-data-quotes"><h1>13.3 Dealing with Quotes and Special Characters</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820354428592"><h2>Problem</h2><p>
+            Your data file contains quotes or special characters, therefore cannot be loaded with default options.
+          </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820354427504"><h2>Solution</h2><p>
+            Use <code>FIELDS</code> clause for <code>LOAD DATA INFILE</code> with combination of <code>TERMINATED BY</code>, <code>ECNLOSED BY</code> and <code>ESCAPED BY</code>. For <span class="command"><em>mysqlimport</em></span> use options <code>--fields-enclosed-by</code> and <code>--fields-escaped-by</code>.
+          </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820354426560"><h2>Discussion</h2><p>If your datafile contains quoted values or escaped characters, tell
+        <code>LOAD</code> <code>DATA</code> to be aware of them so that it doesn’t
+        load uninterpreted data values into the database.</p><p>The <code>FIELDS</code> clause can
+        specify other format options besides <code>TERMINATED</code> <code>BY</code>. By default, <code>LOAD</code> <code>DATA</code>
+        assumes that values are unquoted, and it interprets the backslash
+        (<code>\</code>) as an escape character for special characters. To indicate the
+        value-quoting character explicitly, use <code>ENCLOSED</code> <code>BY</code>; MySQL will strip that character from the
+        ends of data values during input processing. To change the default
+        escape character, use <code>ESCAPED</code>
+        <code>BY</code>.</p><p>You can use subclauses
+        <code>ENCLOSED</code> <code>BY</code>, <code>ESCAPED</code> <code>BY</code>, and <code>TERMINATED</code> <code>BY</code> in any order. 
+        
+        For example, these <code>FIELDS</code> clauses are equivalent:</p><pre data-type="programlisting">FIELDS TERMINATED BY ',' ENCLOSED BY '"'
+FIELDS ENCLOSED BY '"' TERMINATED BY ','</pre><p>The <code>TERMINATED</code> <code>BY</code> value can consist of multiple characters.
+        If data values are separated within input lines by <code>*@*</code>, sequences, indicate that like
+        this:</p><pre data-type="programlisting">FIELDS TERMINATED BY '*@*'</pre><p>To disable escape processing entirely, specify an empty escape
+        sequence:</p><pre data-type="programlisting">FIELDS ESCAPED BY ''</pre><p>When you specify <code>ENCLOSED</code>
+        <code>BY</code> to indicate which quote
+        character should be stripped from data values, it’s possible to
+        include the quote character literally within data values by doubling
+        it or by preceding it with the escape character. For example, if the
+        quote character is <code>"</code> and escape character is <code>\</code>, the input value <code>"a""b\"c"</code> is interpreted as <code>a"b"c</code>.</p><p>For <span class="command"><em>mysqlimport</em></span>, the
+        corresponding command options for specifying quote and escape values
+        are <code class="option">--fields-enclosed-by</code> and
+        <code class="option">--fields-escaped-by</code>. (When using <span class="command"><em>mysqlimport</em></span>
+        options that include quotes or backslashes or other characters that
+        are special to your command interpreter, you may need to quote or
+        escape the quote or escape characters.)</p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="13.4 Handling Duplicate Key Values"><div class="sect1" id="nch-xfer-xfer-load-data-duplicates"><h1>13.4 Handling Duplicate Key Values</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820354401152"><h2>Problem</h2><p>
+            You have duplicates in your datafile and import fails with an error.
+          </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820354400096"><h2>Solution</h2><p>
+            Instruct <code>LOAD DATA INFILE</code> and <span class="command"><em>mysqlimport</em></span> to either ignore or replace duplicates.
+          </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820354397824"><h2>Discussion</h2><p>By default, an error occurs if an input record duplicates an existing
+        row in the column or columns that form a <code>PRIMARY</code> <code>KEY</code> or <code>UNIQUE</code> index. To control this behavior,
+        specify <code>IGNORE</code> or
+        <code>REPLACE</code> after the filename to tell
+        MySQL to either ignore duplicate rows or replace old rows with the new
+        ones.</p><p>Suppose that you periodically receive meteorological data about
+        current weather conditions from various monitoring stations, and that
+        you store various measurements from these stations in a table that
+        looks like this:</p><pre data-type="programlisting" data-code-language="sql"><code class="k">CREATE</code> <code class="k">TABLE</code> <code class="n">weatherdata</code>
+<code class="p">(</code>
+  <code class="n">station</code> <code class="nb">INT</code> <code class="n">UNSIGNED</code> <code class="k">NOT</code> <code class="k">NULL</code><code class="p">,</code>
+  <code class="k">type</code>    <code class="n">ENUM</code><code class="p">(</code><code class="s1">'precip'</code><code class="p">,</code><code class="s1">'temp'</code><code class="p">,</code><code class="s1">'cloudiness'</code><code class="p">,</code><code class="s1">'humidity'</code><code class="p">,</code><code class="s1">'barometer'</code><code class="p">)</code> <code class="k">NOT</code> <code class="k">NULL</code><code class="p">,</code>
+  <code class="n">value</code>   <code class="nb">FLOAT</code><code class="p">,</code>
+  <code class="k">PRIMARY</code> <code class="k">KEY</code> <code class="p">(</code><code class="n">station</code><code class="p">,</code> <code class="k">type</code><code class="p">)</code>
+<code class="p">);</code></pre><p>The table includes a primary key on the combination of station
+        ID and measurement type, to ensure that it contains only one row per
+        station per type of measurement. The table is intended to hold only
+        current conditions, so when new measurements for a given station are
+        loaded into the table, they should kick out the station’s previous
+        measurements. To accomplish this, use the <code>REPLACE</code> keyword:</p><pre data-type="programlisting">mysql&gt; <strong><code>LOAD DATA LOCAL INFILE 'data.txt' REPLACE INTO TABLE weatherdata;</code></strong></pre><p><span class="command"><em>mysqlimport</em></span> has
+        <code class="option">--ignore</code> and <code class="option">--replace</code> options that
+        correspond to the <code>IGNORE</code> and <code>REPLACE</code> keywords for <code>LOAD</code> <code>DATA</code>.</p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="13.5 Obtaining Diagnostics about Bad Input Data"><div class="sect1" id="nch-xfer-xfer-load-data-diagnostics"><h1>13.5 Obtaining Diagnostics about Bad Input Data</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820354359664"><h2>Problem</h2><p>
+            You found differences between the datafile and data, loaded into the database and want to know why import failed for those values.
+          </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820354358688"><h2>Solution</h2><p>
+            Use statement <code>SHOW WARNINGS</code>.
+          </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820354357328"><h2>Discussion</h2><p><code>LOAD</code> <code>DATA</code> displays an information line to indicate whether there are any
+        problematic input values. If so, use <code>SHOW</code> <code>WARNINGS</code> to find where they are and what the problems are.</p><p>When a <code>LOAD</code> <code>DATA</code> statement finishes, it returns a line
+        of information that tells you how many errors or data conversion
+        problems occurred. For example:</p><pre data-type="programlisting">Records: 134  Deleted: 0  Skipped: 2  Warnings: 13</pre><p>These values provide general information about the import
+        operation:</p><ul><li><p><code>Records</code> indicates the
+            number of records found in the file.</p></li><li><p><code>Deleted</code> and <code>Skipped</code> are related to treatment of
+            input records that duplicate existing table rows on unique index
+            values. <code>Deleted</code> indicates how
+            many rows were deleted from the table and replaced by input
+            records, and <code>Skipped</code> indicates
+            how many input records were ignored in favor of existing
+            rows.</p></li><li><p><code>Warnings</code> is something of
+            a catchall that indicates the number of problems found while
+            loading data values into columns. Either a value stores into a
+            column properly, or it doesn’t. In the latter case, the value ends
+            up in MySQL as something different, and MySQL counts it as a
+            warning. (Storing a string <code>abc</code>
+            into a numeric column results in a stored value of <code>0</code>, for example.)</p></li></ul><p>What do these values tell you? The <code>Records</code> value normally should match the
+        number of lines in the input file. If it doesn’t, that’s a sign that
+        MySQL interprets the file as having a different format than it
+        actually has. In this case, you’ll likely also see a high <code>Warnings</code> value, which indicates that many
+        values had to be converted because they didn’t match the expected data
+        type. The solution to this problem often is to specify the proper
+        <code>FIELDS</code> and <code>LINES</code> clauses.</p><p>Assuming that your <code>FIELDS</code> and
+        <code>LINES</code> format specifiers are correct, a nonzero <code>Warnings</code> count indicates the presence of bad
+        input values. You can’t tell from the numbers in the <code>LOAD</code> <code>DATA</code>
+        information line which input records had problems or which columns
+        were bad. To get that information, issue a <code>SHOW</code> <code>WARNINGS</code> statement.</p><p>Suppose that a table <code>t</code> has
+        this structure:</p><pre data-type="programlisting" data-code-language="sql"><code class="k">CREATE</code> <code class="k">TABLE</code> <code class="n">t</code>
+<code class="p">(</code>
+  <code class="n">i</code> <code class="nb">INT</code><code class="p">,</code>
+  <code class="k">c</code> <code class="nb">CHAR</code><code class="p">(</code><code class="mi">3</code><code class="p">),</code>
+  <code class="n">d</code> <code class="nb">DATE</code>
+<code class="p">);</code></pre><p>And suppose that a datafile <em class="filename">data.txt</em> looks like this:</p><pre data-type="programlisting">1           1           1
+abc         abc         abc
+2010-10-10  2010-10-10  2010-10-10</pre><p>Loading the file into the table causes a number, a string, and a
+        date to be loaded into each of the three columns. Doing so results in
+        several data conversions and warnings, which you can see using
+        <code>SHOW</code> <code>WARNINGS</code> immediately following <code>LOAD</code> <code>DATA</code>:</p><pre data-type="programlisting">mysql&gt; <strong><code>LOAD DATA LOCAL INFILE 'data.txt' INTO TABLE t;</code></strong>
+Query OK, 3 rows affected, 5 warnings (0.01 sec)
+Records: 3  Deleted: 0  Skipped: 0  Warnings: 5
+mysql&gt; <strong><code>SHOW WARNINGS;</code></strong>
++---------+------+--------------------------------------------------------+
+| Level   | Code | Message                                                |
++---------+------+--------------------------------------------------------+
+| Warning | 1265 | Data truncated for column 'd' at row 1                 |
+| Warning | 1366 | Incorrect integer value: 'abc' for column 'i' at row 2 |
+| Warning | 1265 | Data truncated for column 'd' at row 2                 |
+| Warning | 1265 | Data truncated for column 'i' at row 3                 |
+| Warning | 1265 | Data truncated for column 'c' at row 3                 |
++---------+------+--------------------------------------------------------+
+5 rows in set (0.00 sec)</pre><p>The <code>SHOW</code> <code>WARNINGS</code> output helps you determine which
+        values were converted and why. The resulting table looks like this:</p><pre data-type="programlisting">mysql&gt; <strong><code>SELECT * FROM t;</code></strong>
++------+------+------------+
+| i    | c    | d          |
++------+------+------------+
+|    1 | 1    | 0000-00-00 |
+|    0 | abc  | 0000-00-00 |
+| 2010 | 201  | 2010-10-10 |
++------+------+------------+</pre></div></section></div></section><section data-type="sect1" data-pdf-bookmark="13.6 Skipping Datafile Lines"><div class="sect1" id="nch-xfer-xfer-load-data-skipping"><h1>13.6 Skipping Datafile Lines</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820354043856"><h2>Problem</h2><p>
+            You want to skip few first lines from a datafile.
+          </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820354004240"><h2>Solution</h2><p>
+            Use <code>IGNORE ... LINES</code> clause for <code>LOAD DATA INFILE</code> and option <code>--ignore-lines</code> for <span class="command"><em>mysqlimport</em></span>.
+          </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820354001072"><h2>Discussion</h2><p>To skip the first <em><code>n</code></em> lines of a datafile, add an <code>IGNORE</code>
+        <em><code>n</code></em> <code>LINES</code>
+        clause to the <code>LOAD</code> <code>DATA</code> statement. For example, a file might
+        include an initial line of column labels. You can skip it like
+        this:</p><pre data-type="programlisting">mysql&gt; <strong><code>LOAD DATA LOCAL INFILE 'mytbl.txt' INTO TABLE mytbl</code></strong>
+    -&gt; <strong><code>IGNORE 1 LINES;</code></strong></pre><p><span class="command"><em>mysqlimport</em></span> supports an
+        <code class="option">--ignore-lines=</code><em><code>n</code></em> option
+        that corresponds to <code>IGNORE</code> <em><code>n</code></em> <code>LINES</code>.</p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="13.7 Specifying Input Column Order"><div class="sect1" id="nch-xfer-xfer-load-data-order"><h1>13.7 Specifying Input Column Order</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820353990800"><h2>Problem</h2><p>
+            Column order in the datafile and the table is different and you need to change for the import.
+          </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820353989792"><h2>Solution</h2><p>
+            Specify order of the columns when importing.
+          </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820353988912"><h2>Discussion</h2><p><code>LOAD</code> <code>DATA</code> assumes that columns in the datafile have the same order as the
+        columns in the table. If that’s not true, specify a list to indicate
+        the table columns into which to load the datafile columns. Suppose
+        that your table has columns <code>a</code>,
+        <code>b</code>, and <code>c</code>, but successive columns in the datafile
+        correspond to columns <code>b</code>, <code>c</code>, and <code>a</code>.
+        Load the file like this:</p><pre data-type="programlisting">mysql&gt; <strong><code>LOAD DATA LOCAL INFILE 'mytbl.txt' INTO TABLE mytbl (b,c,a);</code></strong></pre><p><span class="command"><em>mysqlimport</em></span> has a
+        corresponding <code class="option">--columns</code> option to specify the column list:</p><pre data-type="programlisting">$ <strong><code>mysqlimport --local --columns=b,c,a cookbook mytbl.txt</code></strong></pre></div></section></div></section><section data-type="sect1" data-pdf-bookmark="13.8 Preprocessing Input Values Before Inserting Them"><div class="sect1" id="nch-xfer-xfer-load-data-preprocessing"><h1>13.8 Preprocessing Input Values Before Inserting Them</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820353980592"><h2>Problem</h2><p>
+            Values in the datafile cannot be inserted into the database as is. You need to modify them before inserting.
+          </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820353979712"><h2>Solution</h2><p>
+            Use <code>SET</code> clause for <code>LOAD DATA INFILE</code> and MySQL functions to modify values.
+          </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820353978064"><h2>Discussion</h2><p><code>LOAD</code> <code>DATA</code> can perform limited preprocessing of input values before inserting
+        them, which sometimes enables you to map input data onto more
+        appropriate values before loading them into your table. This is useful
+        when values are not in a format suitable for loading into a table (for
+        example, they are in the wrong units, or two input fields must be
+        combined and inserted into a single column).</p><p>The previous section shows how to specify a column list for
+        <code>LOAD</code> <code>DATA</code> to indicate how input fields correspond
+        to table columns. The column list also can name user-defined
+        variables, such that for each input record, the input fields are
+        assigned to the variables. You can then perform calculations with
+        those variables before inserting the result into the table. Specify
+        these calculations in a <code>SET</code>
+        clause that names one or more <em><code>col_name</code></em>
+        <code>=</code> <em><code>expr</code></em>
+        assignments, separated by commas.</p><p>Suppose that a datafile has the following columns, with the
+        first line providing column labels:</p><pre data-type="programlisting">Date        Time        Name        Weight      State
+2006-09-01  12:00:00    Bill Wills  200         Nevada
+2006-09-02  09:00:00    Jeff Deft   150         Oklahoma
+2006-09-04  03:00:00    Bob Hobbs   225         Utah
+2006-09-07  08:00:00    Hank Banks  175         Texas</pre><p>Suppose also that the file is to be loaded into a table that has
+        these columns:</p><pre data-type="programlisting" data-code-language="sql"><code class="k">CREATE</code> <code class="k">TABLE</code> <code class="n">t</code>
+<code class="p">(</code>
+  <code class="n">dt</code>         <code class="n">DATETIME</code><code class="p">,</code>
+  <code class="n">last_name</code>  <code class="nb">CHAR</code><code class="p">(</code><code class="mi">10</code><code class="p">),</code>
+  <code class="n">first_name</code> <code class="nb">CHAR</code><code class="p">(</code><code class="mi">10</code><code class="p">),</code>
+  <code class="n">weight_kg</code>  <code class="nb">FLOAT</code><code class="p">,</code>
+  <code class="n">st_abbrev</code>  <code class="nb">CHAR</code><code class="p">(</code><code class="mi">2</code><code class="p">)</code>
+<code class="p">);</code></pre><p>To import the file, you must address several mismatches between
+        its fields and the table columns:</p><ul><li><p>The file contains separate date and time fields that must be
+            combined into date-and-time values for insertion into the <code>DATETIME</code> column.</p></li><li><p>The file contains a name field, which must be split into
+            separate first and last name values for insertion into the
+            <code>first_name</code> and <code>last_name</code> columns.</p></li><li><p>The file contains a weight in pounds, which must be
+            converted to kilograms for insertion into the <code>weight_kg</code> column. (1 lb. equals .454
+            kg.)</p></li><li><p>The file contains state names, but the table contains
+            two-letter abbreviations. The name can be mapped to the
+            abbreviation by performing a lookup in the <code>states</code> table.</p></li></ul><p>To handle these conversions, skip the first line that contains
+        the column labels, assign each input column to a user-defined
+        variable, and write a <code>SET</code> clause to
+        perform the calculations:</p><pre data-type="programlisting">mysql&gt; <strong><code>LOAD DATA LOCAL INFILE 'data.txt' INTO TABLE t</code></strong>
+    -&gt; <strong><code>IGNORE 1 LINES</code></strong>
+    -&gt; <strong><code>(@date,@time,@name,@weight_lb,@state)</code></strong>
+    -&gt; <strong><code>SET dt = CONCAT(@date,' ',@time),</code></strong>
+    -&gt;     <strong><code>first_name = SUBSTRING_INDEX(@name,' ',1),</code></strong>
+    -&gt;     <strong><code>last_name = SUBSTRING_INDEX(@name,' ',-1),</code></strong>
+    -&gt;     <strong><code>weight_kg = @weight_lb * .454,</code></strong>
+    -&gt;     <strong><code>st_abbrev = (SELECT abbrev FROM states WHERE name = @state);</code></strong></pre><p>After the import operation, the table contains these
+        rows:</p><pre data-type="programlisting">mysql&gt; <strong><code>SELECT * FROM t;</code></strong>
++---------------------+-----------+------------+-----------+-----------+
+| dt                  | last_name | first_name | weight_kg | st_abbrev |
++---------------------+-----------+------------+-----------+-----------+
+| 2006-09-01 12:00:00 | Wills     | Bill       |      90.8 | NV        |
+| 2006-09-02 09:00:00 | Deft      | Jeff       |      68.1 | OK        |
+| 2006-09-04 03:00:00 | Hobbs     | Bob        |    102.15 | UT        |
+| 2006-09-07 08:00:00 | Banks     | Hank       |     79.45 | TX        |
++---------------------+-----------+------------+-----------+-----------+</pre><p><code>LOAD</code> <code>DATA</code> can perform data value reformatting, as
+        just shown. Other examples showing uses for this capability occur
+        elsewhere. (For example, <a data-type="xref" href="#nch-xfer-xfer-null">Recipe 13.12</a> uses it
+        to map <code>NULL</code> values, and <a data-type="xref" href="ch14.xhtml#nch-format-format-date-import">Recipe 14.16</a> rewrites non-ISO dates to
+        ISO format during data import.) However, although <code>LOAD</code> <code>DATA</code>
+        can map input values to other values, it cannot outright reject an
+        input record that is found to contain unsuitable values. To do that,
+        either preprocess the input file to remove these records or issue a
+        <code>DELETE</code> statement after loading the
+        file.</p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="13.9 Ignoring Datafile Columns"><div class="sect1" id="nch-xfer-xfer-load-data-ignoring"><h1>13.9 Ignoring Datafile Columns</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820353932928"><h2>Problem</h2><p>
+            Your datafile contains extra fields that should not be added to the database.
+          </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820353900560"><h2>Solution</h2><p>
+            Specify column order when importing data. In place of the columns that need to be ignored specify user-defined variable.
+          </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820353899520"><h2>Discussion</h2><p>Extra columns at the end of input lines are easy to handle. If a line
+        contains more columns than are in the table, <code>LOAD</code> <code>DATA</code>
+        just ignores them (although it might produce a nonzero warning
+        count).</p><p>Skipping columns in the middle of lines is a bit more involved.
+        To handle this, use a column list with <code>LOAD</code> <code>DATA</code>
+        that assigns the columns to be ignored to a dummy user-defined
+        variable. Suppose that you want to load information from a Unix
+        password file <em class="filename">/etc/passwd</em>, which
+        contains lines in the following format:</p><pre data-type="programlisting">account:password:UID:GID:GECOS:directory:shell</pre><p>Suppose also that you don’t want to load the password and
+        directory columns. A table to hold the information in the remaining
+        columns looks like this:</p><pre data-type="programlisting" data-code-language="sql"><code class="k">CREATE</code> <code class="k">TABLE</code> <code class="n">passwd</code>
+<code class="p">(</code>
+  <code class="n">account</code>   <code class="nb">CHAR</code><code class="p">(</code><code class="mi">8</code><code class="p">),</code>  <code class="o">#</code> <code class="n">login</code> <code class="n">name</code>
+  <code class="n">uid</code>       <code class="nb">INT</code><code class="p">,</code>      <code class="o">#</code> <code class="k">user</code> <code class="n">ID</code>
+  <code class="n">gid</code>       <code class="nb">INT</code><code class="p">,</code>      <code class="o">#</code> <code class="k">group</code> <code class="n">ID</code>
+  <code class="n">gecos</code>     <code class="nb">CHAR</code><code class="p">(</code><code class="mi">60</code><code class="p">),</code> <code class="o">#</code> <code class="n">name</code><code class="p">,</code> <code class="n">phone</code><code class="p">,</code> <code class="n">office</code><code class="p">,</code> <code class="n">etc</code><code class="p">.</code>
+  <code class="n">shell</code>     <code class="nb">CHAR</code><code class="p">(</code><code class="mi">60</code><code class="p">),</code>  <code class="o">#</code> <code class="n">command</code> <code class="n">interpreter</code>
+  <code class="k">PRIMARY</code> <code class="k">KEY</code><code class="p">(</code><code class="n">account</code><code class="p">)</code>
+<code class="p">);</code></pre><p>To load the file, specify that the column delimiter is a colon. Also, tell <code>LOAD</code> <code>DATA</code>
+        to skip the second and sixth fields that contain the password and
+        directory. To do this, add a column list in the statement. The list
+        should include the name of each column to load into the table, and a
+        dummy user-defined variable for columns to be ignored (you can use the
+        same variable for all of them). The resulting statement looks like
+        this:</p><pre data-type="programlisting">mysql&gt; <strong><code>LOAD DATA LOCAL INFILE '/etc/passwd' INTO TABLE passwd</code></strong>
+    -&gt; <strong><code>FIELDS TERMINATED BY ':'</code></strong>
+    -&gt; <strong><code>(account,@dummy,uid,gid,gecos,@dummy,shell);</code></strong></pre><p>The corresponding <span class="command"><em>mysqlimport</em></span>
+        command includes a <code class="option">--columns</code> option:</p><pre data-type="programlisting">$ <strong><code>mysqlimport --local \</code></strong>
+    <strong><code>--columns="account,@dummy,uid,gid,gecos,@dummy,shell" \</code></strong>
+    <strong><code>--fields-terminated-by=":" cookbook /etc/passwd</code></strong></pre></div></section><section data-type="sect2" data-pdf-bookmark="See Also"><div class="sect2" id="idm45820353800752"><h2>See Also</h2><p>Another approach to ignoring columns is to preprocess the input
+      file to remove columns. Utility <span class="command"><em>yank_col.pl</em></span>, included into the recipes distribution,
+      can extract and display datafile columns in any order.</p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="13.10 Importing CSV Files"><div class="sect1" id="nch-xfer-xfer-csv"><h1>13.10 Importing CSV Files</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820353798032"><h2>Problem</h2><p>You want to load a file that is in CSV format.</p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820353797152"><h2>Solution</h2><p>Use the appropriate format specifiers with <code>LOAD</code>
+      <code>DATA</code> or <span class="command"><em>mysqlimport</em></span>.</p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820353794752"><h2>Discussion</h2><p>Datafiles in CSV format contain values that are delimited by
+      commas rather than tabs and that may be quoted with double-quote
+      characters. A CSV file <em class="filename">mytbl.txt</em>
+      containing lines that end with carriage return/linefeed pairs can be
+      loaded into <code>mytbl</code> using <code>LOAD</code> <code>DATA</code>:</p><pre data-type="programlisting">mysql&gt; <strong><code>LOAD DATA LOCAL INFILE 'mytbl.txt' INTO TABLE mytbl</code></strong>
+    -&gt; <strong><code>FIELDS TERMINATED BY ',' ENCLOSED BY '"'</code></strong>
+    -&gt; <strong><code>LINES TERMINATED BY '\r\n';</code></strong></pre><p>Or like this using <span class="command"><em>mysqlimport</em></span>:</p><pre data-type="programlisting">$ <strong><code>mysqlimport --local --lines-terminated-by="\r\n" \</code></strong>
+    <strong><code>--fields-terminated-by="," --fields-enclosed-by="\"" \</code></strong>
+    <strong><code>cookbook mytbl.txt</code></strong></pre></div></section></div></section><section data-type="sect1" data-pdf-bookmark="13.11 Exporting Query Results from MySQL"><div class="sect1" id="nch-xfer-xfer-export-query"><h1>13.11 Exporting Query Results from MySQL</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820353786304"><h2>Problem</h2><p>You want to export the result of a query from MySQL into a file or another
+      program.</p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820353785312"><h2>Solution</h2><p>Use the <code>SELECT</code> … <code>INTO</code> <code>OUTFILE</code> statement, or redirect the output of the <span class="command"><em>mysql</em></span> program.</p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820353782528"><h2>Discussion</h2><p>The <code>SELECT</code> … <code>INTO</code> <code>OUTFILE</code> statement exports a query result
+      directly into a file on the server host. To capture the result on the
+      client host instead, redirect the output of the <span class="command"><em>mysql</em></span> program. These methods have different
+      strengths and weaknesses; get to know them both and apply whichever one
+      best suits a given situation.</p><section data-type="sect3" data-pdf-bookmark="Exporting using the SELECT ... INTO OUTFILE statement"><div class="sect3" id="idm45820353779744"><h3>Exporting using the SELECT ... INTO OUTFILE statement</h3><p>The syntax for <code>SELECT ... INTO OUTFILE</code> statement combines a regular <code>SELECT</code> with <code>INTO</code> <code>OUTFILE</code>
+        <em><code>file_name</code></em>. The default output format is the
+        same as for <code>LOAD</code> <code>DATA</code>, so the following statement exports the
+        <code>passwd</code> table into <em class="filename">/tmp/passwd.txt</em> as a tab-delimited,
+        linefeed-terminated file:</p><pre data-type="programlisting">mysql&gt; <strong><code>SELECT * FROM passwd INTO OUTFILE '/tmp/passwd.txt';</code></strong></pre><p>To change the output format, use options similar to those used
+        with <code>LOAD</code> <code>DATA</code> that indicate how to quote and delimit
+        columns and records. For example, to export the <code>passwd</code> table (created earlier in <a data-type="xref" href="#nch-xfer-xfer-load-data">Recipe 13.1</a>) in CSV format with
+        CRLF-terminated lines, use this statement:</p><pre data-type="programlisting">mysql&gt; <strong><code>SELECT * FROM passwd INTO OUTFILE '/tmp/passwd.txt'</code></strong>
+    -&gt; <strong><code>FIELDS TERMINATED BY ',' ENCLOSED BY '"'</code></strong>
+    -&gt; <strong><code>LINES TERMINATED BY '\r\n';</code></strong></pre><p><code>SELECT</code> … <code>INTO</code> <code>OUTFILE</code> has these properties:</p><ul><li><p>The output file is created directly by the MySQL server, so
+            the filename should indicate where to write the file on the server
+            host. The file location is determined using the same rules as for
+            <code>LOAD</code> <code>DATA</code> without <code>LOCAL</code>, as described in <a data-type="xref" href="#nch-xfer-xfer-load-data">Recipe 13.1</a>. (There is no <code>LOCAL</code> version of the statement analogous
+            to the <code>LOCAL</code> version of
+            <code>LOAD</code> <code>DATA</code>.)</p></li><li><p>You must have the MySQL <code>FILE</code> privilege to execute the <code>SELECT</code> … <code>INTO</code> <code>OUTFILE</code> statement.</p></li><li><p>The output file must not already exist. (This prevents MySQL
+            from overwriting files that may be important.)</p></li><li><p>You should have a login account on the server host or some
+            way to access files on that host. <code>SELECT</code> … <code>INTO</code> <code>OUTFILE</code> is of no value to you if you
+            cannot retrieve the output file.</p></li><li><p>Under Unix, before MySQL 8.0.17, the file is created world readable and is owned
+            by the account used for running the MySQL server. This means that
+            although you can read the file, you may not be able to delete it
+            unless you can log in using that account. As of MySQL 8.0.17, the file is world writable.</p></li><li><p>
+              If the option <code>secure_file_priv</code> is set, you can only export into the specified directory.
+            </p></li></ul></div></section><section data-type="sect3" data-pdf-bookmark="Exporting using the mysql client program"><div class="sect3" id="idm45820353758464"><h3>Exporting using the mysql client program</h3><p>Because <code>SELECT</code> … <code>INTO</code> <code>OUTFILE</code> writes the datafile on the server host, you cannot use it
+        unless your MySQL account has the <code>FILE</code> privilege. To export data into a local
+        file owned by yourself, use another strategy. If all you require is
+        tab-delimited output, do a <q>poor-man’s export</q> by
+        executing a <code>SELECT</code> statement with
+        the <span class="command"><em>mysql</em></span> program and redirecting
+        the output to a file. That way you can write query results into a file
+        on your local host without the <code>FILE</code>
+        privilege. Here’s an example that exports the login name and command
+        interpreter columns from the <code>passwd</code>
+        table:</p><pre data-type="programlisting">$ <strong><code>mysql -e "SELECT account, shell FROM passwd" --skip-column-names \</code></strong>
+    <strong><code>cookbook &gt; shells.txt</code></strong></pre><p>The <code class="option">-e</code> option specifies the statement to execute (see <a data-type="xref" href="ch01.xhtml#nch-mysql-mysql-interactive">Recipe 1.5</a>), and
+        <code class="option">--skip-column-names</code> tells MySQL not to write the row of column names that normally
+        precedes statement output (see <a data-type="xref" href="ch01.xhtml#nch-mysql-mysql-output">Recipe 1.7</a>).
+          Operator <code>&gt;</code> instructs <span class="command"><em>mysql</em></span> to redirect output into the file. Otherwise result will be printed onto the screen.
+        </p><p>Note that MySQL writes <code>NULL</code>
+        values as the string <q>NULL</q>. Some postprocessing to
+        convert them may be needed, depending on what you want to do with the
+        output file. We discuss how to handle <code>NULL</code> values during export and import in <a data-type="xref" href="#nch-xfer-xfer-null">Recipe 13.12</a></p><p>It’s possible to produce output in formats other than
+        tab-delimited by sending the query result into a postprocessing filter
+        that converts tabs to something else. For example, to use hash marks
+        as delimiters, convert all tabs to <code>#</code> characters (<em><code>TAB</code></em>
+        indicates where you type a tab character in the command):</p><pre data-type="programlisting">$ <strong><code>mysql --skip-column-names -e "</code></strong><em><code>your statement here</code></em><strong><code>" </code></strong><em><code>db_name</code></em><strong><code> \</code></strong>
+    <strong><code>| sed -e "s/</code></strong><em><code>TAB</code></em><strong><code>/#/g" &gt; </code></strong><em><code>output_file</code></em></pre><p>You can also use <span class="command"><em>tr</em></span> for this
+        purpose, although the syntax varies for different implementations of
+        this utility. For Mac OS X or Linux, the command looks like
+        this:</p><pre data-type="programlisting">$ <strong><code>mysql --skip-column-names -e "</code></strong><em><code>your statement here</code></em><strong><code>" </code></strong><em><code>db_name</code></em><strong><code> \</code></strong>
+    <strong><code>| tr "\t" "#" &gt; </code></strong><em><code>output_file</code></em></pre><p>The <span class="command"><em>mysql</em></span> commands just shown
+        use <code class="option">--skip-column-names</code> to suppress column labels
+        from appearing in the output. Under some circumstances, it may be
+        useful to include the labels. (For example, if they will useful when
+        importing the file later.) In this
+        respect, exporting query results with <span class="command"><em>mysql</em></span> is more flexible than <code>SELECT</code> … <code>INTO</code> <code>OUTFILE</code> because the latter cannot produce
+        output that includes column labels.</p><p>Another way to export query results to a file on the client host
+      is to use the <span class="command"><em>mysql_to_text.pl</em></span>
+      utility, available in the recipes distribution. That
+      program has options that enable you to specify the output format
+      explicitly. To export a query result as an Excel spreadsheet or XML
+      document, use <span class="command"><em>mysql_to_excel.pl</em></span> and <span class="command"><em>mysql_to_xml.pl</em></span> utilities.</p></div></section></div></section></div></section><section data-type="sect1" data-pdf-bookmark="13.12 Importing and Exporting NULL Values"><div class="sect1" id="nch-xfer-xfer-null"><h1>13.12 Importing and Exporting NULL Values</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820353727504"><h2>Problem</h2><p>You need to represent <code>NULL</code> values
+      in a datafile.</p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820353726240"><h2>Solution</h2><p>Use a value not otherwise present, so that you can distinguish
+      <code>NULL</code> from all other legitimate
+      non-<code>NULL</code> values. When you import the
+      file, convert instances of that value to <code>NULL</code>.</p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820353724208"><h2>Discussion</h2><p>There’s no standard for representing <code>NULL</code> values in datafiles, which makes them
+      problematic for import and export operations. The difficulty arises from
+      the fact that <code>NULL</code> indicates the
+      <em>absence</em> of a value, and that’s not easy to
+      represent literally in a datafile. Using an empty column value is the
+      most obvious thing to do, but that’s ambiguous for string-valued columns
+      because there is no way to distinguish a <code>NULL</code> represented that way from a true empty
+      string. Empty values can be a problem for other data types as well. For
+      example, if you load an empty value with <code>LOAD</code> <code>DATA</code>
+      into a numeric column, it is stored as <code>0</code> rather than as <code>NULL</code> and thus becomes indistinguishable from a
+      true <code>0</code> in the input.</p><p>The usual solution to this problem is to represent <code>NULL</code> using a value not otherwise present in
+      the data. This is how <code>LOAD</code> <code>DATA</code> and <span class="command"><em>mysqlimport</em></span> handle the issue: they understand
+      the value of <code>\N</code> by convention to mean
+      <code>NULL</code>. (<code>\N</code> is interpreted as <code>NULL</code> only when it occurs by itself, not as
+      part of a larger value such as <code>x\N</code> or
+      <code>\Nx</code>.) For example, if you load the
+      following datafile with <code>LOAD</code> <code>DATA</code>, it treats the instances of <code>\N</code> as <code>NULL</code>:</p><pre data-type="programlisting">str1    13      1997-10-14
+str2    \N      2009-05-07
+\N      15      \N
+\N      \N     1973-07-14</pre><p>But you might want to interpret values other than <code>\N</code> as signifying <code>NULL</code>, and you might have different conventions
+      in different columns. Consider the following datafile:</p><pre data-type="programlisting">str1    13  1997-10-14
+str2    -1  2009-05-07
+Unknown 15
+Unknown -1  1973-07-15</pre><p>The first column contains strings, and <code>Unknown</code> signifies <code>NULL</code>. The second column contains integers, and
+      <code>-1</code> signifies <code>NULL</code>. The third column contains dates, and an
+      empty value signifies <code>NULL</code>. What to
+      do?</p><p>To handle situations like this, use <code>LOAD</code> <code>DATA</code>’s
+      input preprocessing capability: specify a column list that assigns input
+      values to user-defined variables and use a <code>SET</code> clause that maps the special values to true <code>NULL</code> values. If the datafile is named
+      <em class="filename">has_nulls.txt</em>, the following
+      <code>LOAD</code> <code>DATA</code> statement properly interprets its
+      contents:</p><pre data-type="programlisting">mysql&gt; <strong><code>LOAD DATA LOCAL INFILE 'has_nulls.txt'</code></strong>
+    -&gt; <strong><code>INTO TABLE t (@c1,@c2,@c3)</code></strong>
+    -&gt; <strong><code>SET c1 = IF(@c1='Unknown',NULL,@c1),</code></strong>
+    -&gt;     <strong><code>c2 = IF(@c2=-1,NULL,@c2),</code></strong>
+    -&gt;     <strong><code>c3 = IF(@c3='',NULL,@c3);</code></strong></pre><p>The resulting data after import looks like this:</p><pre data-type="programlisting">+------+------+------------+
+| c1   | c2   | c3         |
++------+------+------------+
+| str1 |   13 | 1997-10-14 |
+| str2 | NULL | 2009-05-07 |
+| NULL |   15 | NULL       |
+| NULL | NULL | 1973-07-15 |
++------+------+------------+</pre><p>The preceding discussion pertains to interpreting <code>NULL</code> values for import into MySQL, but it’s
+      also necessary to think about <code>NULL</code>
+      values when transferring data in the other direction—from MySQL into
+      other programs. Here are some examples:</p><ul><li><p><code>SELECT</code> … <code>INTO</code> <code>OUTFILE</code> writes <code>NULL</code> values as <code>\N</code>. Will another
+          program understand that convention? If not, convert <code>\N</code> to something the program understands.
+          For example, the <code>SELECT</code> statement
+          can export the column using an expression like this:</p><pre data-type="programlisting">IFNULL(<em><code>col_name</code></em>,'Unknown')</pre></li><li><p>You can use <span class="command"><em>mysql</em></span> in batch
+          mode as an easy way to produce tab-delimited output (see <a data-type="xref" href="#nch-xfer-xfer-export-query">Recipe 13.11</a>), but then <code>NULL</code> values appear in the output as
+          instances of the word <q>NULL</q>. If that word occurs
+          nowhere else in the output, you may be able to postprocess it to
+          convert instances of it to something more appropriate. For example,
+          you can use a one-line <span class="command"><em>sed</em></span>
+          command:</p><pre data-type="programlisting">$ <strong><code>sed -e "s/NULL/\\N/g" data.txt &gt; tmp</code></strong></pre><p>If the word <q>NULL</q> appears where it represents
+          something other than a <code>NULL</code>
+          value, it’s ambiguous and you should probably export your data
+          differently. For example, use <code>IFNULL()</code> to map
+          <code>NULL</code> values to something
+          else.</p></li></ul></div></section></div></section><section data-type="sect1" data-pdf-bookmark="13.13 Exporting Data in SQL Format"><div class="sect1" id="nch-xfer-xfer-export-sql"><h1>13.13 Exporting Data in SQL Format</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820353687232"><h2>Problem</h2><p>
+        You want to export data in SQL format.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820353686256"><h2>Solution</h2><p>
+        Use <span class="command"><em>mysqldump</em></span> or <span class="command"><em>mysqlpump</em></span>.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820353683584"><h2>Discussion</h2><p>
+        SQL format is widely used for exporting and importing data. It has such advantages that it could be executed inside the MySQL clients as we discuss in <a data-type="xref" href="ch01.xhtml#nch-mysql-mysql-batch">Recipe 1.6</a> and <a data-type="xref" href="#nch-xfer-xfer-import-sql">Recipe 13.14</a>. SQL files can also have special information, such as replication source position (<a data-type="xref" href="ch03.xhtml#nch-replication-replication-position-existing">Recipe 3.3</a>), default character set and other. SQL files can contain data for all tables, triggers, events and stored routines on the server, so you may use them to copy your MySQL installation.
+      </p><p>
+        Since very first versions MySQL distribution contains utility <span class="command"><em>mysqldump</em></span> that allows to export (dump) data into a SQL file. <span class="command"><em>mysqldump</em></span> is very easy to use. For example, to dump all databases run it with option <code>--all-databases</code>:
+        </p><pre data-type="programlisting">$ <strong><code>mysqldump --all-databases &gt; all-databases.sql</code></strong></pre><p>
+        To copy all tables in the database <code>cookbook</code> put its name as a <span class="command"><em>mysqldump</em></span> parameter:
+        </p><pre data-type="programlisting">$ <strong><code>mysqldump cookbook &gt; cookbook.sql</code></strong></pre><p>
+        To export just few tables in the database <code>cookbook</code> specify their names after the database name. Thus, to copy tables <code>limbs</code> and <code>patients</code> run:
+        </p><pre data-type="programlisting">$ <strong><code>mysqldump cookbook limbs patients &gt; limbs_patients.sql</code></strong></pre><p>
+        Shell command <code>&gt;</code> redirects output of the <span class="command"><em>mysqldump</em></span> into a file. You may also specify an option <code>--result-file</code> to instruct <span class="command"><em>mysqldump</em></span> to store result in the named file.
+      </p><p>
+        Resulting file will contain SQL instructions that allow to re-create a database, tables in it and then fill them with data.
+      </p><p>
+        Normally MySQL works in high concurrent environments. Therefore <span class="command"><em>mysqldump</em></span> supports the following options to ensure consistency of the resulting backup file:
+        </p><dl><dt><code>--lock-all-tables</code></dt><dd><p>
+                Locks all tables accross all databases with a read lock, preventing writes to any of the tables until the dump is finished.
+              </p></dd><dt><code>--lock-tables</code></dt><dd><p>
+                Locks all tables for each dumped database separately. This protection prevents writes only into a database being exported, but it does not guarantee consistency of the resulting dump for multiple-database backups.
+              </p></dd><dt><code>--single-transaction</code></dt><dd><p>
+                Starts a transaction before dumping. This option does not prevent any write and still guarantees consistency of the backup. This is the recommended option for backups of tables that use transactional storage engines.
+              </p></dd></dl><p>
+      </p><div data-type="tip"><h6>Tip</h6><p>
+          Since ensuring consistency may affect performance of the high concurrent writes, it is advisable to run <span class="command"><em>mysqldump</em></span> on the read-only replica.
+        </p></div><p>
+        <span class="command"><em>mysqldump</em></span> is a mature tool, but it exports data in a single thread. This maybe not so performant as we expect nowadays. Therefore since version 5.7 MySQL distribution includes one more backup tool: <span class="command"><em>mysqlpump</em></span>.
+      </p><p>
+        <span class="command"><em>mysqlpump</em></span> works similarly to <span class="command"><em>mysqldump</em></span>. You may use the same options as for <span class="command"><em>mysqldump</em></span> to export all databases, single database or just a few tables. But <span class="command"><em>mysqlpump</em></span> also supports parallel processing to speed up the dump process, progress indicator, smarter dumping of the user accounts, filters and other features that <span class="command"><em>mysqldump</em></span> lacks. 
+      </p><p>
+        Thus, to create a dump of the whole MySQL instance in four threads, protect the dump with the <code>--single-transaction</code> option and see the progress bar use command:
+        </p><pre data-type="programlisting">$ <strong><code>mysqlpump --default-parallelism=4 --single-transaction \</code></strong>
+ &gt; <strong><code>--watch-progress &gt; all-databases.sql</code></strong>
+Dump progress: 1/2 tables, 0/7 rows
+Dump progress: 142/143 tables, 2574113/4076473 rows
+Dump completed in 1837</pre><p>
+      </p><div data-type="note" epub:type="note"><h6>Note</h6><p>
+          <span class="command"><em>mysqlpump</em></span> supports option <code>--single-transaction</code>, but does not support <code>--lock-all-tables</code> and <code>--lock-tables</code>. It has option <code>--add-locks</code> instead that surrounds each dumped table with <code>LOCK TABLES</code> and <code>UNLOCK TABLES</code> statements.
+        </p></div></div></section><section data-type="sect2" data-pdf-bookmark="See Also"><div class="sect2" id="idm45820353650848"><h2>See Also</h2><p>For additional information about <span class="command"><em>mysqldump</em></span>, see <a href="https://dev.mysql.com/doc/refman/8.0/en/mysqldump.html">mysqldump — A Database Backup Program</a> and about <span class="command"><em>mysqlpump</em></span>, see <a href="https://dev.mysql.com/doc/refman/8.0/en/mysqlpump.html">mysqlpump — A Database Backup Program</a> in the MySQL User Reference Manual.</p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="13.14 Importing SQL Data"><div class="sect1" id="nch-xfer-xfer-import-sql"><h1>13.14 Importing SQL Data</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820353642192"><h2>Problem</h2><p>
+        You have a SQL dump file and want to import it.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820353641216"><h2>Solution</h2><p>
+        Process the file using <span class="command"><em>mysql</em></span> client or MySQL Shell.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820353639296"><h2>Discussion</h2><p>
+        A SQL dump is just a file with SQL commands. Therefore you can read it with <span class="command"><em>mysql</em></span> client as we discussed in <a data-type="xref" href="ch01.xhtml#nch-mysql-mysql-batch">Recipe 1.6</a>
+      </p><pre data-type="programlisting">$ <strong><code>mysql -ucbuser -p cookbook &lt; cookbook.sql</code></strong></pre><p>
+        MySQL Shell supports similar functionality in SQL mode.
+      </p><p>
+        To load dump from the command line specify option <code>--sql</code> for the <span class="command"><em>mysqlsh</em></span> client and redirect input into it.
+        </p><pre data-type="programlisting">$ <strong><code>mysqlsh cbuser:cbpass@127.0.0.1:33060/cookbook --sql &lt; all-databases.sql</code></strong></pre><p>
+      </p><p>
+        To load dump while in the interactive session switch to the SQL mode and use command <span class="command"><em>\source</em></span> or its shortcut <span class="command"><em>\.</em></span>
+        </p><pre data-type="programlisting">MySQL  cookbook  SQL &gt; <strong><code>\source cookbook.sql</code></strong></pre><p>
+      </p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="13.15 Exporting Query Results as XML"><div class="sect1" id="nch-xfer-xfer-xml-export"><h1>13.15 Exporting Query Results as XML</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820353628064"><h2>Problem</h2><p>You want to export the result of a query as an XML document.</p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820353627088"><h2>Solution</h2><p>Use the <span class="command"><em>mysql</em></span> client,or  <span class="command"><em>mysqldump</em></span> with option <code>--xml</code>.</p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820353623920"><h2>Discussion</h2><p>The <span class="command"><em>mysql</em></span> client can produce
+      XML-format output from a query result (see <a data-type="xref" href="ch01.xhtml#nch-mysql-mysql-output">Recipe 1.7</a>).</p><p>Suppose that a table named <code>expt</code>
+      contains test scores from an experiment:</p><pre data-type="programlisting">mysql&gt; <strong><code>SELECT * FROM expt;</code></strong>
++---------+------+-------+
+| subject | test | score |
++---------+------+-------+
+| Jane    | A    |    47 |
+| Jane    | B    |    50 |
+| Jane    | C    |  NULL |
+| Jane    | D    |  NULL |
+| Marvin  | A    |    52 |
+| Marvin  | B    |    45 |
+| Marvin  | C    |    53 |
+| Marvin  | D    |  NULL |
++---------+------+-------+</pre><p>
+        Run <span class="command"><em>mysql</em></span> client with optin <code>--xml</code>:
+        </p><pre data-type="programlisting">$ <strong><code>mysql --xml cookbook -e "SELECT * FROM expt;" &lt; expt.xml</code></strong></pre><p>
+      </p><p>The resulting XML document, <em class="filename">expt.xml</em>, looks like this:</p><pre data-type="programlisting" data-code-language="xml"><code class="cp">&lt;?xml version="1.0"?&gt;</code>
+
+<code class="nt">&lt;resultset</code> <code class="na">statement=</code><code class="s">"SELECT * FROM expt"</code><code class="err">↩</code>
+<code class="na">xmlns:xsi=</code><code class="s">"http://www.w3.org/2001/XMLSchema-instance"</code><code class="nt">&gt;</code>
+  <code class="nt">&lt;row&gt;</code>
+	<code class="nt">&lt;field</code> <code class="na">name=</code><code class="s">"subject"</code><code class="nt">&gt;</code>Jane<code class="nt">&lt;/field&gt;</code>
+	<code class="nt">&lt;field</code> <code class="na">name=</code><code class="s">"test"</code><code class="nt">&gt;</code>A<code class="nt">&lt;/field&gt;</code>
+	<code class="nt">&lt;field</code> <code class="na">name=</code><code class="s">"score"</code><code class="nt">&gt;</code>47<code class="nt">&lt;/field&gt;</code>
+  <code class="nt">&lt;/row&gt;</code>
+…
+  <code class="nt">&lt;row&gt;</code>
+	<code class="nt">&lt;field</code> <code class="na">name=</code><code class="s">"subject"</code><code class="nt">&gt;</code>Marvin<code class="nt">&lt;/field&gt;</code>
+	<code class="nt">&lt;field</code> <code class="na">name=</code><code class="s">"test"</code><code class="nt">&gt;</code>D<code class="nt">&lt;/field&gt;</code>
+	<code class="nt">&lt;field</code> <code class="na">name=</code><code class="s">"score"</code> <code class="na">xsi:nil=</code><code class="s">"true"</code> <code class="nt">/&gt;</code>
+  <code class="nt">&lt;/row&gt;</code>
+<code class="nt">&lt;/resultset&gt;</code></pre><p>
+      To produce similar output with <span class="command"><em>mysqldump</em></span>, run it with option <code>--xml</code>. The resulting file will contain table definition unless you specify option <code>--no-create-info</code>:
+      </p><pre data-type="programlisting">$ <strong><code>mysqldump --xml cookbook expt</code></strong>
+&lt;?xml version="1.0"?&gt;
+&lt;mysqldump &gt;
+SET @MYSQLDUMP_TEMP_LOG_BIN = @@SESSION.SQL_LOG_BIN;
+SET @@SESSION.SQL_LOG_BIN= 0;
+SET @@GLOBAL.GTID_PURGED=/*!80000 '+'*/ '910c760a-0751-11eb-9da8-0242dc638c6c:1-385,
+9113f6b1-0751-11eb-9e7d-0242dc638c6c:1-385,
+abf2d315-fb9a-11ea-9815-02421e8c78f1:1-52911';
+&lt;database name="cookbook"&gt;
+	&lt;table_structure name="expt"&gt;
+		&lt;field Field="subject" Type="varchar(10)"↩
+		    Null="YES" Key="" Extra="" Comment="" /&gt;
+		&lt;field Field="test" Type="varchar(5)"↩
+		    Null="YES" Key="" Extra="" Comment="" /&gt;
+		&lt;field Field="score" Type="int"↩
+		    Null="YES" Key="" Extra="" Comment="" /&gt;
+		&lt;options Name="expt" Engine="InnoDB" Version="10" Row_format="Dynamic"↩
+		    Rows="8" Avg_row_length="2048" Data_length="16384" Max_data_length="0"↩
+		    Index_length="0" Data_free="0" Create_time="2022-02-06 13:06:35"↩
+		    Update_time="2022-02-06 13:06:35" Collation="utf8mb4_0900_ai_ci"↩
+		    Create_options="" Comment="" /&gt;
+	&lt;/table_structure&gt;
+	&lt;table_data name="expt"&gt;
+	&lt;row&gt;
+		&lt;field name="subject"&gt;Jane&lt;/field&gt;
+		&lt;field name="test"&gt;A&lt;/field&gt;
+		&lt;field name="score"&gt;47&lt;/field&gt;
+	&lt;/row&gt;
+...
+	&lt;row&gt;
+		&lt;field name="subject"&gt;Marvin&lt;/field&gt;
+		&lt;field name="test"&gt;D&lt;/field&gt;
+		&lt;field name="score" xsi:nil="true" /&gt;
+	&lt;/row&gt;
+	&lt;/table_data&gt;
+&lt;/database&gt;
+SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;</pre><p>
+    </p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="13.16 Importing XML into MySQL"><div class="sect1" id="nch-xfer-xfer-xml-import"><h1>13.16 Importing XML into MySQL</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820353573008"><h2>Problem</h2><p>You want to import an XML document into a MySQL table.</p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820353572064"><h2>Solution</h2><p>Use <code>LOAD XML</code> statement.</p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820353570672"><h2>Discussion</h2><p>Importing an XML document depends on being able to parse the
+      document and extract record contents from it. How you do that depends on
+      how the document is written. To read XML files, created by the <span class="command"><em>mysql</em></span> client, use the <code>LOAD XML</code> statement.
+      </p><p>
+        To load file <code>expt.xml</code> that we created in <a data-type="xref" href="#nch-xfer-xfer-xml-export">Recipe 13.15</a>, run the following:
+      </p><pre data-type="programlisting" data-code-language="sql"><code class="k">LOAD</code> <code class="n">XML</code> <code class="k">LOCAL</code> <code class="n">INFILE</code> <code class="s1">'expt.xml'</code>  <code class="k">INTO</code> <code class="k">TABLE</code> <code class="n">expt</code><code class="p">;</code></pre><p>
+        <code>LOAD XML</code> statement automatically recognizes three different XML formats as shown below.
+      </p><dl><dt>Column names as attributes and column values as attribute values</dt><dd><pre data-type="programlisting" data-code-language="xml"><code class="nt">&lt;row</code> <code class="na">subject=</code><code class="s">"Jane"</code> <code class="na">test=</code><code class="s">"A"</code> <code class="na">score=</code><code class="s">47</code> <code class="nt">/&gt;</code></pre></dd><dt>Column names as tags and column values as tag values.</dt><dd><pre data-type="programlisting" data-code-language="xml"><code class="nt">&lt;row&gt;</code>
+        <code class="nt">&lt;subject&gt;</code>Jane<code class="nt">&lt;/subject&gt;</code>
+        <code class="nt">&lt;test&gt;</code>B<code class="nt">&lt;/test&gt;</code>
+        <code class="nt">&lt;score&gt;</code>50<code class="nt">&lt;/score&gt;</code>
+  <code class="nt">&lt;/row&gt;</code></pre></dd><dt>Column names as values of the attribute <code>name</code> of the tag <code>field</code>, and column values as their values.</dt><dd><pre data-type="programlisting" data-code-language="xml"><code class="nt">&lt;row&gt;</code>
+        <code class="nt">&lt;field</code> <code class="na">name=</code><code class="s">"subject"</code><code class="nt">&gt;</code>Jane<code class="nt">&lt;/field&gt;</code>
+        <code class="nt">&lt;field</code> <code class="na">name=</code><code class="s">"test"</code><code class="nt">&gt;</code>C<code class="nt">&lt;/field&gt;</code>
+        <code class="nt">&lt;field</code> <code class="na">name=</code><code class="s">"score"</code> <code class="na">xsi:nil=</code><code class="s">"true"</code> <code class="nt">/&gt;</code>
+  <code class="nt">&lt;/row&gt;</code></pre><p>
+              This is the same format that <span class="command"><em>mysql</em></span>, <span class="command"><em>mysqldump</em></span>, and other MySQL utilities use.
+            </p></dd></dl><p>
+        If your XML file uses different tag name, specify it with clause <code>ROWS IDENTIFIED BY</code>. For example, if rows for the table <code>expt</code> are defined as follow:
+      </p><pre data-type="programlisting" data-code-language="xml"><code class="nt">&lt;test&gt;</code>
+    <code class="nt">&lt;field</code> <code class="na">name=</code><code class="s">"subject"</code><code class="nt">&gt;</code>Jane<code class="nt">&lt;/field&gt;</code>
+    <code class="nt">&lt;field</code> <code class="na">name=</code><code class="s">"test"</code><code class="nt">&gt;</code>D<code class="nt">&lt;/field&gt;</code>
+    <code class="nt">&lt;field</code> <code class="na">name=</code><code class="s">"score"</code> <code class="na">xsi:nil=</code><code class="s">"true"</code> <code class="nt">/&gt;</code>
+  <code class="nt">&lt;/test&gt;</code></pre><p>
+        Load them with the statement:
+      </p><pre data-type="programlisting" data-code-language="sql"><code class="k">LOAD</code> <code class="n">XML</code> <code class="k">LOCAL</code> <code class="n">INFILE</code> <code class="s1">'expt.xml'</code>  <code class="k">INTO</code> <code class="k">TABLE</code> <code class="n">expt</code> <code class="k">ROWS</code> <code class="n">IDENTIFIED</code> <code class="k">BY</code> <code class="s1">'&lt;test&gt;'</code><code class="p">;</code></pre></div></section></div></section><section data-type="sect1" data-pdf-bookmark="13.17 Importing Data in JSON Format"><div class="sect1" id="nch-xfer-xfer-importjson"><h1>13.17 Importing Data in JSON Format</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820353315616"><h2>Problem</h2><p>
+        You have a JSON file and want to import it into MySQL database.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820353314736"><h2>Solution</h2><p>
+        Use MySQL Shell utility <span class="command"><em>importJson</em></span>.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820353313040"><h2>Discussion</h2><p>
+        JSON is a popular format for storing data. You can have it prepared by an application or want to import data from MongoDB.
+      </p><p>
+        Utility <span class="command"><em>importJson</em></span> takes path to the JSON file and dictionary of options as arguments. You can either import JSON into a collection or into a table. In the latter case you need to specify <code>tableColumn</code> where to store the document unless default value <code>doc</code> works for you.
+      </p><p>
+        The document should contain list of JSON objects, separated by a new line. This list should not be a member of JSON array or another object.
+        </p><pre data-type="programlisting" data-code-language="json"><code class="p">{</code><code class="nt">"arms"</code><code class="p">:</code><code class="w"> </code><code class="mi">2</code><code class="p">,</code><code class="w"> </code><code class="nt">"legs"</code><code class="p">:</code><code class="w"> </code><code class="mi">2</code><code class="p">,</code><code class="w"> </code><code class="nt">"thing"</code><code class="p">:</code><code class="w"> </code><code class="s2">"human"</code><code class="w"> </code><code class="p">}</code><code class="w"> </code>
+<code class="p">{</code><code class="nt">"arms"</code><code class="p">:</code><code class="w"> </code><code class="mi">0</code><code class="p">,</code><code class="w"> </code><code class="nt">"legs"</code><code class="p">:</code><code class="w"> </code><code class="mi">6</code><code class="p">,</code><code class="w"> </code><code class="nt">"thing"</code><code class="p">:</code><code class="w"> </code><code class="s2">"insect"</code><code class="w"> </code><code class="p">}</code><code class="w"> </code>
+<code class="p">{</code><code class="nt">"arms"</code><code class="p">:</code><code class="w"> </code><code class="mi">10</code><code class="p">,</code><code class="w"> </code><code class="nt">"legs"</code><code class="p">:</code><code class="w"> </code><code class="mi">0</code><code class="p">,</code><code class="w"> </code><code class="nt">"thing"</code><code class="p">:</code><code class="w"> </code><code class="s2">"squid"</code><code class="w"> </code><code class="p">}</code><code class="w"> </code>
+<code class="p">{</code><code class="nt">"arms"</code><code class="p">:</code><code class="w"> </code><code class="mi">0</code><code class="p">,</code><code class="w"> </code><code class="nt">"legs"</code><code class="p">:</code><code class="w"> </code><code class="mi">0</code><code class="p">,</code><code class="w"> </code><code class="nt">"thing"</code><code class="p">:</code><code class="w"> </code><code class="s2">"fish"</code><code class="w"> </code><code class="p">}</code><code class="w"> </code>
+<code class="p">{</code><code class="nt">"arms"</code><code class="p">:</code><code class="w"> </code><code class="mi">0</code><code class="p">,</code><code class="w"> </code><code class="nt">"legs"</code><code class="p">:</code><code class="w"> </code><code class="mi">99</code><code class="p">,</code><code class="w"> </code><code class="nt">"thing"</code><code class="p">:</code><code class="w"> </code><code class="s2">"centipede"</code><code class="w"> </code><code class="p">}</code><code class="w"> </code>
+<code class="p">{</code><code class="nt">"arms"</code><code class="p">:</code><code class="w"> </code><code class="mi">0</code><code class="p">,</code><code class="w"> </code><code class="nt">"legs"</code><code class="p">:</code><code class="w"> </code><code class="mi">4</code><code class="p">,</code><code class="w"> </code><code class="nt">"thing"</code><code class="p">:</code><code class="w"> </code><code class="s2">"table"</code><code class="w"> </code><code class="p">}</code><code class="w"> </code>
+<code class="p">{</code><code class="nt">"arms"</code><code class="p">:</code><code class="w"> </code><code class="mi">2</code><code class="p">,</code><code class="w"> </code><code class="nt">"legs"</code><code class="p">:</code><code class="w"> </code><code class="mi">4</code><code class="p">,</code><code class="w"> </code><code class="nt">"thing"</code><code class="p">:</code><code class="w"> </code><code class="s2">"armchair"</code><code class="w"> </code><code class="p">}</code><code class="w"> </code>
+<code class="p">{</code><code class="nt">"arms"</code><code class="p">:</code><code class="w"> </code><code class="mi">1</code><code class="p">,</code><code class="w"> </code><code class="nt">"legs"</code><code class="p">:</code><code class="w"> </code><code class="mi">0</code><code class="p">,</code><code class="w"> </code><code class="nt">"thing"</code><code class="p">:</code><code class="w"> </code><code class="s2">"phonograph"</code><code class="w"> </code><code class="p">}</code><code class="w"> </code>
+<code class="p">{</code><code class="nt">"arms"</code><code class="p">:</code><code class="w"> </code><code class="mi">0</code><code class="p">,</code><code class="w"> </code><code class="nt">"legs"</code><code class="p">:</code><code class="w"> </code><code class="mi">3</code><code class="p">,</code><code class="w"> </code><code class="nt">"thing"</code><code class="p">:</code><code class="w"> </code><code class="s2">"tripod"</code><code class="w"> </code><code class="p">}</code><code class="w"> </code>
+<code class="p">{</code><code class="nt">"arms"</code><code class="p">:</code><code class="w"> </code><code class="mi">2</code><code class="p">,</code><code class="w"> </code><code class="nt">"legs"</code><code class="p">:</code><code class="w"> </code><code class="mi">1</code><code class="p">,</code><code class="w"> </code><code class="nt">"thing"</code><code class="p">:</code><code class="w"> </code><code class="s2">"Peg Leg Pete"</code><code class="w"> </code><code class="p">}</code><code class="w"> </code>
+<code class="p">{</code><code class="nt">"arms"</code><code class="p">:</code><code class="w"> </code><code class="kc">null</code><code class="p">,</code><code class="w"> </code><code class="nt">"legs"</code><code class="p">:</code><code class="w"> </code><code class="kc">null</code><code class="p">,</code><code class="w"> </code><code class="nt">"thing"</code><code class="p">:</code><code class="w"> </code><code class="s2">"space alien"</code><code class="w"> </code><code class="p">}</code><code class="w"/></pre><p>
+        You will find JSON dump of the collection <code>CollectionLimbs</code> in the file <em class="filename">collections/limbs.json</em> of the <code>recipes</code> distribution.
+      </p><p>
+        To insert data from the JSON file into collection <code>CollectionLimbs</code> run following code.
+        </p><pre data-type="programlisting" data-code-language="js"> MySQL  cookbook  JS &gt; <strong><code>options = {</code></strong><a class="co" id="co_nch-xfer-xfer-importjson-options_co" href="#callout_nch-xfer-xfer-importjson-options_co"><img src="Images/1.png" alt="1" width="12" height="12"/></a>
+                    -&gt;   <strong><code>schema: "cookbook",</code></strong>
+                    -&gt;   <strong><code>collection: "CollectionLimbs"</code></strong>
+                    -&gt; <strong><code>}</code></strong>
+                    -&gt; 
+{
+    "collection": "CollectionLimbs", 
+    "schema": "cookbook"
+}
+ MySQL  cookbook  JS &gt; <strong><code>util.importJson("limbs.json", options)</code></strong><a class="co" id="co_nch-xfer-xfer-importjson-importJson_co" href="#callout_nch-xfer-xfer-importjson-importJson_co"><img src="Images/2.png" alt="2" width="12" height="12"/></a>
+Importing from file "limbscol.json" to collection `cookbook`.`CollectionLimbs` ↩
+in MySQL Server at 127.0.0.1:33060
+
+.. 11.. 11
+Processed 1.42 KB in 11 documents in 0.0070 sec (11.00 documents/s)
+Total successfully imported documents 11 (11.00 documents/s)</pre><p>
+        
+        </p><dl class="calloutlist"><dt><a class="co" id="callout_nch-xfer-xfer-importjson-options_co" href="#co_nch-xfer-xfer-importjson-options_co"><img src="Images/1.png" alt="1" width="12" height="12"/></a></dt><dd><p>First, create a dictionary object with options. At the minimum, you need to specify collection name and the schema.</p></dd><dt><a class="co" id="callout_nch-xfer-xfer-importjson-importJson_co" href="#co_nch-xfer-xfer-importjson-importJson_co"><img src="Images/2.png" alt="2" width="12" height="12"/></a></dt><dd><p>Then call <span class="command"><em>util.importJson</em></span> with path to the JSON file and options dictionary as arguments.</p></dd></dl><p>
+      </p><p>
+        You can also call utility <span class="command"><em>importJson</em></span> from the command line without entering interactive MySQL Shell session. To do it use option <code>--import</code> of the command <span class="command"><em>mysqlsh</em></span> and specify path to the JSON file and target collection as parameters.
+        </p><pre data-type="programlisting" data-code-language="bash">$ <strong><code>mysqlsh cbuser:cbpass@127.0.0.1:33060/cookbook \</code></strong>
+&gt; <strong><code>--import limbs.json CollectionLimbs</code></strong>
+WARNING: Using a password on the command line interface can be insecure.
+Importing from file "limbs.json" to collection `cookbook`.`CollectionLimbs` ↩
+in MySQL Server at 127.0.0.1:33060
+
+.. 11.. 11
+Processed 506 bytes in 11 documents in 0.0067 sec (11.00 documents/s)
+Total successfully imported documents 11 (11.00 documents/s)</pre><p>
+      </p><div data-type="tip"><h6>Tip</h6><p>
+          If no collection or a table with the specific name exists in the database, utility <span class="command"><em>importJson</em></span> will create it for you.
+        </p></div></div></section></div></section><section data-type="sect1" data-pdf-bookmark="13.18 Importing data from MongoDB"><div class="sect1" id="nch-xfer-xfer-importjson-bson"><h1>13.18 Importing data from MongoDB</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820353012624"><h2>Problem</h2><p>
+            You want to import data from a MongoDB collection.
+          </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820352988288"><h2>Solution</h2><p>
+            Export the collection from MongoDB into a file with help of the utility <span class="command"><em>mongoexport</em></span> and use <span class="command"><em>importJson</em></span> with option <code>"convertBsonTypes": true</code> to import the collection into MySQL.
+          </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820352985248"><h2>Solution</h2><p>
+          <span class="command"><em>importJson</em></span> can import documents, exported from MongoDB with the help of the utility <span class="command"><em>mongoexport</em></span>. Additionally, it can convert BSON data types into MySQL format. To explore this feature put <code>"convertBsonTypes": true</code> into the options dictionary and perform import.
+          </p><pre data-type="programlisting" data-code-language="js"> MySQL  cookbook  JS &gt; <strong><code>options = {</code></strong>
+                    -&gt;   <strong><code>"schema": "cookbook",</code></strong>
+                    -&gt;   <strong><code>"collection": "blogs",</code></strong>
+                    -&gt;   <strong><code>"convertBsonTypes": true</code></strong>
+                    -&gt; <strong><code>}</code></strong>
+                    -&gt; 
+{
+    "collection": "blogs", 
+    "convertBsonTypes": true, 
+    "schema": "cookbook"
+}
+ MySQL  cookbook  JS &gt; <strong><code>util.importJson("blogs.json", options)</code></strong>
+Importing from file "blogs.json" to collection `cookbook`.`blogs` ↩
+in MySQL Server at 127.0.0.1:33060
+
+.. 2.. 2
+Processed 240 bytes in 2 documents in 0.0070 sec (2.00 documents/s)
+Total successfully imported documents 2 (2.00 documents/s)</pre><p>
+        </p><p>
+          The resulting collection <code>blogs</code> uses data in MySQL format. We can check it if select all documents from the collection using MySQL Shell.
+          </p><pre data-type="programlisting" data-code-language="js"> MySQL  cookbook  JS &gt; <strong><code>shell.getSession().</code></strong>
+                    -&gt; <strong><code>getSchema('cookbook').</code></strong>
+                    -&gt; <strong><code>getCollection('blogs').</code></strong>
+                    -&gt; <strong><code>find()</code></strong>
+                    -&gt;
+{
+    "_id": "6029abb942e2e9c45760eabc", <a class="co" id="co_ch-xfer-xfer-importjson-bson_oid_co" href="#callout_ch-xfer-xfer-importjson-bson_oid_co"><img src="Images/1.png" alt="1" width="12" height="12"/></a>
+    "author": "Ann Smith",
+    "comment": "That's Awesome!",
+    "date_created": "2021-02-13T23:01:13.154Z" <a class="co" id="co_ch-xfer-xfer-importjson-bson_date_co" href="#callout_ch-xfer-xfer-importjson-bson_date_co"><img src="Images/2.png" alt="2" width="12" height="12"/></a>
+}
+{
+    "_id": "6029abd842e2e9c45760eabd",
+    "author": "John Doe",
+    "comment": "Love it!",
+    "date_created": "2021-02-14T11:20:03Z"
+}
+2 documents in set (0.0006 sec)</pre><p>
+          
+          </p><dl class="calloutlist"><dt><a class="co" id="callout_ch-xfer-xfer-importjson-bson_oid_co" href="#co_ch-xfer-xfer-importjson-bson_oid_co"><img src="Images/1.png" alt="1" width="12" height="12"/></a></dt><dd><p>BSON OID value <code>"_id":{"$oid":"6029abb942e2e9c45760eabc"}</code> converted to MySQL ID format.</p></dd><dt><a class="co" id="callout_ch-xfer-xfer-importjson-bson_date_co" href="#co_ch-xfer-xfer-importjson-bson_date_co"><img src="Images/2.png" alt="2" width="12" height="12"/></a></dt><dd><p>BSON Date value <code>"date_created":{"$date":"2021-02-13T23:01:13.154Z"}</code> converted to MySQL Date format.</p></dd></dl><p>
+        </p><p>
+          You will find JSON dump of the collection <code>blogs</code> in the file <em class="filename">collections/blogs.json</em> of the <code>recipes</code> distribution.
+        </p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="13.19 Exporting Data in JSON Format"><div class="sect1" id="nch-xfer-xfer-exportjson"><h1>13.19 Exporting Data in JSON Format</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820352959968"><h2>Problem</h2><p>
+        You want to export MySQL collection into a JSON file.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820352958992"><h2>Solution</h2><p>
+        Use MySQL Shell to retrieve result in the JSON format. Redirect output into a file if needed.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820352957920"><h2>Discussion</h2><p>
+        MySQL Shell allows you to retrieve data in JSON format. The following code snippet dumps collection <code>CollectionLimbs</code> and redirects result into a file:
+        </p><pre data-type="programlisting" data-code-language="bash">$ <strong><code>mysqlsh cbuser:cbpass@127.0.0.1:33060/cookbook \</code></strong>
+&gt; <strong><code>-e "limbs=shell.getSession().getSchema('cookbook').</code></strong>
+&gt; <strong><code>getCollection('CollectionLimbs').</code></strong> <a class="co" id="co_nch-xfer-xfer-exportjson-select_co" href="#callout_nch-xfer-xfer-exportjson-select_co"><img src="Images/1.png" alt="1" width="12" height="12"/></a>
+&gt; <strong><code>find().execute().fetchAll();</code></strong> <a class="co" id="co_nch-xfer-xfer-exportjson-fetch_co" href="#callout_nch-xfer-xfer-exportjson-fetch_co"><img src="Images/2.png" alt="2" width="12" height="12"/></a>
+&gt; <strong><code>println(limbs);" &gt; limbs.json</code></strong> <a class="co" id="co_nch-xfer-xfer-exportjson-print_co" href="#callout_nch-xfer-xfer-exportjson-print_co"><img src="Images/3.png" alt="3" width="12" height="12"/></a></pre><p>
+        </p><dl class="calloutlist"><dt><a class="co" id="callout_nch-xfer-xfer-exportjson-select_co" href="#co_nch-xfer-xfer-exportjson-select_co"><img src="Images/1.png" alt="1" width="12" height="12"/></a></dt><dd><p>Select the collection.</p></dd><dt><a class="co" id="callout_nch-xfer-xfer-exportjson-fetch_co" href="#co_nch-xfer-xfer-exportjson-fetch_co"><img src="Images/2.png" alt="2" width="12" height="12"/></a></dt><dd><p>Fetch all rows from the collection.</p></dd><dt><a class="co" id="callout_nch-xfer-xfer-exportjson-print_co" href="#co_nch-xfer-xfer-exportjson-print_co"><img src="Images/3.png" alt="3" width="12" height="12"/></a></dt><dd><p>Print the result and redirect command output into a file.</p></dd></dl><p>
+      </p><p>
+        Resulting file will contain array of JSON documents. This is not the same format that MySQL Shell utility <span class="command"><em>importJson</em></span> can use. If you want to import the data back into MySQL modify resulting file. You can do it with help of the utility <span class="command"><em>jq</em></span>.
+        </p><pre data-type="programlisting" data-code-language="bash">$ <strong><code>jq '.[]' limbs.json &gt; limbs_fixed.json</code></strong></pre><p>
+        <span class="command"><em>jq</em></span> reads file <code>limbs.json</code> and prints each its array element into standard output. Then we redirect result into a file <code>limbs_fixed.json</code>.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="See Also"><div class="sect2" id="idm45820352934064"><h2>See Also</h2><p>For additional information about utility <span class="command"><em>jq</em></span>,
+      see the <a href="https://stedolan.github.io/jq/manual/">jq Manual</a>.</p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="13.20 Guessing Table Structure from a Datafile"><div class="sect1" id="nch-xfer-xfer-guess"><h1>13.20 Guessing Table Structure from a Datafile</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820352930496"><h2>Problem</h2><p>Someone gives you a datafile and says, <q>Here, put this into MySQL
+      for me.</q> But no table yet exists to hold the data. You need to create a table that will hold data from the file.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820352928928"><h2>Solution</h2><p>Use a utility that guesses the table structure by examining the
+      datafile contents.</p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820352927904"><h2>Discussion</h2><p>Sometimes you must import data into MySQL for which no table has
+      yet been set up. You can create the table yourself, based on any
+      knowledge you have about the contents of the file. Or you might be able
+      to avoid some of the work by using <span class="command"><em>guess_table.pl</em></span>, a utility located in the
+      <em class="filename">transfer</em> directory of the <code>recipes</code> distribution. <span class="command"><em>guess_table.pl</em></span> reads the datafile to see what
+      kind of information it contains, then attempts to produce an appropriate
+      <code>CREATE</code> <code>TABLE</code> statement that matches the contents of
+      the file. This script is necessarily imperfect because column contents
+      sometimes are ambiguous. (For example, a column containing a small
+      number of distinct strings might be a <code>VARCHAR</code> column or an <code>ENUM</code>.) Still, it may be easier to tweak the
+      <code>CREATE</code> <code>TABLE</code> statement that <span class="command"><em>guess_table.pl</em></span> produces than to write the
+      statement from scratch. This utility also has diagnostic value, although
+      that’s not its primary purpose. For example, if you believe a column
+      contains only numbers, but <span class="command"><em>guess_table.pl</em></span> indicates that it should be a
+      <code>VARCHAR</code> column, that tells you the
+      column contains at least one nonnumeric value.</p><p><span class="command"><em>guess_table.pl</em></span> assumes that its
+      input is in tab-delimited, linefeed-terminated format. It also assumes
+      valid input because any attempt to guess data types based on possibly
+      flawed data is doomed to failure. This means, for example, that if a
+      date column is to be recognized as such, it should be in ISO format.
+      Otherwise, <span class="command"><em>guess_table.pl</em></span> may
+      characterize it as a <code>VARCHAR</code> column.
+      If a datafile doesn’t satisfy these assumptions, you may be able to
+      reformat it first using the <span class="command"><em>cvt_file.pl</em></span> and <span class="command"><em>cvt_date.pl</em></span> utilities, available in the recipes distribution.</p><p><span class="command"><em>guess_table.pl</em></span> understands the
+      following options:</p><dl><dt><code class="option">--labels</code></dt><dd><p>Interpret the first input line as a row of column labels and use
+            them for table column names. Without this option, <span class="command"><em>guess_table.pl</em></span> uses default column names
+            of <code>c1</code>, <code>c2</code>, and so forth.</p><p>If the file contains a row of labels and you omit this
+            option, <span class="command"><em>guess_table.pl</em></span> treats
+            the labels as data values. The likely result is that the script
+            will characterize <em>all</em> columns as <code>VARCHAR</code> columns (even those that
+            otherwise contain only numeric or temporal values), due to the
+            presence of a nonnumeric or nontemporal value in the
+            column.</p></dd><dt><code class="option">--lower</code>, <code class="option">--upper</code></dt><dd><p>Force column names in the <code>CREATE</code> <code>TABLE</code> statement to be lowercase or
+            uppercase.</p></dd><dt><code class="option">--quote-names</code>,
+          <code class="option">--skip-quote-names</code></dt><dd><p>Quote or do not quote table and column identifiers in the <code>CREATE</code> <code>TABLE</code> statement with <code>`</code> characters (for example, <code>`mytbl`</code>). This can be useful if an
+            identifier is a reserved word. The default is to quote
+            identifiers.</p></dd><dt><code class="option">--report</code></dt><dd><p>Generate a report rather than a <code>CREATE</code> <code>TABLE</code> statement. The script displays the
+            information that it gathers about each column.</p></dd><dt><code class="option">--table</code><code>=</code><em><code>tbl_name</code></em></dt><dd><p>Specify the table name to use in the <code>CREATE</code> <code>TABLE</code> statement. The default name is
+            <code>t</code>.</p></dd></dl><p>Here’s an example of how <span class="command"><em>guess_table.pl</em></span> works. Suppose that a file
+      named <em class="filename">commodities.csv</em> is in CSV
+      format and has the following contents:</p><pre data-type="programlisting">commodity,trade_date,shares,price,change
+sugar,12-14-2014,1000000,10.50,-.125
+oil,12-14-2014,96000,60.25,.25
+wheat,12-14-2014,2500000,8.75,0
+gold,12-14-2014,13000,103.25,2.25
+sugar,12-15-2014,970000,10.60,.1
+oil,12-15-2014,105000,60.5,.25
+wheat,12-15-2014,2370000,8.65,-.1
+gold,12-15-2014,11000,101,-2.25</pre><p>The first row indicates the column labels, and the following rows
+      contain data records, one per line. The values in the <code>trade_date</code> column are dates, but they are in
+      <em><code>MM-DD-YYYY</code></em> format rather than the ISO format
+      that MySQL expects. <span class="command"><em>cvt_date.pl</em></span> can
+      convert these dates to ISO format. However, both <span class="command"><em>cvt_date.pl</em></span> and <span class="command"><em>guess_table.pl</em></span> require input in tab-delimited,
+      linefeed-terminated format, so first use <span class="command"><em>cvt_file.pl</em></span> to convert the input to
+      tab-delimited, linefeed-terminated format, and <span class="command"><em>cvt_date.pl</em></span> to convert the dates:</p><pre data-type="programlisting">$ <strong><code>cvt_file.pl --iformat=csv commodities.csv &gt; tmp1.txt</code></strong>
+$ <strong><code>cvt_date.pl --iformat=us tmp1.txt &gt; tmp2.txt</code></strong></pre><p>Feed the resulting file, <em class="filename">tmp2.txt</em>, to <span class="command"><em>guess_table.pl</em></span>:</p><pre data-type="programlisting">$ <strong><code>guess_table.pl --labels --table=commodities tmp2.txt &gt; commodities.sql</code></strong></pre><p>The <code>CREATE</code> <code>TABLE</code> statement that <span class="command"><em>guess_table.pl</em></span> writes to <em class="filename">commodities.sql</em> looks like this:</p><pre data-type="programlisting" data-code-language="sql"><code class="k">CREATE</code> <code class="k">TABLE</code> <code class="o">`</code><code class="n">commodities</code><code class="o">`</code>
+<code class="p">(</code>
+  <code class="o">`</code><code class="n">commodity</code><code class="o">`</code> <code class="nb">VARCHAR</code><code class="p">(</code><code class="mi">5</code><code class="p">)</code> <code class="k">NOT</code> <code class="k">NULL</code><code class="p">,</code>
+  <code class="o">`</code><code class="n">trade_date</code><code class="o">`</code> <code class="nb">DATE</code> <code class="k">NOT</code> <code class="k">NULL</code><code class="p">,</code>
+  <code class="o">`</code><code class="n">shares</code><code class="o">`</code> <code class="nb">BIGINT</code> <code class="n">UNSIGNED</code> <code class="k">NOT</code> <code class="k">NULL</code><code class="p">,</code>
+  <code class="o">`</code><code class="n">price</code><code class="o">`</code> <code class="n">DOUBLE</code> <code class="n">UNSIGNED</code> <code class="k">NOT</code> <code class="k">NULL</code><code class="p">,</code>
+  <code class="o">`</code><code class="n">change</code><code class="o">`</code> <code class="n">DOUBLE</code> <code class="k">NOT</code> <code class="k">NULL</code>
+<code class="p">);</code></pre><p><span class="command"><em>guess_table.pl</em></span> produces that
+      statement based on heuristics such as these:</p><ul><li><p>A column that contains only numeric values is assumed to be a
+          <code>BIGINT</code> if no values contain a
+          decimal point, and <code>DOUBLE</code>
+          otherwise.</p></li><li><p>A numeric column that contains no negative values is likely to
+          be <code>UNSIGNED</code>.</p></li><li><p>If a column contains no empty values, <span class="command"><em>guess_table.pl</em></span> assumes that it’s probably
+          <code>NOT</code> <code>NULL</code>.</p></li><li><p>Columns that cannot be classified as numbers or dates are
+          taken to be <code>VARCHAR</code> columns, with
+          a length equal to the longest value present in the column.</p></li></ul><p>You might want to edit the <code>CREATE</code> <code>TABLE</code> statement that <span class="command"><em>guess_table.pl</em></span> produces, to make modifications
+      such as using smaller integer types, increasing the size of character
+      fields, changing <code>VARCHAR</code> to <code>CHAR</code>, adding indexes, or changing a column
+      name that is a reserved word in MySQL.</p><p>To create the table, use the statement produced by <span class="command"><em>guess_table.pl</em></span>:</p><pre data-type="programlisting">$ <strong><code>mysql cookbook &lt; commodities.sql</code></strong></pre><p>Then load the datafile into the table (skipping the initial row of
+      labels):</p><pre data-type="programlisting">mysql&gt; <strong><code>LOAD DATA LOCAL INFILE 'tmp2.txt' INTO TABLE commodities</code></strong>
+    -&gt; <strong><code>IGNORE 1 LINES;</code></strong></pre><p>The resulting table contents after import look like this:</p><pre data-type="programlisting">mysql&gt; <strong><code>SELECT * FROM commodities;</code></strong>
++-----------+------------+---------+--------+--------+
+| commodity | trade_date | shares  | price  | change |
++-----------+------------+---------+--------+--------+
+| sugar     | 2014-12-14 | 1000000 |   10.5 | -0.125 |
+| oil       | 2014-12-14 |   96000 |  60.25 |   0.25 |
+| wheat     | 2014-12-14 | 2500000 |   8.75 |      0 |
+| gold      | 2014-12-14 |   13000 | 103.25 |   2.25 |
+| sugar     | 2014-12-15 |  970000 |   10.6 |    0.1 |
+| oil       | 2014-12-15 |  105000 |   60.5 |   0.25 |
+| wheat     | 2014-12-15 | 2370000 |   8.65 |   -0.1 |
+| gold      | 2014-12-15 |   11000 |    101 |  -2.25 |
++-----------+------------+---------+--------+--------+</pre></div></section></div></section></div></section></div></body></html>

@@ -1,0 +1,2858 @@
+<html><head></head><body><div id="sbo-rt-content"><section data-type="chapter" epub:type="chapter" data-pdf-bookmark="Chapter 2. Linux Networking"><div class="chapter" id="linux_networking">
+<h1><span class="label">Chapter 2. </span>Linux Networking</h1>
+
+
+<p>To understand the implementation of networking in Kubernetes, we will need to understand the fundamentals
+of <a data-type="indexterm" data-primary="Linux networking" data-secondary="overview of" id="ch1_term1"/>networking in Linux. Ultimately, Kubernetes is a complex management tool for Linux (or Windows!) machines, and
+this is hard to ignore while working with the Kubernetes network stack. This chapter will provide an overview of the
+Linux networking stack, with a focus on areas of note in Kubernetes. If you are highly familiar with Linux networking
+and network management, you may want to skim or skip this chapter.</p>
+<div data-type="tip"><h6>Tip</h6>
+<p>This chapter <a data-type="indexterm" data-primary="Linux networking" data-secondary="man (manual) resources on" id="idm46219944507064"/>introduces many Linux programs.
+Manual, or <em>man</em>, pages, accessible with <code>man &lt;program&gt;</code>,
+will provide more detail.</p>
+</div>
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Basics"><div class="sect1" id="idm46219944504792">
+<h1>Basics</h1>
+
+<p>Let’s revisit our <a data-type="indexterm" data-primary="client requests" data-secondary="with HTTP" data-secondary-sortas="HTTP" id="idm46219944502808"/><a data-type="indexterm" data-primary="Golang (Go) web server" data-secondary="with Linux networking" data-secondary-sortas="Linux networking" id="idm46219944501528"/><a data-type="indexterm" data-primary="HTTP" data-secondary="examples of requests with" id="idm46219944500312"/><a data-type="indexterm" data-primary="server responses" data-secondary="to HTTP requests" data-secondary-sortas="HTTP requests" id="idm46219944499304"/>Go web server,
+which we used in <a data-type="xref" href="ch01.xhtml#networking_introduction">Chapter 1</a>.
+This web server listens on port 8080
+and returns “Hello” for HTTP requests to / (see <a data-type="xref" href="#EX1_Ch02">Example 2-1</a>).</p>
+<div id="EX1_Ch02" data-type="example">
+<h5><span class="label">Example 2-1. </span>Minimal web server in Go</h5>
+
+<pre data-type="programlisting" data-code-language="go"><code class="kn">package</code> <code class="nx">main</code>
+
+<code class="kn">import</code> <code class="p">(</code>
+	<code class="s">"fmt"</code>
+	<code class="s">"net/http"</code>
+<code class="p">)</code>
+
+<code class="kd">func</code> <code class="nx">hello</code><code class="p">(</code><code class="nx">w</code> <code class="nx">http</code><code class="p">.</code><code class="nx">ResponseWriter</code><code class="p">,</code> <code class="nx">_</code> <code class="o">*</code><code class="nx">http</code><code class="p">.</code><code class="nx">Request</code><code class="p">)</code> <code class="p">{</code>
+	<code class="nx">fmt</code><code class="p">.</code><code class="nx">Fprintf</code><code class="p">(</code><code class="nx">w</code><code class="p">,</code> <code class="s">"Hello"</code><code class="p">)</code>
+<code class="p">}</code>
+
+<code class="kd">func</code> <code class="nx">main</code><code class="p">()</code> <code class="p">{</code>
+	<code class="nx">http</code><code class="p">.</code><code class="nx">HandleFunc</code><code class="p">(</code><code class="s">"/"</code><code class="p">,</code> <code class="nx">hello</code><code class="p">)</code>
+	<code class="nx">http</code><code class="p">.</code><code class="nx">ListenAndServe</code><code class="p">(</code><code class="s">"0.0.0.0:8080"</code><code class="p">,</code> <code class="kc">nil</code><code class="p">)</code>
+<code class="p">}</code></pre></div>
+<div data-type="warning" epub:type="warning"><h6>Warning</h6>
+<p>Ports 1–1023 (also known as <em>well-known ports</em>) require <a data-type="indexterm" data-primary="ports" data-secondary="privileged versus nonprivileged" id="idm46219944440808"/><a data-type="indexterm" data-primary="privileged ports" id="idm46219944439928"/>root permission to bind to.</p>
+
+<p>Programs should always be given the least permissions necessary to function, which means that a typical web service should not be run as the root user. Because of this, many programs will listen on port 1024 or higher (in particular, port 8080 is a common choice for HTTP services). When possible, listen on a nonprivileged port,
+and use infrastructure redirects (load balancer forwarding, Kubernetes services, etc.) to forward an externally visible privileged port to a program listening on a nonprivileged port.</p>
+
+<p>This way, an attacker exploiting a possible vulnerability in your service will not have
+overly broad permissions available to them.</p>
+</div>
+
+<p>Suppose this program is running on a Linux server machine
+and an external client makes a request to <code>/</code>.
+What happens on the server?
+To start off,
+our program needs to listen to an address and port.
+Our program creates a socket for that address and port and binds to it.
+The socket will receive requests addressed to both the specified address and port -
+<code>8080</code> with any IP address in our case.</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p><code>0.0.0.0</code> in IPv4 and <code>[::]</code> in IPv6 are <a data-type="indexterm" data-primary="IP wildcard addresses" id="idm46219944434152"/><a data-type="indexterm" data-primary="IPv4" data-secondary="addresses" id="idm46219944433416"/><a data-type="indexterm" data-primary="IPv4" data-secondary="as wildcard addresses" data-secondary-sortas="wildcard addresses" id="idm46219944432472"/><a data-type="indexterm" data-primary="IPv6" data-secondary="as wildcard addresses" data-secondary-sortas="wildcard addresses" id="idm46219944431256"/><a data-type="indexterm" data-primary="IPv6" data-secondary="addresses" id="idm46219944430040"/>wildcard addresses.
+They match all addresses of their respective protocol
+and, as such,
+listen on all available IP addresses when used for a socket binding.</p>
+
+<p>This is useful to expose a service,
+without prior knowledge of what IP addresses the machines running it will have.
+Most network-exposed services bind this way.</p>
+</div>
+
+<p>There are <a data-type="indexterm" data-primary="sockets" data-secondary="inspection of" id="ch2_term2"/>multiple ways to inspect sockets.
+For example, <code>ls -lah /proc/&lt;server proc&gt;/fd</code> will list the sockets.
+We will discuss some programs that can inspect sockets at the end of this chapter.</p>
+
+<p>The kernel maps a given packet to a specific connection
+and uses an internal state machine to manage the connection state.
+Like sockets, connections can be inspected through various tools,
+which we will discuss later in this chapter.
+Linux represents each connection with a file.
+Accepting a connection entails a notification from the kernel to our program,
+which is then able to stream content to and from the file.</p>
+
+<p>Going back to our <a data-type="indexterm" data-primary="strace, Linux" id="ch2_term4"/><a data-type="indexterm" data-primary="server responses" data-secondary="to HTTP requests" data-secondary-sortas="HTTP requests" id="ch2_term5"/><a data-type="indexterm" data-primary="HTTP" data-secondary="examples of requests with" id="ch2_term6"/><a data-type="indexterm" data-primary="Golang (Go) web server" data-secondary="with Linux networking" data-secondary-sortas="Linux networking" id="ch2_term7"/><a data-type="indexterm" data-primary="client requests" data-secondary="with HTTP" data-secondary-sortas="HTTP" id="ch2_term8"/><a data-type="indexterm" data-primary="epoll" id="ch2_term9"/>Golang web server,
+we can use <code>strace</code> to show what the server is doing:</p>
+
+<pre data-type="programlisting">$ strace ./main
+execve("./main", ["./main"], 0x7ebf2700 /* 21 vars */) = 0
+brk(NULL)                               = 0x78e000
+uname({sysname="Linux", nodename="raspberrypi", ...}) = 0
+mmap2(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+= 0x76f1d000
+[Content cut]</pre>
+
+<p>Because <code>strace</code> captures all the system calls made by our server,
+there is a <em>lot</em> of output.
+Let’s reduce it somewhat to the <a data-type="indexterm" data-primary="syscalls" id="ch2_term3"/>relevant network syscalls.
+Key points are highlighted, as the Go
+HTTP server performs many syscalls during startup:</p>
+
+<pre data-type="programlisting">openat(AT_FDCWD, "/proc/sys/net/core/somaxconn",
+O_RDONLY|O_LARGEFILE|O_CLOEXEC) = 3
+epoll_create1(EPOLL_CLOEXEC)            = 4 <a class="co" id="co_linux_networking_CO1-1" href="#callout_linux_networking_CO1-1"><img src="Images/1.png" alt="1" width="12" height="12"/></a>
+epoll_ctl(4, EPOLL_CTL_ADD, 3, {EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET,
+    {u32=1714573248, u64=1714573248}}) = 0
+fcntl(3, F_GETFL)                       = 0x20000 (flags O_RDONLY|O_LARGEFILE)
+fcntl(3, F_SETFL, O_RDONLY|O_NONBLOCK|O_LARGEFILE) = 0
+read(3, "128\n", 65536)                 = 4
+read(3, "", 65532)                      = 0
+epoll_ctl(4, EPOLL_CTL_DEL, 3, 0x20245b0) = 0
+close(3)                                = 0
+socket(AF_INET, SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK, IPPROTO_TCP) = 3
+close(3)                                = 0
+socket(AF_INET6, SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK, IPPROTO_TCP) = 3 <a class="co" id="co_linux_networking_CO1-2" href="#callout_linux_networking_CO1-2"><img src="Images/2.png" alt="2" width="12" height="12"/></a>
+setsockopt(3, SOL_IPV6, IPV6_V6ONLY, [1], 4) = 0 <a class="co" id="co_linux_networking_CO1-3" href="#callout_linux_networking_CO1-3"><img src="Images/3.png" alt="3" width="12" height="12"/></a>
+bind(3, {sa_family=AF_INET6, sin6_port=htons(0),
+inet_pton(AF_INET6, "::1", &amp;sin6_addr),
+    sin6_flowinfo=htonl(0), sin6_scope_id=0}, 28) = 0
+socket(AF_INET6, SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK, IPPROTO_TCP) = 5
+setsockopt(5, SOL_IPV6, IPV6_V6ONLY, [0], 4) = 0
+bind(5, {sa_family=AF_INET6,
+sin6_port=htons(0), inet_pton(AF_INET6,
+    "::ffff:127.0.0.1", &amp;sin6_addr), sin6_flowinfo=htonl(0),
+sin6_scope_id=0}, 28) = 0
+close(5)                                = 0
+close(3)                                = 0
+socket(AF_INET6, SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK, IPPROTO_IP) = 3
+setsockopt(3, SOL_IPV6, IPV6_V6ONLY, [0], 4) = 0
+setsockopt(3, SOL_SOCKET, SO_BROADCAST, [1], 4) = 0
+setsockopt(3, SOL_SOCKET, SO_REUSEADDR, [1], 4) = 0
+bind(3, {sa_family=AF_INET6, sin6_port=htons(8080),
+inet_pton(AF_INET6, "::", &amp;sin6_addr),
+    sin6_flowinfo=htonl(0), sin6_scope_id=0}, 28) = 0 <a class="co" id="co_linux_networking_CO1-4" href="#callout_linux_networking_CO1-4"><img src="Images/4.png" alt="4" width="12" height="12"/></a>
+listen(3, 128)                          = 0
+epoll_ctl(4, EPOLL_CTL_ADD, 3,
+{EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, {u32=1714573248,
+    u64=1714573248}}) = 0
+getsockname(3, {sa_family=AF_INET6, sin6_port=htons(8080),
+
+inet_pton(AF_INET6, "::", &amp;sin6_addr), sin6_flowinfo=htonl(0),
+sin6_scope_id=0},
+    [112-&gt;28]) = 0
+accept4(3, 0x2032d70, [112], SOCK_CLOEXEC|SOCK_NONBLOCK) = -1 EAGAIN
+    (Resource temporarily unavailable)
+epoll_wait(4, [], 128, 0)               = 0
+epoll_wait(4, <a class="co" id="co_linux_networking_CO1-5" href="#callout_linux_networking_CO1-5"><img src="Images/5.png" alt="5" width="12" height="12"/></a></pre>
+<dl class="calloutlist">
+<dt><a class="co" id="callout_linux_networking_CO1-1" href="#co_linux_networking_CO1-1"><img src="Images/1.png" alt="1" width="12" height="12"/></a></dt>
+<dd><p>Open a file descriptor.</p></dd>
+<dt><a class="co" id="callout_linux_networking_CO1-2" href="#co_linux_networking_CO1-2"><img src="Images/2.png" alt="2" width="12" height="12"/></a></dt>
+<dd><p>Create a TCP socket for IPv6 connections.</p></dd>
+<dt><a class="co" id="callout_linux_networking_CO1-3" href="#co_linux_networking_CO1-3"><img src="Images/3.png" alt="3" width="12" height="12"/></a></dt>
+<dd><p>Disable <code>IPV6_V6ONLY</code> on the socket. Now, it can listen on IPv4 and IPv6.</p></dd>
+<dt><a class="co" id="callout_linux_networking_CO1-4" href="#co_linux_networking_CO1-4"><img src="Images/4.png" alt="4" width="12" height="12"/></a></dt>
+<dd><p>Bind the IPv6 socket to listen on port 8080 (all addresses).</p></dd>
+<dt><a class="co" id="callout_linux_networking_CO1-5" href="#co_linux_networking_CO1-5"><img src="Images/5.png" alt="5" width="12" height="12"/></a></dt>
+<dd><p>Wait for a request.</p></dd>
+</dl>
+
+<p>Once the server has <a data-type="indexterm" data-startref="ch2_term3" id="idm46219944353176"/>started, we see the output from <code>strace</code> pause on <code>epoll_wait</code>.</p>
+
+<p>At this point, the server is listening on its socket
+and waiting for the kernel to notify it about packets.
+When we make a request to our listening server, we see the “Hello” message:</p>
+
+<pre data-type="programlisting">$ curl &lt;ip&gt;:8080/
+Hello</pre>
+<div data-type="tip"><h6>Tip</h6>
+<p>If you are <a data-type="indexterm" data-primary="web browsers and strace results" id="idm46219944348872"/><a data-type="indexterm" data-primary="debugging" id="idm46219944348152"/><a data-type="indexterm" data-primary="troubleshooting" id="idm46219944347448"/>trying to debug the fundamentals of a web server with <code>strace</code>,
+you will probably not want to use a web browser.
+Additional requests or metadata sent to the server may result in additional work for the server,
+or the browser may not make expected requests.
+For example, many browsers try to request a favicon file automatically.
+They will also attempt to cache files, reuse connections, and do other things that make it harder to predict the exact network interaction.
+When simple or minimal reproduction matters, try using a tool like <code>curl</code> or <code>telnet</code>.</p>
+</div>
+
+<p>In <code>strace</code>, we see the following from our server process:</p>
+
+<pre data-type="programlisting">[{EPOLLIN, {u32=1714573248, u64=1714573248}}], 128, -1) = 1
+accept4(3, {sa_family=AF_INET6, sin6_port=htons(54202), inet_pton(AF_INET6,
+    "::ffff:10.0.0.57", &amp;sin6_addr), sin6_flowinfo=htonl(0), sin6_scope_id=0},
+    [112-&gt;28], SOCK_CLOEXEC|SOCK_NONBLOCK) = 5
+epoll_ctl(4, EPOLL_CTL_ADD, 5, {EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET,
+    {u32=1714573120, u64=1714573120}}) = 0
+getsockname(5, {sa_family=AF_INET6, sin6_port=htons(8080),
+    inet_pton(AF_INET6, "::ffff:10.0.0.30", &amp;sin6_addr), sin6_flowinfo=htonl(0),
+    sin6_scope_id=0}, [112-&gt;28]) = 0
+setsockopt(5, SOL_TCP, TCP_NODELAY, [1], 4) = 0
+setsockopt(5, SOL_SOCKET, SO_KEEPALIVE, [1], 4) = 0
+setsockopt(5, SOL_TCP, TCP_KEEPINTVL, [180], 4) = 0
+setsockopt(5, SOL_TCP, TCP_KEEPIDLE, [180], 4) = 0
+accept4(3, 0x2032d70, [112], SOCK_CLOEXEC|SOCK_NONBLOCK) = -1 EAGAIN
+    (Resource temporarily unavailable)</pre>
+
+<p>After inspecting the socket,
+our server writes response data (“Hello” wrapped in the HTTP protocol) to the file descriptor.
+From there, the Linux kernel (and some other userspace systems)
+translates the request into packets
+and transmits those packets back to our cURL client.</p>
+
+<p>To summarize what the server is doing when it receives a request:</p>
+<ol>
+<li>
+<p>Epoll returns and causes the program to resume.</p>
+</li>
+<li>
+<p>The server sees a connection from <code>::ffff:10.0.0.57</code>, the client IP address in this example.</p>
+</li>
+<li>
+<p>The server inspects the socket.</p>
+</li>
+<li>
+<p>The server <a data-type="indexterm" data-primary="keepalive options, server" id="idm46219944336984"/>changes <code>KEEPALIVE</code> options: it turns <code>KEEPALIVE</code> on, and sets a 180-second interval between <code>KEEPALIVE</code> probes.</p>
+</li>
+
+</ol>
+
+<p>This is a bird’s-eye view of networking in Linux,
+from an application developer’s point of <a data-type="indexterm" data-startref="ch2_term1" id="idm46219944333944"/><a data-type="indexterm" data-startref="ch2_term2" id="idm46219944333240"/><a data-type="indexterm" data-startref="ch2_term4" id="idm46219944332568"/><a data-type="indexterm" data-startref="ch2_term5" id="idm46219944331896"/><a data-type="indexterm" data-startref="ch2_term6" id="idm46219944331224"/><a data-type="indexterm" data-startref="ch2_term7" id="idm46219944330552"/><a data-type="indexterm" data-startref="ch2_term8" id="idm46219944329880"/><a data-type="indexterm" data-startref="ch2_term9" id="idm46219944329208"/>view.
+There’s a lot more going on to make everything work.
+We’ll look in more detail at parts of the networking stack that are particularly relevant
+for Kubernetes users.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="The Network Interface"><div class="sect1" id="idm46219944503848">
+<h1>The Network Interface</h1>
+
+<p>Computers <a data-type="indexterm" data-primary="interfaces, network" id="ch2_term11"/><a data-type="indexterm" data-primary="Linux networking" data-secondary="network interfaces for" id="ch2_term12"/><a data-type="indexterm" data-primary="network interfaces" id="ch2_term13"/>use a <em>network interface</em> to communicate with the outside world.
+Network interfaces can be physical (e.g., an Ethernet network controller) or virtual.
+Virtual network interfaces do not correspond to physical hardware; they are abstract interfaces provided by the host or hypervisor.</p>
+
+<p>IP addresses are assigned to network interfaces.
+A typical interface may have one IPv4 address and one IPv6 address,
+but multiple addresses can be assigned to the same interface.</p>
+
+<p>Linux itself has a concept of a network interface,
+which can be physical (such as an Ethernet card and port)
+or virtual.
+If you <a data-type="indexterm" data-primary="ifconfig, Linux" id="ch2_term10"/>run <code>ifconfig</code>,
+you will see a list of all network interfaces and their configurations
+(including IP addresses).</p>
+
+<p>The <em>loopback interface</em> is a <a data-type="indexterm" data-primary="loopback interface (lo)" id="idm46219944319256"/><a data-type="indexterm" data-primary="security" data-secondary="limited connectivity for" id="idm46219944318520"/>special interface for same-host communication.
+<code>127.0.0.1</code> is the standard IP address for the loopback interface.
+Packets sent to the loopback interface will not leave the host, and processes listening on <code>127.0.0.1</code> will be 
+<span class="keep-together">accessible</span> only to other processes on the same host.
+Note that making a process listen on <code>127.0.0.1</code> is not a security boundary.
+CVE-2020-8558 was a past Kubernetes vulnerability, in which <code>kube-proxy</code> rules allowed some remote systems to reach <code>127.0.0.1</code>.
+The loopback interface is commonly abbreviated as <code>lo</code>.</p>
+<div data-type="tip"><h6>Tip</h6>
+<p>The <code>ip</code> command can also be used to inspect network interfaces.</p>
+</div>
+
+<p>Let’s look at a typical <code>ifconfig</code> output; see <a data-type="xref" href="#EX0202">Example 2-2</a>.</p>
+<div id="EX0202" data-type="example">
+<h5><span class="label">Example 2-2. </span>Output from <code>ifconfig</code> on a machine with one pysical network interface (ens4), and the loopback interface</h5>
+
+<pre data-type="programlisting" data-code-language="bash"><code class="nv">$ </code>ifconfig
+ens4: <code class="nv">flags</code><code class="o">=</code>4163&lt;UP,BROADCAST,RUNNING,MULTICAST&gt;  mtu 1460
+        inet 10.138.0.4  netmask 255.255.255.255  broadcast 0.0.0.0
+        inet6 fe80::4001:aff:fe8a:4  prefixlen <code class="m">64</code>  scopeid 0x20&lt;link&gt;
+        ether 42:01:0a:8a:00:04  txqueuelen <code class="m">1000</code>  <code class="o">(</code>Ethernet<code class="o">)</code>
+        RX packets <code class="m">5896679</code>  bytes <code class="m">504372582</code> <code class="o">(</code>504.3 MB<code class="o">)</code>
+        RX errors <code class="m">0</code>  dropped <code class="m">0</code>  overruns <code class="m">0</code>  frame 0
+        TX packets <code class="m">9962136</code>  bytes <code class="m">1850543741</code> <code class="o">(</code>1.8 GB<code class="o">)</code>
+        TX errors <code class="m">0</code>  dropped <code class="m">0</code> overruns <code class="m">0</code>  carrier <code class="m">0</code>  collisions 0
+
+lo: <code class="nv">flags</code><code class="o">=</code>73&lt;UP,LOOPBACK,RUNNING&gt;  mtu 65536
+        inet 127.0.0.1  netmask 255.0.0.0
+        inet6 ::1  prefixlen <code class="m">128</code>  scopeid 0x10&lt;host&gt;
+        loop  txqueuelen <code class="m">1000</code>  <code class="o">(</code>Local Loopback<code class="o">)</code>
+        RX packets <code class="m">352</code>  bytes <code class="m">33742</code> <code class="o">(</code>33.7 KB<code class="o">)</code>
+        RX errors <code class="m">0</code>  dropped <code class="m">0</code>  overruns <code class="m">0</code>  frame 0
+        TX packets <code class="m">352</code>  bytes <code class="m">33742</code> <code class="o">(</code>33.7 KB<code class="o">)</code>
+        TX errors <code class="m">0</code>  dropped <code class="m">0</code> overruns <code class="m">0</code>  carrier <code class="m">0</code>  collisions 0</pre></div>
+
+<p>Container runtimes create a virtual network interface for each pod on a host,
+so the list would be much longer on a typical Kubernetes node.
+We’ll cover container networking in more <a data-type="indexterm" data-startref="ch2_term10" id="idm46219944306664"/>detail in <a data-type="xref" href="ch03.xhtml#container_networking_basics">Chapter 3</a>.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="The Bridge Interface"><div class="sect1" id="idm46219944252104">
+<h1>The Bridge Interface</h1>
+
+<p>The bridge <a data-type="indexterm" data-primary="bridge interface" id="ch2_term15"/>interface (shown in <a data-type="xref" href="#img-bridge">Figure 2-1</a>) allows system administrators to create multiple layer 2 networks on a single host.
+In other words,
+the bridge functions like a network switch between network interfaces on a host,
+seamlessly connecting them.
+Bridges allow <a data-type="indexterm" data-primary="pods" data-secondary="bridge interface with" id="idm46219944248168"/><a data-type="indexterm" data-primary="br0 bridge device, creating" id="idm46219944247224"/><a data-type="indexterm" data-primary="eth0 device and bridge interface" id="ch2_term16"/><a data-type="indexterm" data-primary="veth (virtual Ethernet) pairs" data-secondary="bridge interface for" id="ch2_term17"/>pods,
+with their individual network interfaces,
+to interact with the broader network
+via the node’s network interface.</p>
+
+<figure><div id="img-bridge" class="figure">
+<img src="Images/neku_0201.png" alt="Bridge" width="663" height="894"/>
+<h6><span class="label">Figure 2-1. </span>Bridge interface</h6>
+</div></figure>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>You can read more about Linux bridging in the <a href="https://oreil.ly/4BRsA">documentation</a>.</p>
+</div>
+
+<p>In <a data-type="xref" href="#Veth">Example 2-3</a>,
+we demonstrate how to create a bridge device named <code>br0</code>
+and attach a virtual Ethernet (veth) device, <code>veth</code>, and a physical
+device, <code>eth0</code>, using <code>ip</code>.</p>
+<div id="Veth" data-type="example">
+<h5><span class="label">Example 2-3. </span>Creating bridge interface and connecting veth pair</h5>
+
+<pre data-type="programlisting" data-code-language="bash"><code class="c"># # Add a new bridge interface named br0.</code>
+<code class="c"># ip link add br0 type bridge</code>
+<code class="c"># # Attach eth0 to our bridge.</code>
+<code class="c"># ip link set eth0 master br0</code>
+<code class="c"># # Attach veth to our bridge.</code>
+<code class="c"># ip link set veth master br0</code></pre></div>
+
+<p>Bridges can also be <a data-type="indexterm" data-primary="brctl command, Linux" id="idm46219944233080"/>managed and created using the <code>brctl</code> command.
+<a data-type="xref" href="#Brctl">Example 2-4</a> shows some options available with
+<code>brctl</code>.</p>
+<div id="Brctl" data-type="example">
+<h5><span class="label">Example 2-4. </span><code>brctl</code> options</h5>
+
+<pre data-type="programlisting" data-code-language="bash"><code class="nv">$ </code>brctl
+<code class="nv">$ </code>commands:
+        addbr           &lt;bridge&gt;                add bridge
+        delbr           &lt;bridge&gt;                delete bridge
+        addif           &lt;bridge&gt; &lt;device&gt;       add interface to bridge
+        delif           &lt;bridge&gt; &lt;device&gt;       delete interface from bridge
+        setageing       &lt;bridge&gt; &lt;<code class="nb">time</code>&gt;         <code class="nb">set </code>ageing <code class="nb">time</code>
+<code class="nb">        </code>setbridgeprio   &lt;bridge&gt; &lt;prio&gt;         <code class="nb">set </code>bridge priority
+        setfd           &lt;bridge&gt; &lt;<code class="nb">time</code>&gt;         <code class="nb">set </code>bridge forward delay
+        sethello        &lt;bridge&gt; &lt;<code class="nb">time</code>&gt;         <code class="nb">set </code>hello <code class="nb">time</code>
+<code class="nb">        </code>setmaxage       &lt;bridge&gt; &lt;<code class="nb">time</code>&gt;         <code class="nb">set </code>max message age
+        setpathcost     &lt;bridge&gt; &lt;port&gt; &lt;cost&gt;  <code class="nb">set </code>path cost
+        setportprio     &lt;bridge&gt; &lt;port&gt; &lt;prio&gt;  <code class="nb">set </code>port priority
+        show                                    show a list of bridges
+        showmacs        &lt;bridge&gt;                show a list of mac addrs
+        showstp         &lt;bridge&gt;                show bridge stp info
+        stp             &lt;bridge&gt; &lt;state&gt;        turn stp on/off</pre></div>
+
+<p>The veth  <a data-type="indexterm" data-primary="veth (virtual Ethernet) pairs" data-secondary="creation of" id="idm46219944215080"/><a data-type="indexterm" data-primary="Ethernet" data-secondary="veth pairs and" id="idm46219944214344"/>device is a local Ethernet tunnel. Veth devices are created in pairs, as shown in <a data-type="xref" href="#img-bridge">Figure 2-1</a>,
+where the pod sees an <code>eth0</code> interface from the veth.
+Packets transmitted on one device in the pair are immediately received on the other device. When either device is
+down, the link state of the pair is down. Adding a bridge to Linux can be done with using the <code>brctl</code> commands or
+<code>ip</code>. Use a veth configuration when namespaces need to communicate to the main host namespace or between each other.</p>
+
+<p><a data-type="xref" href="#Veth-Create">Example 2-5</a> shows how to set up a veth configuration.</p>
+<div id="Veth-Create" data-type="example">
+<h5><span class="label">Example 2-5. </span>Veth creation</h5>
+
+<pre data-type="programlisting" data-code-language="bash"><code class="c"># ip netns add net1</code>
+<code class="c"># ip netns add net2</code>
+<code class="c"># ip link add veth1 netns net1 type veth peer name veth2 netns net2</code></pre></div>
+
+<p>In <a data-type="xref" href="#Veth-Create">Example 2-5</a>, we show the <a data-type="indexterm" data-primary="namespaces, network" data-secondary="in veth creation" data-secondary-sortas="veth creation" id="idm46219944132744"/>steps to create two network namespaces (not to be confused with Kubernetes namespaces), <code>net1</code> and <code>net2</code>, and a pair of veth devices, with <code>veth1</code> assigned
+to namespace <code>net1</code> and <code>veth2</code> assigned to namespace <code>net2</code>. These two namespaces are connected with this veth pair. Assign a pair
+of IP addresses, and you can ping and communicate between the two namespaces.</p>
+
+<p>Kubernetes uses this in concert with the CNI project to manage container network namespaces, interfaces, and IP
+addresses. We will cover <a data-type="indexterm" data-startref="ch2_term11" id="idm46219944127256"/><a data-type="indexterm" data-startref="ch2_term12" id="idm46219944126664"/><a data-type="indexterm" data-startref="ch2_term13" id="idm46219944125992"/><a data-type="indexterm" data-startref="ch2_term15" id="idm46219944125320"/><a data-type="indexterm" data-startref="ch2_term16" id="idm46219944124648"/><a data-type="indexterm" data-startref="ch2_term17" id="idm46219944123976"/>more of this in <a data-type="xref" href="ch03.xhtml#container_networking_basics">Chapter 3</a>.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" class="less_space pagebreak-before" data-pdf-bookmark="Packet Handling in the Kernel"><div class="sect1" id="idm46219944251480">
+<h1>Packet Handling in the Kernel</h1>
+
+<p>The Linux <a data-type="indexterm" data-primary="Linux networking" data-secondary="with kernel's packet management" data-secondary-sortas="kernel's packet management" id="ch2_term18"/><a data-type="indexterm" data-primary="packets" data-secondary="Linux kernel management of" id="ch2_term19"/>kernel is responsible for translating between packets,
+and a coherent stream of data for programs.
+In particular, we will look at how the kernel handles connections
+because routing and firewalling, key things in Kubernetes,
+rely heavily on Linux’s underlying packet management.</p>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Netfilter"><div class="sect2" id="idm46219944098328">
+<h2>Netfilter</h2>
+
+<p>Netfilter, included in <a data-type="indexterm" data-primary="Linux networking" data-secondary="with Netfilter" data-secondary-sortas="Netfilter" id="ch2_term27"/>Linux since 2.3,
+is a critical component of packet handling.
+Netfilter is a framework of kernel hooks,
+which allow userspace programs to handle packets on behalf of the kernel.
+In short,
+a program registers to a specific Netfilter hook, and
+the kernel calls that program on applicable packets.
+That program could tell the kernel to do something with the packet (like drop it),
+or it could send back a modified packet to the kernel.
+With this, developers can build normal programs that run in userspace
+and handle packets.
+Netfilter was created jointly with <code>iptables</code>,
+to separate kernel and userspace code.</p>
+<div data-type="tip"><h6>Tip</h6>
+<p><a class="orm:hideurl" href="https://netfilter.org"><em>netfilter.org</em></a> contains some excellent documentation on the design and use of both Netfilter and <code>iptables</code>.</p>
+</div>
+
+<p>Netfilter has <a data-type="indexterm" data-primary="Netfilter, Linux" data-secondary="hooks of" id="ch2_term25"/><a data-type="indexterm" data-primary="packets" data-secondary="Netfilter hooks and" id="ch2_term26"/>five hooks, shown in <a data-type="xref" href="#webfilter_hooks">Table 2-1</a>.</p>
+
+<p>Netfilter triggers each hook under specific stages in a packet’s journey through the kernel.
+Understanding <a data-type="indexterm" data-primary="iptables, Linux" data-secondary="Netfilter and" id="idm46219944112808"/>Netfilter’s hooks is key to understanding <code>iptables</code> later in this chapter,
+as <code>iptables</code> directly <a data-type="indexterm" data-primary="chains, iptables" data-secondary="Netfilter hooks and" id="idm46219944110904"/><a data-type="indexterm" data-primary="INPUT, iptables chain" id="idm46219944109896"/><a data-type="indexterm" data-primary="iptables, Linux" data-secondary="chains of" id="idm46219944109224"/><a data-type="indexterm" data-primary="NAT (network address translation)" data-secondary="iptables and" id="idm46219944108280"/><a data-type="indexterm" data-primary="OUTPUT, iptables chain" id="idm46219944067016"/>maps its concept of <em>chains</em> to Netfilter hooks.</p>
+<table id="webfilter_hooks">
+<caption><span class="label">Table 2-1. </span>Netfilter hooks</caption>
+<thead>
+<tr>
+<th>Netfilter hook</th>
+<th>Iptables chain name</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><p>NF_IP_PRE_ROUTING</p></td>
+<td><p>PREROUTING</p></td>
+<td><p>Triggers when a packet arrives from an external system.</p></td>
+</tr>
+<tr>
+<td><p>NF_IP_LOCAL_IN</p></td>
+<td><p>INPUT</p></td>
+<td><p>Triggers when a packet’s destination IP address matches this machine.</p></td>
+</tr>
+<tr>
+<td><p>NF_IP_FORWARD</p></td>
+<td><p>NAT</p></td>
+<td><p>Triggers for packets where neither source nor destination
+matches the machine’s IP addresses (in other words, packets that this machine is routing on behalf of other machines).</p></td>
+</tr>
+<tr>
+<td><p>NF_IP_LOCAL_OUT</p></td>
+<td><p>OUTPUT</p></td>
+<td><p>Triggers when a packet, originating from the machine, is leaving the machine.</p></td>
+</tr>
+<tr>
+<td><p>NF_IP_POST_ROUTING</p></td>
+<td><p>POSTROUTING</p></td>
+<td><p>Triggers when any packet (regardless of origin) is leaving the machine.</p></td>
+</tr>
+</tbody>
+</table>
+
+<p class="pagebreak-before">Netfilter triggers each hook during a specific phase of packet handling, and
+under specific conditions,
+we can visualize Netfilter hooks with a flow diagram, as shown in <a data-type="xref" href="#img-nftables-packet-flow">Figure 2-2</a>.</p>
+
+<figure><div id="img-nftables-packet-flow" class="figure">
+<img src="Images/neku_0202.png" alt="neku 0202" width="1402" height="497"/>
+<h6><span class="label">Figure 2-2. </span>The possible flows of a packet through Netfilter hooks</h6>
+</div></figure>
+
+<p>We can infer from our flow diagram that only certain permutations of Netfilter hook calls are possible for any given packet.
+For example, a packet originating from a local process will always trigger
+<code>NF_IP_LOCAL_OUT</code> hooks and then <code>NF_IP_POST_ROUTING</code> hooks.
+In particular,
+the flow of Netfilter hooks for a packet depends on two things:
+if the packet source is the host
+and if the packet destination is the host.
+Note that if a process sends a packet destined for the same host,
+it triggers the <code>NF_IP_LOCAL_OUT</code> and then the <code>NF_IP_POST_ROUTING</code> hooks
+before “reentering” the system
+and triggering the <code>NF_IP_PRE_ROUTING</code> and <code>NF_IP_LOCAL_IN</code> hooks.</p>
+
+<p>In some systems,
+it is possible to spoof such a packet
+by writing a fake source address (i.e., spoofing that a packet has a source and destination address of <code>127.0.0.1</code>).
+Linux will normally filter such a packet when it arrives at an external interface.
+More broadly,
+Linux filters packets when a packet arrives at an interface
+and the packet’s source address does not exist on that network.
+A packet <a data-type="indexterm" data-primary="Martian packets" id="idm46219944042856"/><a data-type="indexterm" data-primary="packets" data-secondary="Martian and spoofed sources for" id="idm46219944042248"/><a data-type="indexterm" data-primary="spoofed packet sources" id="idm46219944041400"/>with an “impossible” source IP address is called a <em>Martian packet</em>.
+It is possible to disable filtering of Martian packets in Linux.
+However, doing so poses substantial risk
+if any services on the host assume that traffic from localhost is “more trustworthy” than external traffic.
+This can be a common assumption, such as when exposing an API or database to the host without strong authentication.</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>Kubernetes has <a data-type="indexterm" data-primary="Kubernetes" data-secondary="issues with" id="idm46219944038792"/>had at least one CVE, CVE-2020-8558, in which packets from another host,
+with the source IP address falsely set to <code>127.0.0.1</code>,
+could access ports that should be accessible only locally.
+Among other things, this means that if a node in the Kubernetes control plane ran <code>kube-proxy</code>,
+other machines on the node’s network could use “trust authentication” to connect to the API server,
+effectively owning the cluster.</p>
+
+<p>This was not technically a case of Martian packets not being filtered,
+as offending packets would come from the loopback device,
+which <em>is</em> on the same network as <code>127.0.0.1</code>.
+You can read the reported issue on <a href="https://oreil.ly/A5HtN">GitHub</a>.</p>
+</div>
+
+<p><a data-type="xref" href="#table0202">Table 2-2</a> shows the Netfilter hook order for various packet sources and destinations.</p>
+<table id="table0202">
+<caption><span class="label">Table 2-2. </span>Key netfilter packet flows</caption>
+<thead>
+<tr>
+<th>Packet source</th>
+<th>Packet destination</th>
+<th>Hooks (in order)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><p>Local machine</p></td>
+<td><p>Local machine</p></td>
+<td><p><code>NF_IP_LOCAL_OUT</code>, <code>NF_IP_LOCAL_IN</code></p></td>
+</tr>
+<tr>
+<td><p>Local machine</p></td>
+<td><p>External machine</p></td>
+<td><p><code>NF_IP_LOCAL_OUT</code>, <code>NF_IP_POST_ROUTING</code></p></td>
+</tr>
+<tr>
+<td><p>External machine</p></td>
+<td><p>Local machine</p></td>
+<td><p><code>NF_IP_PRE_ROUTING</code>, <code>NF_IP_LOCAL_IN</code></p></td>
+</tr>
+<tr>
+<td><p>External machine</p></td>
+<td><p>External machine</p></td>
+<td><p><code>NF_IP_PRE_ROUTING</code>, <code>NF_IP_FORWARD</code>, <code>NF_IP_POST_ROUTING</code></p></td>
+</tr>
+</tbody>
+</table>
+
+<p>Note that packets from the machine to itself
+will trigger <code>NF_IP_LOCAL_OUT</code> and <code>NF_IP_POST_ROUTING</code> and then “leave” the network interface.
+They will “reenter” and be treated like packets from any other source.</p>
+
+<p>Network address <a data-type="indexterm" data-primary="NAT (network address translation)" data-secondary="iptables and" id="idm46219944015192"/>translation (NAT) only impacts local routing decisions in the <code>NF_IP_PRE_ROUTING</code> and <code>NF_IP_LOCAL_OUT</code> hooks
+(e.g., the kernel makes no routing decisions after a packet reaches the <code>NF_IP_LOCAL_IN</code> hook).
+We see this reflected in the design of <code>iptables</code>,
+where source and destination NAT can be performed only in specific hooks/chains.</p>
+
+<p>Programs can register a hook by calling <code>NF_REGISTER_NET_HOOK</code>  (<code>NF_REGISTER_HOOK</code> prior to Linux 4.13)
+with a handling function.
+The hook will be called every time a packet matches.
+This is how programs like <code>iptables</code> integrate with Netfilter,
+though you will likely never need to do this yourself.</p>
+
+<p class="pagebreak-before">There are several actions that a Netfilter hook can trigger,
+based on the return value:</p>
+<dl>
+<dt>Accept</dt>
+<dd>
+<p>Continue packet handling.</p>
+</dd>
+<dt>Drop</dt>
+<dd>
+<p>Drop the packet, without further processing.</p>
+</dd>
+<dt>Queue</dt>
+<dd>
+<p>Pass the packet to a userspace program.</p>
+</dd>
+<dt>Stolen</dt>
+<dd>
+<p>Doesn’t execute further hooks, and allows the userspace program to take ownership of the packet.</p>
+</dd>
+<dt>Repeat</dt>
+<dd>
+<p>Make the packet “reenter” the hook and be reprocessed.</p>
+</dd>
+</dl>
+
+<p>Hooks can also return mutated packets.
+This allows programs to do things such as reroute or masquerade packets, adjust <a data-type="indexterm" data-startref="ch2_term25" id="idm46219944001816"/><a data-type="indexterm" data-startref="ch2_term26" id="idm46219944001112"/>packet TTLs, etc.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Conntrack"><div class="sect2" id="idm46219944097736">
+<h2>Conntrack</h2>
+
+<p>Conntrack is a <a data-type="indexterm" data-primary="connection tracking" id="ch2_term28"/><a data-type="indexterm" data-primary="Conntrack, Linux" id="ch2_term29"/><a data-type="indexterm" data-primary="Netfilter, Linux" data-secondary="Conntrack in" id="ch2_term30"/>component of Netfilter
+used to track the state of connections to (and from) the machine.
+Connection tracking directly associates packets with a particular connection.
+Without connection tracking,
+the flow of packets is much more opaque.
+Conntrack can be a liability or a valuable tool, or both, depending on how it is used.
+In general, Conntrack is important on systems that handle firewalling or NAT.</p>
+
+<p>Connection tracking <a data-type="indexterm" data-primary="firewalls" data-secondary="and Conntrack" data-secondary-sortas="Conntrack" id="idm46219943994584"/>allows firewalls to distinguish between responses and arbitrary packets.
+A firewall can be configured to allow inbound packets
+that are part of an existing connection
+but disallow inbound packets that are not part of a connection.
+To give an example, a program could be allowed to make an outbound connection and perform an HTTP request,
+without the remote server being otherwise able to send data or initiate connections inbound.</p>
+
+<p>NAT relies on Conntrack to function.
+<code>iptables</code> exposes <a data-type="indexterm" data-primary="DNAT (destination NAT)" id="idm46219943991704"/><a data-type="indexterm" data-primary="NAT (network address translation)" data-secondary="iptables and" id="idm46219943990968"/><a data-type="indexterm" data-primary="NAT (network address translation)" data-secondary="types of" id="idm46219943990056"/><a data-type="indexterm" data-primary="SNAT (source NAT)" id="idm46219943989144"/>NAT as two types: SNAT (source NAT, where <code>iptables</code> rewrites the source address) and DNAT (destination NAT, where <code>iptables</code> rewrites the destination address).
+NAT is extremely common;
+the odds are overwhelming that your home router uses SNAT and DNAT to fan traffic between your public IPv4 address
+and the local address of each device on the network.
+With connection tracking,
+packets are automatically associated with their connection
+and easily modified with the same SNAT/DNAT change.
+This enables consistent routing decisions,
+such as “pinning” a connection in a load balancer to a specific backend or machine.
+The latter example is <a data-type="indexterm" data-primary="Kubernetes" data-secondary="connection tracking and" id="idm46219943986872"/>highly relevant in Kubernetes,
+due to <code>kube-proxy</code>’s implementation of service load balancing via <code>iptables</code>.
+Without connection tracking,
+every packet would need to be <em>deterministically</em> remapped to the same destination,
+which isn’t doable (suppose the list of possible destinations could change…).</p>
+
+<p>Conntrack identifies <a data-type="indexterm" data-primary="Transport layer, TCP/IP (L4)" data-secondary="identifiers for connections in" id="idm46219943983992"/>connections by a tuple, composed of source address, source port, destination address, destination port, and L4 protocol.
+These five pieces of information are the minimal identifiers needed to identify any given L4 connection.
+All L4 connections have an address and port on each side of the connection;
+after all, the internet uses addresses for routing, and computers use port numbers for application mapping.
+The final piece, the L4 protocol, is <a data-type="indexterm" data-primary="flows, Conntrack" id="idm46219943982408"/>present because a program will bind to a port in TCP <em>or</em> UDP mode
+(and binding to one does not preclude binding to the other).
+Conntrack refers to these connections as <em>flows</em>.
+A flow contains metadata about the connection and its state.</p>
+
+<p>Conntrack stores <a data-type="indexterm" data-primary="hash table, Conntrack" id="idm46219943980120"/>flows in a hash table, shown in <a data-type="xref" href="#img-conntrack-hashtable">Figure 2-3</a>,
+using the connection tuple as a key.
+The size of the keyspace is configurable.
+A larger keyspace requires more memory to hold the underlying array
+but will result in fewer flows hashing to the same key
+and being chained in a linked list,
+leading to faster flow lookup times.
+The maximum number of flows is also configurable.
+A severe issue that can happen is when Conntrack runs out of space for connection tracking, and
+new connections cannot be made.
+There are other configuration options too,
+such as the timeout for a connection.
+On a typical system, default settings will suffice.
+However, a system that experiences a huge number of connections
+will run out of space.
+If your host runs directly exposed to the internet,
+overwhelming Conntrack with short-lived or incomplete connections
+is an easy way to cause a denial of service (DOS).</p>
+
+<figure><div id="img-conntrack-hashtable" class="figure">
+<img src="Images/neku_0203.png" alt="Conntrack Hashtable" width="841" height="559"/>
+<h6><span class="label">Figure 2-3. </span>The structure of Conntrack flows</h6>
+</div></figure>
+
+<p class="pagebreak-before">Conntrack’s max size is normally set in <code>/proc/sys/net/nf_conntrack_max</code>,
+and the hash table size is normally set in <code>/sys/module/nf_conntrack/parameters/hashsize</code>.</p>
+
+<p>Conntrack entries contain a connection state, which is one of four states.
+It is important to note that, as a layer 3 (Network layer) tool,
+Conntrack states are distinct from layer 4 (Protocol layer) states.
+<a data-type="xref" href="#conntrack_states">Table 2-3</a> details the four states.</p>
+<table id="conntrack_states">
+<caption><span class="label">Table 2-3. </span>Conntrack states</caption>
+<thead>
+<tr>
+<th>State</th>
+<th>Description</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><p>NEW</p></td>
+<td><p>A valid packet is sent or received, with no response seen.</p></td>
+<td><p>TCP SYN received.</p></td>
+</tr>
+<tr>
+<td><p>ESTABLISHED</p></td>
+<td><p>Packets observed in both directions.</p></td>
+<td><p>TCP SYN received, and TCP SYN/ACK sent.</p></td>
+</tr>
+<tr>
+<td><p>RELATED</p></td>
+<td><p>An additional connection is opened, where metadata indicates that it is “related” to an original connection.
+Related connection handling is complex.</p></td>
+<td><p>An FTP program, with an ESTABLISHED connection, opens additional data connections.</p></td>
+</tr>
+<tr>
+<td><p>INVALID</p></td>
+<td><p>The packet itself is invalid, or does not properly match another Conntrack connection state.</p></td>
+<td><p>TCP RST received, with no prior connection.</p></td>
+</tr>
+</tbody>
+</table>
+
+<p>Although Conntrack is built into the kernel,
+it may not be active on your system.
+Certain kernel modules must be loaded,
+and you must have relevant <code>iptables</code> rules
+(essentially, Conntrack is normally not active if nothing needs it to be).
+Conntrack requires the kernel module <code>nf_conntrack_ipv4</code> to be active.
+<code>lsmod | grep nf_conntrack</code> will show if the module is loaded,
+and <code>sudo modprobe nf_conntrack</code> will load it.
+You may also need to install the <code>conntrack</code> command-line interface (CLI) in order to view Conntrack’s state.</p>
+
+<p>When Conntrack is active,
+<code>conntrack -L</code> shows all current flows.
+Additional Conntrack flags will filter which flows are shown.</p>
+
+<p>Let’s look <a data-type="indexterm" data-primary="destination values, routing" id="idm46219943954776"/>at the anatomy of a Conntrack flow, as displayed here:</p>
+
+<pre data-type="programlisting">tcp      6 431999 ESTABLISHED src=10.0.0.2 dst=10.0.0.1
+sport=22 dport=49431 src=10.0.0.1 dst=10.0.0.2 sport=49431 dport=22 [ASSURED]
+mark=0 use=1
+
+&lt;protocol&gt; &lt;protocol number&gt; &lt;flow TTL&gt; [flow state&gt;]
+&lt;source ip&gt; &lt;dest ip&gt; &lt;source port&gt; &lt;dest port&gt; [] &lt;expected return packet&gt;</pre>
+
+<p>The expected return packet is of the form <code>&lt;source ip&gt; &lt;dest ip&gt; &lt;source port&gt; &lt;dest port&gt;</code>.
+This is the identifier that we expect to see when the remote system sends a packet.
+Note that in our example,
+the source and destination values are in reverse for address and ports.
+This is often, but not always, the case.
+For example, if a machine is behind a router,
+packets destined to that machine will be addressed to the router,
+whereas packets from the machine will have the machine address,
+not the router address, as the source.</p>
+
+<p>In the previous example from machine <code>10.0.0.2</code>, <code>10.0.0.1</code> has established a TCP connection from port 49431 to port 22 on <code>10.0.0.2</code>.
+You may recognize this as being an SSH connection,
+although Conntrack is unable to show application-level behavior.</p>
+
+<p>Tools <a data-type="indexterm" data-primary="grep tool for Conntrack" id="idm46219943949224"/>like <code>grep</code> can be useful for examining Conntrack state <a data-type="indexterm" data-startref="ch2_term27" id="idm46219943947880"/><a data-type="indexterm" data-startref="ch2_term28" id="idm46219943947176"/><a data-type="indexterm" data-startref="ch2_term29" id="idm46219943946504"/><a data-type="indexterm" data-startref="ch2_term30" id="idm46219943945832"/>and ad hoc statistics:</p>
+
+<pre data-type="programlisting">grep ESTABLISHED /proc/net/ip_conntrack | wc -l</pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Routing"><div class="sect2" id="idm46219943999720">
+<h2>Routing</h2>
+
+<p>When handling any <a data-type="indexterm" data-primary="routing" data-secondary="local table for" id="idm46219943942840"/><a data-type="indexterm" data-primary="Linux, routing in" id="ch2_term31"/>packet, the kernel must decide where to send that packet. In most cases, the destination machine
+will not be within the same network. For example, suppose you are attempting to connect to <code>1.2.3.4</code> from your personal
+computer. <code>1.2.3.4</code> is not on your network; the best your computer can do is pass it to another host that is closer to
+being able to reach <code>1.2.3.4</code>. The <a data-type="indexterm" data-primary="route tables" id="idm46219943938808"/><a data-type="indexterm" data-primary="routing" data-secondary="subnets for" id="idm46219943938072"/>route table serves this purpose by mapping known subnets to a gateway IP address
+and interface. You can list known routes with <code>route</code> (or <code>route -n</code> to show raw IP addresses instead of hostnames).
+A typical machine will have a route for the local network
+and a route for <code>0.0.0.0/0</code>. Recall that <a data-type="indexterm" data-primary="subnets" data-secondary="as CIDR" data-secondary-sortas="CIDR" id="idm46219943935464"/><a data-type="indexterm" data-primary="subnets" data-secondary="as gateway IP address" data-secondary-sortas="gateway IP address" id="idm46219943934184"/><a data-type="indexterm" data-primary="netmask (subnet mask)" id="idm46219943932968"/><a data-type="indexterm" data-primary="subnet mask (netmask)" id="idm46219943932296"/>subnets can be expressed as a CIDR (e.g., <code>10.0.0.0/24</code>) or an IP address and a
+mask (e.g., <code>10.0.0.0</code> and <code>255.255.255.0</code>).</p>
+
+<p>This is a typical routing table for a machine on a local network with access to the internet:</p>
+
+<pre data-type="programlisting" data-code-language="bash"><code class="c"># route</code>
+Kernel IP routing table
+Destination     Gateway         Genmask         Flags Metric Ref    Use Iface
+0.0.0.0         10.0.0.1        0.0.0.0         UG    <code class="m">303</code>    <code class="m">0</code>        <code class="m">0</code> eth0
+10.0.0.0        0.0.0.0         255.255.255.0   U     <code class="m">303</code>    <code class="m">0</code>        <code class="m">0</code> eth0</pre>
+
+<p>In the previous example, a request to <code>1.2.3.4</code> would be sent to <code>10.0.0.1</code>, on the <code>eth0</code> interface,
+because <code>1.2.3.4</code> is in the subnet described by the first rule (<code>0.0.0.0/0</code>) and not in the subnet described by the second rule (<code>10.0.0.0/24</code>).
+Subnets are <a data-type="indexterm" data-primary="destination values, routing" id="idm46219943919976"/><a data-type="indexterm" data-primary="genmask values, routing" id="idm46219943919272"/>specified by the destination and <code>genmask</code> values.</p>
+
+<p>Linux prefers to <a data-type="indexterm" data-primary="Linux, routing in" data-secondary="specificity of" id="idm46219943917544"/>route packets by <em>specificity</em> (how “small” a matching subnet is) and then by weight (“metric” in <code>route</code> output).
+Given our example, a packet addressed to <code>10.0.0.1</code> will always be sent to gateway <code>0.0.0.0</code>
+because that route matches a smaller set of addresses.
+If we had two routes with the same specificity, then the route with a lower metric wiould be preferred.</p>
+
+<p>Some CNI plugins make heavy use of the route table.</p>
+
+<p>Now that we’ve covered some key concepts in how the Linux kernel handles packets,
+we can <a data-type="indexterm" data-startref="ch2_term18" id="idm46219943907672"/><a data-type="indexterm" data-startref="ch2_term19" id="idm46219943906968"/>look at how higher-level packet and connection routing works.</p>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="High-Level Routing"><div class="sect1" id="idm46219943906040">
+<h1>High-Level Routing</h1>
+
+<p>Linux has complex packet management abilities. Such tools allow Linux users to create firewalls, log traffic, route
+packets, and even implement load balancing. <a data-type="indexterm" data-primary="Kubernetes" data-secondary="routing tools of" id="idm46219943904328"/>Kubernetes makes use of some of these tools to handle node and pod
+connectivity, as well as manage Kubernetes services. In this book, we will cover the three tools that are most
+commonly seen in Kubernetes. All Kubernetes setups will make some use of <code>iptables</code>, but there are many ways that
+services can be managed. We will also cover IPVS (which has built-in support in <code>kube-proxy</code>), and eBPF, which is used
+by Cilium (a <code>kube-proxy</code> alternative).</p>
+
+<p>We will reference this section in <a data-type="xref" href="ch04.xhtml#kubernetes_networking_introduction">Chapter 4</a>, when we cover services and <code>kube-proxy</code>.</p>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="iptables"><div class="sect2" id="idm46219943899848">
+<h2>iptables</h2>
+
+<p><code>iptables</code> is staple <a data-type="indexterm" data-primary="Linux, routing in" data-secondary="with iptables" data-secondary-sortas="iptables" id="ch2_term34"/><a data-type="indexterm" data-primary="iptables, Linux" id="ch2_term35"/>of Linux sysadmins and has been for many years. <code>iptables</code> can be used to create firewalls and
+audit logs, mutate and reroute packets, and even implement crude connection fan-out. <code>iptables</code> uses Netfilter, which
+allows <code>iptables</code> to intercept and mutate packets.</p>
+
+<p><code>iptables</code> rules can become extremely complex. There are many tools that provide a simpler interface for managing
+<code>iptables</code> rules; for example, firewalls like <code>ufw</code> and <code>firewalld</code>. Kubernetes components (specifically, <code>kubelet</code>
+and <code>kube-proxy</code>) generate <code>iptables</code> rules in this fashion. Understanding <code>iptables</code> is important to understand access and
+routing for pods and nodes in most clusters.</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>Most Linux <a data-type="indexterm" data-primary="nftables, Linux" id="idm46219943871576"/><a data-type="indexterm" data-primary="iptables, Linux" data-secondary="versus nftables" data-secondary-sortas="nftables" id="idm46219943870872"/>distributions are replacing <code>iptables</code> with <code>nftables</code>, a similar but more performant tool built atop Netfilter.
+Some distros already ship with a version of <code>iptables</code> that is powered by 
+<span class="keep-together"><code>nftables</code>.</span></p>
+
+<p>Kubernetes has <a data-type="indexterm" data-primary="Kubernetes" data-secondary="issues with" id="idm46219943866680"/>many known issues with the <code>iptables</code>/<code>nftables</code> transition. We highly recommend not using a
+<code>nftables</code>-backed version of <code>iptables</code> for the foreseeable future.</p>
+</div>
+
+<p>There are three key concepts in <code>iptables</code>: tables, chains, and rules. They are considered hierarchical in nature: a table
+contains chains, and a chain contains rules.</p>
+
+<p>Tables <a data-type="indexterm" data-primary="Filter table, iptables" id="idm46219943862168"/><a data-type="indexterm" data-primary="Mangle table, iptables" id="idm46219943861464"/><a data-type="indexterm" data-primary="NAT (network address translation)" data-secondary="iptables and" id="idm46219943860760"/><a data-type="indexterm" data-primary="iptables, Linux" data-secondary="tables of" id="ch2_term32"/><a data-type="indexterm" data-primary="tables, iptables" id="ch2_term33"/>organize rules according to the type of effect they have. <code>iptables</code> has a broad range of functionality,
+which tables group together. The three most commonly applicable tables are: Filter (for firewall-related rules),
+NAT (for NAT-related rules), and Mangle (for non-NAT packet-mutating rules). <code>iptables</code> executes tables in a specific
+order, which we’ll cover later.</p>
+
+<p>Chains <a data-type="indexterm" data-primary="chains, iptables" data-secondary="execution of" id="idm46219943855992"/><a data-type="indexterm" data-primary="chains, iptables" data-secondary="Netfilter hooks and" id="idm46219943854984"/><a data-type="indexterm" data-primary="iptables, Linux" data-secondary="chains of" id="idm46219943854040"/><a data-type="indexterm" data-primary="iptables, Linux" data-secondary="Netfilter and" id="idm46219943853096"/><a data-type="indexterm" data-primary="Netfilter, Linux" data-secondary="hooks of" id="idm46219943852152"/><a data-type="indexterm" data-primary="packets" data-secondary="Netfilter hooks and" id="idm46219943851208"/><a data-type="indexterm" data-primary="Linux networking" data-secondary="with Netfilter" data-secondary-sortas="Netfilter" id="idm46219943850264"/>contain a list of rules.
+When a packet executes a chain,
+the rules in the chain are evaluated in order.
+Chains exist within a table
+and organize rules according to Netfilter hooks.
+There are five built-in, top-level chains, each of which corresponds to a Netfilter hook
+(recall that Netfilter was designed jointly with <code>iptables</code>).
+Therefore, the choice of which chain to insert a rule dictates if/when the rule will be evaluated for a given packet.</p>
+
+<p>Rules are a <a data-type="indexterm" data-primary="iptables, Linux" data-secondary="rules of" id="idm46219943847768"/><a data-type="indexterm" data-primary="rules, iptables" data-secondary="chains, tables and" id="idm46219943846760"/>combination condition and action (referred to as a <em>target</em>).
+For example, “if a packet is addressed to port 22, drop it.”
+<code>iptables</code> evaluates individual packets,
+although chains and tables dictate which packets a rule will be evaluated against.</p>
+
+<p>The specifics of table → chain → target execution are complex,
+and there is no end of fiendish diagrams available to describe the full state machine.
+Next, we’ll examine each portion in more detail.</p>
+<div data-type="tip"><h6>Tip</h6>
+<p>It may help to refer to earlier material
+as you progress through this section.
+The designs of tables, chains, and rules are tightly intertwined,
+and it is hard to properly understand one without understanding the others.</p>
+</div>
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect3" data-pdf-bookmark="iptables tables"><div class="sect3" id="idm46219943842552">
+<h3>iptables tables</h3>
+
+<p>A table in <code>iptables</code> maps to a particular <em>capability set</em>,
+where each table is “responsible” for a specific type of action.
+In more concrete terms, a table can contain only specific target types,
+and many target types can be used only in specific tables.
+<code>iptables</code> has five <a data-type="indexterm" data-primary="Filter table, iptables" id="idm46219943839288"/><a data-type="indexterm" data-primary="Mangle table, iptables" id="idm46219943838552"/><a data-type="indexterm" data-primary="Raw table, iptables" id="idm46219943837880"/><a data-type="indexterm" data-primary="Security table, iptables" id="idm46219943837208"/><a data-type="indexterm" data-primary="NAT (network address translation)" data-secondary="iptables and" id="ch2_term39"/>tables,
+which are listed in <a data-type="xref" href="#iptables_tables">Table 2-4</a>.</p>
+<table id="iptables_tables">
+<caption><span class="label">Table 2-4. </span><code>iptables</code> tables</caption>
+<thead>
+<tr>
+<th>Table</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><p>Filter</p></td>
+<td><p>The Filter table handles acceptance and rejection of packets.</p></td>
+</tr>
+<tr>
+<td><p>NAT</p></td>
+<td><p>The NAT table is used to modify the source or destination IP addresses.</p></td>
+</tr>
+<tr>
+<td><p>Mangle</p></td>
+<td><p>The Mangle table can perform general-purpose editing of packet headers, but it is not intended for NAT. It can also “mark” the packet with <code>iptables</code>-only metadata.</p></td>
+</tr>
+<tr>
+<td><p>Raw</p></td>
+<td><p>The Raw table allows for packet mutation before connection tracking and other tables are handled. Its most common use is to disable connection tracking for some packets.</p></td>
+</tr>
+<tr>
+<td><p>Security</p></td>
+<td><p>SELinux uses the Security table for packet handling. It is not applicable on a machine that is not using SELinux.</p></td>
+</tr>
+</tbody>
+</table>
+
+<p>We will not <a data-type="indexterm" data-primary="SELinux" id="idm46219943821416"/>discuss the Security table in more detail in this book;
+however, if you use SELinux,
+you should be aware of its use.</p>
+
+<p><code>iptables</code> executes tables in a particular order: Raw, Mangle, NAT, Filter.
+However, this order of execution is broken up by chains.
+Linux users generally accept the mantra of “tables contains chains,”
+but this may feel misleading.
+The order of execution is chains, <em>then</em> tables.
+So, for example,
+a packet will trigger <code>Raw PREROUTING</code>, <code>Mangle PREROUTING</code>, <code>NAT PREROUTING</code>,
+and then trigger the Mangle table in either the <code>INPUT</code> or <code>FORWARD</code> chain (depending on the packet).
+We’ll cover this in more detail in the next section on chains,
+as we put more <a data-type="indexterm" data-startref="ch2_term32" id="idm46219943816408"/><a data-type="indexterm" data-startref="ch2_term33" id="idm46219943815704"/>pieces together.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect3" data-pdf-bookmark="iptables chains"><div class="sect3" id="idm46219943814904">
+<h3>iptables chains</h3>
+
+<p><code>iptables</code> chains <a data-type="indexterm" data-primary="chains, iptables" data-secondary="execution of" id="ch2_term36"/><a data-type="indexterm" data-primary="iptables, Linux" data-secondary="chains of" id="ch2_term37"/><a data-type="indexterm" data-primary="iptables, Linux" data-secondary="flow of packets through" id="ch2_term38"/>are a list of rules.
+When a packet triggers or passes through a chain,
+each rule is sequentially evaluated, until the packet matches a “terminating target” (such as <code>DROP</code>),
+or the packet reaches the end of the chain.</p>
+
+<p>The built-in, “top-level” chains are <code>PREROUTING</code>, <code>INPUT</code>, <code>NAT</code>, <code>OUTPUT</code>, and <code>POSTROUTING</code>.
+These are powered by <a data-type="indexterm" data-primary="chains, iptables" data-secondary="Netfilter hooks and" id="idm46219943805112"/><a data-type="indexterm" data-primary="iptables, Linux" data-secondary="Netfilter and" id="idm46219943804104"/><a data-type="indexterm" data-primary="Linux networking" data-secondary="with Netfilter" data-secondary-sortas="Netfilter" id="idm46219943803160"/><a data-type="indexterm" data-primary="Netfilter, Linux" data-secondary="hooks of" id="idm46219943801944"/><a data-type="indexterm" data-primary="packets" data-secondary="Netfilter hooks and" id="idm46219943801000"/>Netfilter hooks.
+Each chain corresponds to a hook.
+<a data-type="xref" href="#iptables_chains_and_corresponding_netfilter_hooks">Table 2-5</a> shows the <a data-type="indexterm" data-primary="INPUT, iptables chain" id="ch2_term40"/><a data-type="indexterm" data-primary="OUTPUT, iptables chain" id="ch2_term41"/>chain and hook pairs.
+There are also user-defined subchains that exist to help organize rules.</p>
+<table id="iptables_chains_and_corresponding_netfilter_hooks">
+<caption><span class="label">Table 2-5. </span><code>iptables</code> chains and corresponding Netfilter hooks</caption>
+<thead>
+<tr>
+<th>iptables chain</th>
+<th>Netfilter hook</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><p><code>PREROUTIN</code></p></td>
+<td><p><code>NF_IP_PRE_ROUTING</code></p></td>
+</tr>
+<tr>
+<td><p><code>INPUT</code></p></td>
+<td><p><code>NF_IP_LOCAL_IN</code></p></td>
+</tr>
+<tr>
+<td><p><code>NAT</code></p></td>
+<td><p><code>NF_IP_FORWARD</code></p></td>
+</tr>
+<tr>
+<td><p><code>OUTPUT</code></p></td>
+<td><p><code>NF_IP_LOCAL_OUT</code></p></td>
+</tr>
+<tr>
+<td><p><code>POSTROUTING</code></p></td>
+<td><p><code>NF_IP_POST_ROUTING</code></p></td>
+</tr>
+</tbody>
+</table>
+
+<p>Returning to our diagram of Netfilter hook ordering,
+we can infer the equivalent diagram of <code>iptables</code> chain execution and ordering
+for a given packet (see <a data-type="xref" href="#img-iptables-packet-flow">Figure 2-4</a>).</p>
+
+<figure><div id="img-iptables-packet-flow" class="figure">
+<img src="Images/neku_0204.png" alt="neku 0204" width="1418" height="496"/>
+<h6><span class="label">Figure 2-4. </span>The possible flows of a packet through <code>iptables</code> chains</h6>
+</div></figure>
+
+<p class="pagebreak-before">Again, like Netfilter,
+there are only a handful of ways that a packet can traverse these chains
+(assuming the packet is not rejected or dropped along the way).
+Let’s use an example with three machines,
+with IP addresses <code>10.0.0.1</code>, <code>10.0.0.2</code>, and <code>10.0.0.3</code>, respectively.
+We will show some routing scenarios
+from the perspective of machine 1 (with IP address <code>10.0.0.1</code>).
+We <a data-type="indexterm" data-primary="iptables, Linux" data-secondary="tables of" id="idm46219943776952"/><a data-type="indexterm" data-primary="tables, iptables" id="idm46219943775944"/><a data-type="indexterm" data-primary="packets" data-secondary="inbound/outbound" id="ch2_term44"/><a data-type="indexterm" data-primary="packets" data-secondary="iptables processing of" id="ch2_term48"/>examine them in <a data-type="xref" href="#table0206">Table 2-6</a>.</p>
+<table id="table0206">
+<caption><span class="label">Table 2-6. </span><code>iptables</code> chains executed in various scenarios</caption>
+<thead>
+<tr>
+<th>Packet description</th>
+<th>Packet source</th>
+<th>Packet destination</th>
+<th>Tables processed</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><p>An inbound packet, from another machine.</p></td>
+<td><p><code>10.0.0.2</code></p></td>
+<td><p><code>10.0.0.1</code></p></td>
+<td><p><code>PREROUTING</code>, <code>INPUT</code></p></td>
+</tr>
+<tr>
+<td><p>An inbound packet, not destined for this machine.</p></td>
+<td><p><code>10.0.0.2</code></p></td>
+<td><p><code>10.0.0.3</code></p></td>
+<td><p><code>PREROUTING</code>, <code>NAT</code>, <code>POSTROUTING</code></p></td>
+</tr>
+<tr>
+<td><p>An outbound packet, originating locally, destined for another machine.</p></td>
+<td><p><code>10.0.0.1</code></p></td>
+<td><p><code>10.0.0.2</code></p></td>
+<td><p><code>OUTPUT</code>, <code>POSTROUTING</code></p></td>
+</tr>
+<tr>
+<td><p>A packet from a local program, destined for the same machine.</p></td>
+<td><p><code>127.0.0.1</code></p></td>
+<td><p><code>127.0.0.1</code></p></td>
+<td><p><code>OUTPUT</code>, <code>POSTROUTING</code> (then <code>PREROUTING</code>, <code>INPUT</code> as the packet re-enters via the loopback interface)</p></td>
+</tr>
+</tbody>
+</table>
+<div data-type="tip"><h6>Tip</h6>
+<p>You can experiment with chain execution behavior on your own
+using <code>LOG</code> rules.
+For example:</p>
+
+<pre data-type="programlisting">iptables -A OUTPUT -p tcp --dport 22 -j LOG
+--log-level info --log-prefix "ssh-output"</pre>
+
+<p>will log TCP packets to port 22 when they are processed by the <code>OUTPUT</code> chain,
+with the <a data-type="indexterm" data-primary="ssh-output, Linux" id="idm46219943748392"/>log prefix "<code>ssh-output</code>“.
+Be aware that log size can quickly become unwieldy.
+Log on important hosts with care.</p>
+</div>
+
+<p>Recall that when a packet triggers a chain,
+<code>iptables</code> executes <a data-type="indexterm" data-primary="Filter table, iptables" id="ch2_term45"/><a data-type="indexterm" data-primary="Mangle table, iptables" id="ch2_term46"/><a data-type="indexterm" data-primary="Raw table, iptables" id="ch2_term47"/>tables within that chain (specifically, the rules within each table)
+in the following order:</p>
+<ol>
+<li>
+<p>Raw</p>
+</li>
+<li>
+<p>Mangle</p>
+</li>
+<li>
+<p>NAT</p>
+</li>
+<li>
+<p>Filter</p>
+</li>
+
+</ol>
+
+<p>Most chains do not contain all tables;
+however, the relative execution order remains the same.
+This is a design decision to reduce redundancy.
+For example, the Raw table exists to manipulate packets “entering” <code>iptables</code>,
+and therefore has only <code>PREROUTING</code> and <code>OUTPUT</code> chains, in accordance with Netfilter’s packet flow. The tables that contain each chain are laid out in <a data-type="xref" href="#table0207">Table 2-7</a>.</p>
+<table id="table0207">
+<caption><span class="label">Table 2-7. </span>Which <code>iptables</code> tables (rows) contain which chains (columns)</caption>
+<thead>
+<tr>
+<th/>
+<th>Raw</th>
+<th>Mangle</th>
+<th>NAT</th>
+<th>Filter</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><p><code>PREROUTING</code></p></td>
+<td><p>✓</p></td>
+<td><p>✓</p></td>
+<td><p>✓</p></td>
+<td/>
+</tr>
+<tr>
+<td><p><code>INPUT</code></p></td>
+<td/>
+<td><p>✓</p></td>
+<td><p>✓</p></td>
+<td><p>✓</p></td>
+</tr>
+<tr>
+<td><p><code>FORWARD</code></p></td>
+<td/>
+<td><p>✓</p></td>
+<td/>
+<td><p>✓</p></td>
+</tr>
+<tr>
+<td><p><code>OUTPUT</code></p></td>
+<td><p>✓</p></td>
+<td><p>✓</p></td>
+<td><p>✓</p></td>
+<td><p>✓</p></td>
+</tr>
+<tr>
+<td><p><code>POSTROUTING</code></p></td>
+<td/>
+<td><p>✓</p></td>
+<td><p>✓</p></td>
+<td/>
+</tr>
+</tbody>
+</table>
+
+<p>You can <a data-type="indexterm" data-primary="iptables -L command" id="idm46219943714312"/>list the chains that correspond to a table yourself, with <code>iptables -L -t &lt;table&gt;</code>:</p>
+
+<pre data-type="programlisting" data-code-language="bash"><code class="nv">$ </code>iptables -L -t filter
+Chain INPUT <code class="o">(</code>policy ACCEPT<code class="o">)</code>
+target     prot opt <code class="nb">source               </code>destination
+
+Chain FORWARD <code class="o">(</code>policy ACCEPT<code class="o">)</code>
+target     prot opt <code class="nb">source               </code>destination
+
+Chain OUTPUT <code class="o">(</code>policy ACCEPT<code class="o">)</code>
+target     prot opt <code class="nb">source               </code>destination</pre>
+
+<p>There is a small caveat for the <a data-type="indexterm" data-primary="DNAT (destination NAT)" id="idm46219943705992"/><a data-type="indexterm" data-primary="SNAT (source NAT)" id="idm46219943705384"/>NAT table:
+DNAT can be performed in <code>PREROUTING</code> or <code>OUTPUT`</code>,
+and SNAT can be performed in only <code>INPUT</code> or <code>POSTROUTING</code>.</p>
+
+<p>To give an example, suppose we have an inbound packet destined for our host.
+The order of execution would be:</p>
+<ol>
+<li>
+<p><code>PREROUTING</code></p>
+<ol>
+<li>
+<p>Raw</p>
+</li>
+<li>
+<p>Mangle</p>
+</li>
+<li>
+<p>NAT</p>
+</li>
+
+</ol>
+</li>
+<li>
+<p><code>INPUT</code></p>
+<ol>
+<li>
+<p>Mangle</p>
+</li>
+<li>
+<p>NAT</p>
+</li>
+<li>
+<p>Filter</p>
+</li>
+
+</ol>
+</li>
+
+</ol>
+
+<p>Now that we’ve learned about Netfilter hooks, tables, and chains,
+let’s take one last look at the flow of a packet through <code>iptables</code>,
+shown in <a data-type="xref" href="#img-iptables-flow">Figure 2-5</a>.</p>
+
+<figure><div id="img-iptables-flow" class="figure">
+<img src="Images/neku_0205.png" alt="Iptables packet" width="1365" height="815"/>
+<h6><span class="label">Figure 2-5. </span>The flow of a packet through <code>iptables</code> tables and chains. A circle denotes a table/hook combination that exists in <code>iptables</code>.</h6>
+</div></figure>
+
+<p>All <code>iptables</code> rules <a data-type="indexterm" data-primary="rules, iptables" data-secondary="chains, tables and" id="idm46219943677208"/>belong to a table and chain,
+the possible combinations of which are represented as dots in our flow chart.
+<code>iptables</code> evaluates chains (and the rules in them, in order) based on the order
+of Netfilter hooks that a packet triggers.
+For the given chain, <code>iptables</code> evaluates that chain in each table that it is present in
+(note that some chain/table combinations do not exist, such as Filter/<code>POSTROUTING</code>).
+If we trace the flow of a packet originating from the local host,
+we see the following table/chains pairs evaluated, in order:</p>
+<ol>
+<li>
+<p>Raw/<code>OUTPUT</code></p>
+</li>
+<li>
+<p>Mangle/<code>OUTPUT</code></p>
+</li>
+<li>
+<p>NAT/<code>OUTPUT</code></p>
+</li>
+<li>
+<p>Filter/<code>OUTPUT</code></p>
+</li>
+<li>
+<p>Mangle/<code>POSTROUTING</code></p>
+</li>
+<li>
+<p>NAT/<code>POSTROUTING</code></p>
+</li>
+
+</ol>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect3" class="less_space pagebreak-before" data-pdf-bookmark="Subchains"><div class="sect3" id="idm46219943813992">
+<h3>Subchains</h3>
+
+<p>The aforementioned chains are the top-level, or entry-point, <a data-type="indexterm" data-startref="ch2_term38" id="idm46219943649064"/><a data-type="indexterm" data-startref="ch2_term39" id="idm46219943648008"/><a data-type="indexterm" data-startref="ch2_term40" id="idm46219943647336"/><a data-type="indexterm" data-startref="ch2_term41" id="idm46219943646664"/><a data-type="indexterm" data-startref="ch2_term44" id="idm46219943645992"/><a data-type="indexterm" data-startref="ch2_term45" id="idm46219943645320"/><a data-type="indexterm" data-startref="ch2_term46" id="idm46219943644648"/><a data-type="indexterm" data-startref="ch2_term47" id="idm46219943643976"/>chains.
+However, users can define their own <a data-type="indexterm" data-primary="chains, iptables" data-secondary="and subchains" data-secondary-sortas="subchains" id="idm46219943643112"/><a data-type="indexterm" data-primary="subchains, iptables" id="idm46219943641896"/>subchains
+and execute them with the JUMP target.
+<code>iptables</code> executes such a chain in the same manner,
+target by target, until a terminating target matches.
+This can be useful for logical separation
+or reusing a series of targets that can be executed in more than one context
+(i.e., a similar motivation to why we might organize code into a function).
+Such organization of rules across chains can have a substantial impact on performance.
+<code>iptables</code> is, effectively,
+running tens or hundreds or thousands of <code>if</code> statements against every
+single packet that goes in or out of your system.
+That has measurable impact on packet latency, CPU use, and network throughput.
+A well-organized set of chains reduces this overhead
+by eliminating effectively redundant checks or actions.
+However, <code>iptables</code>’s performance <a data-type="indexterm" data-primary="performance, improving" id="idm46219943638712"/><a data-type="indexterm" data-primary="Kubernetes" data-secondary="issues with" id="idm46219943638104"/>given a service with many pods is still a problem in Kubernetes,
+which makes other solutions with less or no <code>iptables</code> use,
+such as IPVS or eBPF,
+more appealing.</p>
+
+<p>Let’s look at <a data-type="indexterm" data-primary="firewalls" data-secondary="with iptables chain" data-secondary-sortas="iptables chain" id="idm46219943636488"/><a data-type="indexterm" data-primary="incoming-ssh chain, Linux" id="idm46219943635400"/><a data-type="indexterm" data-primary="ssh command, Linux" id="idm46219943634792"/>creating new chains in <a data-type="xref" href="#SSH-IPtables">Example 2-6</a>.</p>
+<div id="SSH-IPtables" data-type="example">
+<h5><span class="label">Example 2-6. </span>Sample <code>iptables</code> chain for SSH firewalling</h5>
+
+<pre data-type="programlisting" data-code-language="bash"><code class="c"># Create incoming-ssh chain.</code>
+<code class="nv">$ </code>iptables -N incoming-ssh
+
+<code class="c"># Allow packets from specific IPs.</code>
+<code class="nv">$ </code>iptables -A incoming-ssh -s 10.0.0.1 -j ACCEPT
+<code class="nv">$ </code>iptables -A incoming-ssh -s 10.0.0.2 -j ACCEPT
+
+<code class="c"># Log the packet.</code>
+<code class="nv">$ </code>iptables -A incoming-ssh -j LOG --log-level info --log-prefix <code class="s2">"ssh-failure"</code>
+
+<code class="c"># Drop packets from all other IPs.</code>
+<code class="nv">$ </code>iptables -A incoming-ssh -j DROP
+
+<code class="c"># Evaluate the incoming-ssh chain,</code>
+<code class="c"># if the packet is an inbound TCP packet addressed to port 22.</code>
+<code class="nv">$ </code>iptables -A INPUT -p tcp --dport <code class="m">22</code> -j incoming-ssh</pre></div>
+
+<p>This example creates a new chain, <code>incoming-ssh</code>,
+which is evaluated for any TCP packets inbound on port 22.
+The chain allows packets from two specific IP addresses,
+and packets from other addresses are logged and dropped.</p>
+
+<p>Filter chains end in a default action, such as dropping the packet if no prior target matched.
+Chains will default to <code>ACCEPT</code> if no default is specified.
+<code>iptables -P &lt;chain&gt; &lt;target&gt;</code> sets the <a data-type="indexterm" data-startref="ch2_term37" id="idm46219943621320"/><a data-type="indexterm" data-startref="ch2_term36" id="idm46219943620616"/>default.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect3" data-pdf-bookmark="iptables rules"><div class="sect3" id="idm46219943619688">
+<h3>iptables rules</h3>
+
+<p>Rules have <a data-type="indexterm" data-primary="iptables, Linux" data-secondary="rules of" id="ch2_term49"/><a data-type="indexterm" data-primary="rules, iptables" id="ch2_term50"/>two parts: a <a data-type="indexterm" data-primary="match types and extensions, iptables" id="idm46219943599272"/><a data-type="indexterm" data-primary="rules, iptables" data-secondary="match types and extensions for" id="idm46219943598552"/>match condition and an action (called a <em>target</em>).
+The match condition describes a packet attribute.
+If the packet matches,
+the action will be executed.
+If the packet does not match,
+<code>iptables</code> will move to check the next rule.</p>
+
+<p>Match conditions check if a given packet meets some criteria,
+for example, if the packet has a specific source address.
+The order of operations from tables/chains is important to remember,
+as prior operations can impact the packet
+by mutating it, dropping it, or rejecting it.
+<a data-type="xref" href="#some_common_iptables_match_types">Table 2-8</a> shows some common <a data-type="indexterm" data-primary="flags" data-secondary="with iptable match types" data-secondary-sortas="iptable match types" id="idm46219943595096"/>match types.</p>
+<table id="some_common_iptables_match_types">
+<caption><span class="label">Table 2-8. </span>Some common <code>iptables</code> match types</caption>
+<thead>
+<tr>
+<th>Match type</th>
+<th>Flag(s)</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><p>Source</p></td>
+<td><p><code>-s</code>, <code>--src</code>, <code>--source</code></p></td>
+<td><p>Matches packets with the specified source address.</p></td>
+</tr>
+<tr>
+<td><p>Destination</p></td>
+<td><p><code>-d</code>, <code>--dest</code>, <code>--destination</code></p></td>
+<td><p>Matches packets with the destination source address.</p></td>
+</tr>
+<tr>
+<td><p>Protocol</p></td>
+<td><p><code>-p</code>, <code>--protocol</code></p></td>
+<td><p>Matches packets with the specified protocol.</p></td>
+</tr>
+<tr>
+<td><p>In interface</p></td>
+<td><p><code>-i</code>, <code>--in-interface</code></p></td>
+<td><p>Matches packets that entered via the specified interface.</p></td>
+</tr>
+<tr>
+<td><p>Out interface</p></td>
+<td><p><code>-o</code>, <code>--out-interface</code></p></td>
+<td><p>Matches packets that are leaving the specified interface.</p></td>
+</tr>
+<tr>
+<td><p>State</p></td>
+<td><p><code>-m state --state &lt;states&gt;</code></p></td>
+<td><p>Matches packets from connections that are in one of the comma-separated states. This uses the Conntrack states (NEW, ESTABLISHED, RELATED, INVALID).</p></td>
+</tr>
+</tbody>
+</table>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>Using <code>-m</code> or <code>--match</code>,
+<code>iptables</code> can use extensions for match criteria.
+Extensions range from nice-to-haves, such as specifying multiple ports in a single rule (multiport),
+to more complex features such as eBPF interactions.
+<code>man iptables-extensions</code> contains more information.</p>
+</div>
+
+<p>There are two <a data-type="indexterm" data-primary="iptables, Linux" data-secondary="target actions and types of" id="ch2_term51"/><a data-type="indexterm" data-primary="nonterminating targets, iptables" id="ch2_term52"/><a data-type="indexterm" data-primary="rules, iptables" data-secondary="target actions of" id="ch2_term53"/><a data-type="indexterm" data-primary="target actions and types, iptables" id="ch2_term54"/><a data-type="indexterm" data-primary="terminating targets, iptables" id="ch2_term55"/>kinds of target actions: terminating and nonterminating.
+A terminating target
+will stop <code>iptables</code> from checking subsequent targets in the chain,
+essentially acting as a final decision.
+A nonterminating target
+will allow <code>iptables</code> to continue checking subsequent targets in the chain.
+<code>ACCEPT</code>, <code>DROP</code>, <code>REJECT</code>, and <code>RETURN</code> are all terminating targets.
+Note that <code>ACCEPT</code> and <code>RETURN</code> are terminating only <em>within their chain</em>.
+That is to say, if a packet hits an <code>ACCEPT</code> target in a subchain,
+the parent chain will resume processing
+and could potentially drop or reject the target.
+<a data-type="xref" href="#IPTABLEs-REJECT">Example 2-7</a> shows a set of rules that would reject packets to port 80,
+despite matching an <code>ACCEPT</code> at one point.
+Some command output has been removed for simplicity.</p>
+<div id="IPTABLEs-REJECT" data-type="example" class="less_space pagebreak-before">
+<h5><span class="label">Example 2-7. </span>Rule sequence which would reject some previously accepted packets</h5>
+
+<pre data-type="programlisting" data-code-language="bash"><code class="sb">```</code>
+<code class="nv">$ </code>iptables -L --line-numbers
+Chain INPUT <code class="o">(</code>policy ACCEPT<code class="o">)</code>
+num  target     prot opt <code class="nb">source               </code>destination
+<code class="m">1</code>    accept-all  all  --  anywhere             anywhere
+<code class="m">2</code>    REJECT     tcp  --  anywhere             anywhere
+    tcp dpt:80 reject-with icmp-port-unreachable
+
+Chain accept-all <code class="o">(</code><code class="m">1</code> references<code class="o">)</code>
+num  target     prot opt <code class="nb">source               </code>destination
+<code class="m">1</code>               all  --  anywhere             anywhere
+<code class="sb">```</code></pre></div>
+
+<p><a data-type="xref" href="#common_iptables_target_types_and_behavior">Table 2-9</a> summarizes common <a data-type="indexterm" data-primary="DNAT (destination NAT)" id="idm46219943531912"/><a data-type="indexterm" data-primary="MASQUERADE, iptables" id="idm46219943531304"/><a data-type="indexterm" data-primary="NAT (network address translation)" data-secondary="iptables and" id="idm46219943530664"/><a data-type="indexterm" data-primary="SNAT (source NAT)" id="idm46219943529752"/><a data-type="indexterm" data-primary="Filter table, iptables" id="idm46219943529080"/>target types and their behavior.</p>
+<table id="common_iptables_target_types_and_behavior">
+<caption><span class="label">Table 2-9. </span>Common <code>iptables</code> target types and behavior</caption>
+<thead>
+<tr>
+<th>Target type</th>
+<th>Applicable tables</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><p><code>AUDIT</code></p></td>
+<td><p>All</p></td>
+<td><p>Records data about accepted, dropped, or rejected packets.</p></td>
+</tr>
+<tr>
+<td><p><code>ACCEPT</code></p></td>
+<td><p>Filter</p></td>
+<td><p>Allows the packet to continue unimpeded and without further modification.</p></td>
+</tr>
+<tr>
+<td><p><code>DNAT</code></p></td>
+<td><p>NAT</p></td>
+<td><p>Modifies the destination address.</p></td>
+</tr>
+<tr>
+<td><p><code>DROPs</code></p></td>
+<td><p>Filter</p></td>
+<td><p>Discards the packet. To an external observer, it will appear as though the packet was never received.</p></td>
+</tr>
+<tr>
+<td><p><code>JUMP</code></p></td>
+<td><p>All</p></td>
+<td><p>Executes another chain. Once that chain finishes executing, execution of the parent chain will continue.</p></td>
+</tr>
+<tr>
+<td><p><code>LOG</code></p></td>
+<td><p>All</p></td>
+<td><p>Logs the packet contents, via the kernel log.</p></td>
+</tr>
+<tr>
+<td><p><code>MARK</code></p></td>
+<td><p>All</p></td>
+<td><p>Sets a special integer for the packet, used as an identifier by Netfilter. The integer can be used in other <code>iptables</code> decisions and is not written to the packet itself.</p></td>
+</tr>
+<tr>
+<td><p><code>MASQUERADE</code></p></td>
+<td><p>NAT</p></td>
+<td><p>Modifies the source address of the packet, replacing it with the address of a specified network interface. This is similar to SNAT, but does not require the machine’s IP address to be known in advance.</p></td>
+</tr>
+<tr>
+<td><p><code>REJECT</code></p></td>
+<td><p>Filter</p></td>
+<td><p>Discards the packet and sends a rejection reason.</p></td>
+</tr>
+<tr>
+<td><p><code>RETURN</code></p></td>
+<td><p>All</p></td>
+<td><p>Stops processing the current chain (or subchain). Note that this is <em>not</em> a terminating target, and if there is a parent chain, that chain will continue to be processed.</p></td>
+</tr>
+<tr>
+<td><p><code>SNAT</code></p></td>
+<td><p>NAT</p></td>
+<td><p>Modifies the source address of the packet, replacing it with a fixed address. See also: <code>MASQUERADE</code>.</p></td>
+</tr>
+</tbody>
+</table>
+
+<p class="pagebreak-before">Each target type may have specific options, such as ports or log strings, that apply to the rule.
+<a data-type="xref" href="#iptables_target_command_examples">Table 2-10</a> shows some example commands and explanations.</p>
+<table id="iptables_target_command_examples">
+<caption><span class="label">Table 2-10. </span><code>iptables</code> target command examples</caption>
+<thead>
+<tr>
+<th>Command</th>
+<th>Explanation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><p>iptables -A INPUT -s 10.0.0.1</p></td>
+<td><p>Accepts an inbound packet if the source address is <code>10.0.0.1</code>.</p></td>
+</tr>
+<tr>
+<td><p>iptables -A INPUT -p ICMP</p></td>
+<td><p>Accepts all inbound ICMP packets.</p></td>
+</tr>
+<tr>
+<td><p>iptables -A INPUT -p tcp --dport 443</p></td>
+<td><p>Accepts all inbound TCP packets to port 443.</p></td>
+</tr>
+<tr>
+<td><p>iptables -A INPUT -p tcp --dport 22 -j DROP</p></td>
+<td><p>Drops all inbound TCP ports to port 22.</p></td>
+</tr>
+</tbody>
+</table>
+
+<p>A target belongs to both a table and a chain,
+which control when (if at all) <code>iptables</code> executes the aforementioned target for a given packet.
+Next, we’ll put together what we’ve learned
+and look at <code>iptables</code> commands in <a data-type="indexterm" data-startref="ch2_term51" id="idm46219943450760"/><a data-type="indexterm" data-startref="ch2_term52" id="idm46219943450024"/><a data-type="indexterm" data-startref="ch2_term53" id="idm46219943449352"/><a data-type="indexterm" data-startref="ch2_term54" id="idm46219943448680"/><a data-type="indexterm" data-startref="ch2_term55" id="idm46219943448008"/>practice.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect3" data-pdf-bookmark="Practical iptables"><div class="sect3" id="idm46219943619064">
+<h3>Practical iptables</h3>
+
+<p>You can <a data-type="indexterm" data-primary="chains, iptables" data-secondary="iptables -L for showing" id="idm46219943445704"/><a data-type="indexterm" data-primary="iptables, Linux" data-secondary="chains of" id="idm46219943444696"/><a data-type="indexterm" data-primary="iptables -L command" id="idm46219943443752"/>show <code>iptables</code> chains with <code>iptables -L</code>:</p>
+
+<pre data-type="programlisting" data-code-language="bash"><code class="nv">$ </code>iptables -L
+Chain INPUT <code class="o">(</code>policy ACCEPT<code class="o">)</code>
+target     prot opt <code class="nb">source               </code>destination
+
+Chain FORWARD <code class="o">(</code>policy ACCEPT<code class="o">)</code>
+target     prot opt <code class="nb">source               </code>destination
+
+Chain OUTPUT <code class="o">(</code>policy ACCEPT<code class="o">)</code>
+target     prot opt <code class="nb">source               </code>destination</pre>
+<div data-type="warning" epub:type="warning"><h6>Warning</h6>
+<p>There is a <a data-type="indexterm" data-primary="ip6tables" id="idm46219943433480"/><a data-type="indexterm" data-primary="IPv4" data-secondary="iptables with" id="idm46219943432776"/><a data-type="indexterm" data-primary="IPv6" data-secondary="ip6tables with" id="idm46219943431832"/>distinct but nearly identical program, <code>ip6tables</code>, for managing IPv6 rules. <code>iptables</code> and <code>ip6tables</code>
+rules are completely separate. For example, dropping all packets to TCP <code>0.0.0.0:22</code> with <code>iptables</code> will not prevent
+connections to TCP <code>[::]:22</code>, and vice versa for <code>ip6tables</code>.</p>
+
+<p>For simplicity, we will refer only to <code>iptables</code> and IPv4 addresses in this section.</p>
+</div>
+
+<p><code>--line-numbers</code> shows <a data-type="indexterm" data-primary="rules, iptables" data-secondary="--line-numbers for" data-secondary-sortas="line-numbers for" id="idm46219943415336"/>numbers for each rule in a chain.
+This can be helpful when inserting or deleting rules.
+<code>-I &lt;chain&gt; &lt;line&gt;</code> inserts a rule at the specified line number,
+before the previous rule at that line.</p>
+
+<p class="pagebreak-before">The typical <a data-type="indexterm" data-primary="rules, iptables" data-secondary="command format for" id="idm46219943412856"/>format of a command to interact with <code>iptables</code> rules is:</p>
+
+<pre data-type="programlisting">iptables [-t table] {-A|-C|-D} chain rule-specification</pre>
+
+<p>where <code>-A</code> is for <em>append</em>, <code>-C</code> is for <em>check</em>, and <code>-D</code> is for <em>delete</em>.</p>
+<div data-type="warning" epub:type="warning"><h6>Warning</h6>
+<p><code>iptables</code> rules <a data-type="indexterm" data-primary="rules, iptables" data-secondary="reloading after restarts" id="idm46219943405752"/>aren’t persisted across restarts. <code>iptables</code> provides <code>iptables-save</code> and <code>iptables-restore</code> tools,
+which can be used manually or with simple automation to capture or reload rules. This is something that most firewall
+tools paper over by automatically creating their own <code>iptables</code> rules every time the system <a data-type="indexterm" data-startref="ch2_term49" id="idm46219943402664"/><a data-type="indexterm" data-startref="ch2_term50" id="idm46219943401960"/>starts.</p>
+</div>
+
+<p><code>iptables</code> can masquerade <a data-type="indexterm" data-primary="masquerading connections, iptables" id="idm46219943383288"/>connections,
+making it appear as if the packets came from their own IP address.
+This is useful to provide a simplified exterior to the outside world.
+A common use case is to provide a known host for traffic,
+as a security bastion, or to provide a predictable set of IP addresses to third parties.
+In Kubernetes,
+masquerading can make pods use their node’s IP address,
+despite the fact that pods have unique IP addresses.
+This is necessary to communicate outside the cluster
+in many setups,
+where pods have internal IP addresses that cannot communicate directly with the <a data-type="indexterm" data-primary="MASQUERADE, iptables" id="idm46219943381960"/><a data-type="indexterm" data-primary="SNAT (source NAT)" id="idm46219943381320"/>internet.
+The <code>MASQUERADE</code> target is similar to SNAT;
+however, it does not require a <code>--source-address</code> to be known and specified in advance.
+Instead, it uses the address of a specified interface.
+This is slightly less performant than SNAT in cases where the new source address is static,
+as <code>iptables</code> must continuously fetch the address:</p>
+
+<pre data-type="programlisting" data-code-language="bash"><code class="nv">$iptables</code> -t nat -A POSTROUTING -o eth0 -j MASQUERADE</pre>
+
+<p><code>iptables</code> can perform <a data-type="indexterm" data-primary="connection fan-out with iptables" id="idm46219943354776"/><a data-type="indexterm" data-primary="iptables, Linux" data-secondary="load balancing by" id="ch2_term56"/><a data-type="indexterm" data-primary="DNAT (destination NAT)" id="idm46219943377496"/><a data-type="indexterm" data-primary="iptables, Linux" data-secondary="random routing with" id="idm46219943376824"/><a data-type="indexterm" data-primary="load balancing" data-secondary="with iptables" data-secondary-sortas="iptables" id="ch2_term57"/>connection-level load balancing
+or more accurately, connection fan-out.
+This technique relies on DNAT rules
+and random selection (to prevent every connection from being routed to the first DNAT target):</p>
+
+<pre data-type="programlisting" data-code-language="bash"><code class="nv">$ </code>iptables -t nat -A OUTPUT -p tcp --dport <code class="m">80</code> -d <code class="nv">$FRONT_IP</code> -m statistic <code class="se">\</code>
+--mode random --probability 0.5 -j DNAT --to-destination <code class="nv">$BACKEND1_IP</code>:80
+<code class="nv">$ </code>iptables -t nat -A OUTPUT -p tcp --dport <code class="m">80</code> -d <code class="nv">$FRONT_IP</code> <code class="se">\</code>
+-j DNAT --to-destination <code class="nv">$BACKEND2_IP</code>:80</pre>
+
+<p>In the previous <a data-type="indexterm" data-primary="backend destinations" data-secondary="iptables and" id="idm46219943367224"/>example,
+there is a 50% chance of routing to the first backend.
+Otherwise, the packet proceeds to the next rule,
+which is guaranteed to route the connection to the second backend.
+The math gets a little tedious for adding more backends.
+To have an equal chance of routing to any backend,
+the nth backend must have a 1/n chance of being routed to.
+If there were three backends, the probabilities would need to be 0.3 (repeating), 0.5, and 1:</p>
+
+<pre data-type="programlisting" data-code-language="bash" class="less_space pagebreak-before">Chain KUBE-SVC-I7EAKVFJLYM7WH25 <code class="o">(</code><code class="m">1</code> references<code class="o">)</code>
+target     prot opt <code class="nb">source               </code>destination
+KUBE-SEP-LXP5RGXOX6SCIC6C  all  --  anywhere             anywhere
+    statistic mode random probability 0.25000000000
+KUBE-SEP-XRJTEP3YTXUYFBMK  all  --  anywhere             anywhere
+    statistic mode random probability 0.33332999982
+KUBE-SEP-OMZR4HWUSCJLN33U  all  --  anywhere             anywhere
+    statistic mode random probability 0.50000000000
+KUBE-SEP-EELL7LVIDZU4CPY6  all  --  anywhere             anywhere</pre>
+
+<p>When Kubernetes uses <code>iptables</code> load balancing for a service,
+it creates a chain as shown previously.
+If you look closely, you can see rounding errors in one of the probability numbers.</p>
+
+<p>Using DNAT fan-out for load balancing has several caveats.
+It has no feedback for the load of a given backend
+and will always map application-level queries on the same connection
+to the same backend.
+Because the DNAT result lasts the lifetime of the connection,
+if long-lived connections are common,
+many downstream clients may stick to the same upstream backend
+if that backend is longer lived than others.
+To give a Kubernetes example,
+suppose a <a data-type="indexterm" data-primary="gRPC service" id="idm46219943314120"/>gRPC service has only two replicas and
+then additional replicas scale up.
+gRPC reuses the same HTTP/2 connection,
+so existing downstream clients (using the Kubernetes service and not gRPC load balancing)
+will stay connected to the initial two replicas,
+skewing the load profile among gRPC backends.
+Because of this,
+many developers use a smarter client (such as making use of gRPC’s client-side load balancing),
+force periodic reconnects at the server and/or client,
+or use service meshes to externalize the problem.
+We’ll discuss load balancing in more detail in Chapters <a data-type="xref" data-xrefstyle="select:labelnumber" href="ch04.xhtml#kubernetes_networking_introduction">4</a> and <a data-type="xref" data-xrefstyle="select:labelnumber" href="ch05.xhtml#kubernetes_networking_abstractions">5</a>.</p>
+
+<p>Although <code>iptables</code> is widely used in Linux,
+it can become slow in the presence of a huge number of rules
+and offers limited load balancing functionality.
+Next we’ll <a data-type="indexterm" data-startref="ch2_term34" id="idm46219943328776"/><a data-type="indexterm" data-startref="ch2_term35" id="idm46219943328072"/><a data-type="indexterm" data-startref="ch2_term48" id="idm46219943327400"/>look at IPVS,
+an alternative that is more purpose-built for load balancing.</p>
+</div></section>
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="IPVS"><div class="sect2" id="idm46219943899320">
+<h2>IPVS</h2>
+
+<p>IP Virtual Server (IPVS) is a <a data-type="indexterm" data-primary="IPVS (IP Virtual Server), Linux" data-secondary="routing packets with" id="idm46219943325032"/><a data-type="indexterm" data-primary="Transport layer, TCP/IP (L4)" data-secondary="load balancing and" id="idm46219943323992"/><a data-type="indexterm" data-primary="IPVS (IP Virtual Server), Linux" id="ch2_term58"/><a data-type="indexterm" data-primary="Linux, routing in" data-secondary="with IPVS" data-secondary-sortas="IPVS" id="ch2_term59"/><a data-type="indexterm" data-primary="load balancing" data-secondary="with IPVS" data-secondary-sortas="IPVS" id="ch2_term60"/>Linux connection (L4) load balancer.
+<a data-type="xref" href="#img-ipvs">Figure 2-6</a> shows a simple diagram of IPVS’s role in routing packets.</p>
+
+<figure><div id="img-ipvs" class="figure">
+<img src="Images/neku_0206.png" alt="IPVS" width="1161" height="986"/>
+<h6><span class="label">Figure 2-6. </span>IPVS</h6>
+</div></figure>
+
+<p><code>iptables</code> can do simple L4 load balancing by
+randomly routing connections, with the randomness shaped by the weights on individual DNAT rules.
+IPVS supports
+multiple <a data-type="indexterm" data-primary="destination hashing (dh), IPVS mode" id="idm46219943288184"/><a data-type="indexterm" data-primary="least connection (lc), IPVS mode" id="idm46219943287464"/><a data-type="indexterm" data-primary="never queue (nq), IPVS mode" id="idm46219943286776"/><a data-type="indexterm" data-primary="round-robin (rr), IPVS mode" id="idm46219943286088"/><a data-type="indexterm" data-primary="shortest expected delay (sed), IPVS mode" id="idm46219943285400"/><a data-type="indexterm" data-primary="source hashing (sh), IPVS mode" id="idm46219943284760"/><a data-type="indexterm" data-primary="IPVS (IP Virtual Server), Linux" data-secondary="Kubernetes-supported modes of" id="idm46219943284072"/><a data-type="indexterm" data-primary="Kubernetes" data-secondary="IPVS modes supported by" id="idm46219943283096"/>load balancing modes (in contrast with the <code>iptables</code> one), which are outlined in <a data-type="xref" href="#ipvs_modes_supported_in_kubernetes">Table 2-11</a>.
+This allows IPVS to spread load more effectively than <code>iptables</code>, depending on IPVS configuration and traffic patterns.</p>
+<table id="ipvs_modes_supported_in_kubernetes">
+<caption><span class="label">Table 2-11. </span>IPVS modes supported in Kubernetes</caption>
+<thead>
+<tr>
+<th>Name</th>
+<th>Shortcode</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><p>Round-robin</p></td>
+<td><p><code>rr</code></p></td>
+<td><p>Sends subsequent connections to the “next” host in a cycle. This increases the time between subsequent connections sent to a given host, compared to random routing like <code>iptables</code> enables.</p></td>
+</tr>
+<tr>
+<td><p>Least connection</p></td>
+<td><p><code>lc</code></p></td>
+<td><p>Sends connections to the host that currently has the least open connections.</p></td>
+</tr>
+<tr>
+<td><p>Destination hashing</p></td>
+<td><p><code>dh</code></p></td>
+<td><p>Sends connections deterministically to a specific host, based on the connections’ destination addresses.</p></td>
+</tr>
+<tr>
+<td><p>Source hashing</p></td>
+<td><p><code>sh</code></p></td>
+<td><p>Sends connections deterministically to a specific host, based on the connections’ source addresses.</p></td>
+</tr>
+<tr>
+<td><p>Shortest expected delay</p></td>
+<td><p><code>sed</code></p></td>
+<td><p>Sends connections to the host with the lowest connections to weight ratio.</p></td>
+</tr>
+<tr>
+<td><p>Never queue</p></td>
+<td><p><code>nq</code></p></td>
+<td><p>Sends connections to any host with no existing connections, otherwise uses “shortest expected delay” strategy.</p></td>
+</tr>
+</tbody>
+</table>
+
+<p>IPVS supports <a data-type="indexterm" data-primary="IP tunneling, IPVS mode" id="idm46219943245480"/><a data-type="indexterm" data-primary="backend destinations" data-secondary="iptables and" id="idm46219943244776"/><a data-type="indexterm" data-primary="forwarding" data-secondary="with IPVS" data-secondary-sortas="IPVS" id="idm46219943243800"/><a data-type="indexterm" data-primary="IPVS (IP Virtual Server), Linux" data-secondary="packet forwarding modes of" id="idm46219943242584"/><a data-type="indexterm" data-primary="MAC (Media Access Control) sublayer" data-secondary="IP tunneling and" id="idm46219943241704"/><a data-type="indexterm" data-primary="NAT (network address translation)" data-secondary="IPVS mode" id="idm46219943240792"/>packet forwarding modes:</p>
+
+<ul>
+<li>
+<p>NAT rewrites source and destination addresses.</p>
+</li>
+<li>
+<p>DR encapsulates IP datagrams within IP datagrams.</p>
+</li>
+<li>
+<p>IP tunneling directly routes packets to the backend server by rewriting the MAC address of the data frame with the MAC
+address of the selected backend server.</p>
+</li>
+</ul>
+
+<p>There are <a data-type="indexterm" data-primary="iptables, Linux" data-secondary="load balancing by" id="idm46219943235976"/><a data-type="indexterm" data-primary="load balancing" data-secondary="iptable issues with" id="idm46219943234968"/>three aspects to look at when it comes to issues with <code>iptables</code> as a load balancer:</p>
+<dl>
+<dt>Number of nodes in the cluster</dt>
+<dd>
+<p>Even though <a data-type="indexterm" data-primary="kube-proxy, Kubernetes" data-secondary="bottleneck with" id="idm46219943231672"/>Kubernetes already supports 5,000 nodes in release v1.6, <code>kube-proxy</code> with <code>iptables</code> is a bottleneck to
+scale the cluster to 5,000 nodes. One example is that with a NodePort service in a 5,000-node cluster, if we have 2,000
+services and each service has 10 pods, this will cause at least 20,000 <code>iptables</code> records on each worker node, which
+can make the kernel pretty busy.</p>
+</dd>
+<dt>Time</dt>
+<dd>
+<p>The time spent to add one rule when there are 5,000 services (40,000 rules) is 11 minutes. For 20,000 services (160,000 rules), it’s 5 hours.</p>
+</dd>
+<dt>Latency</dt>
+<dd>
+<p>There is <a data-type="indexterm" data-primary="latency, routing" id="idm46219943226568"/><a data-type="indexterm" data-primary="routing" data-secondary="latency in" id="idm46219943225832"/>latency to access a service (routing latency); each packet must traverse the <code>iptables</code> list until a match is made. There is latency to add/remove rules, inserting and removing from an extensive list is an intensive operation at
+scale.</p>
+</dd>
+</dl>
+
+<p>IPVS also <a data-type="indexterm" data-primary="IPVS (IP Virtual Server), Linux" data-secondary="session affinity and" id="idm46219943223480"/><a data-type="indexterm" data-primary="session affinity and IPVS" id="idm46219943222504"/>supports session affinity, which is exposed as an option in services 
+<span class="keep-together">(<code>Service.spec.sessionAffinity</code></span> and <code>Service.spec.sessionAffinityConfig</code>).
+Repeated connections,
+within the session affinity time window,
+will route to the same host.
+This can be useful for scenarios such as minimizing cache misses.
+It can also make routing in any mode effectively stateful (by indefinitely routing connections from the same address to the same host),
+but the routing stickiness is less absolute in Kubernetes,
+where individual pods come and go.</p>
+
+<p>To create a <a data-type="indexterm" data-primary="ipvsadm commands" id="idm46219943219192"/><a data-type="indexterm" data-primary="load balancing" data-secondary="ipvsadm command for" id="idm46219943218488"/>basic load balancer with two equally weighted destinations,
+run <code>ipvsadm -A -t &lt;address&gt; -s &lt;mode&gt;</code>.
+<code>-A</code>, <code>-E</code>, and <code>-D</code> are used to add, edit, and delete virtual services, respectively.
+The lowercase counterparts, <code>-a</code>, <code>-e</code>, and <code>-d</code>,
+are used to add, edit, and delete host backends, respectively:</p>
+
+<pre data-type="programlisting"># ipvsadm -A -t 1.1.1.1:80 -s lc
+# ipvsadm -a -t 1.1.1.1:80 -r 2.2.2.2 -m -w 100
+# ipvsadm -a -t 1.1.1.1:80 -r 3.3.3.3 -m -w 100</pre>
+
+<p>You can list the IPVS hosts with <code>-L</code>.
+Each virtual server (a unique IP address and port combination)
+is shown, with its backends:</p>
+
+<pre data-type="programlisting"># ipvsadm -L
+IP Virtual Server version 1.2.1 (size=4096)
+Prot LocalAddress:Port Scheduler Flags
+  -&gt; RemoteAddress:Port           Forward Weight ActiveConn InActConn
+TCP  1.1.1.1.80:http lc
+  -&gt; 2.2.2.2:http             Masq    100    0          0
+  -&gt; 3.3.3.3:http             Masq    100    0          0</pre>
+
+<p><code>-L</code> supports multiple options, such as <code>--stats</code>, to show additional connection <a data-type="indexterm" data-startref="ch2_term56" id="idm46219943210136"/><a data-type="indexterm" data-startref="ch2_term57" id="idm46219943209432"/><a data-type="indexterm" data-startref="ch2_term58" id="idm46219943208760"/><a data-type="indexterm" data-startref="ch2_term59" id="idm46219943208088"/><a data-type="indexterm" data-startref="ch2_term60" id="idm46219943207416"/>
+<span class="keep-together">statistics.</span></p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="eBPF"><div class="sect2" id="idm46219943326008">
+<h2>eBPF</h2>
+
+<p>eBPF is a programming <a data-type="indexterm" data-primary="eBPF (Berkeley Packet Filtering)" data-secondary="Linux kernel operations with" id="ch2_term61"/><a data-type="indexterm" data-primary="eBPF (Berkeley Packet Filtering)" id="ch2_term62"/><a data-type="indexterm" data-primary="filtering" data-secondary="with eBPF" data-secondary-sortas="eBPF" id="ch2_term63"/><a data-type="indexterm" data-primary="Linux, routing in" data-secondary="with eBPF" data-secondary-sortas="eBPF" id="ch2_term64"/>system that allows special sandboxed programs to run in the kernel
+without passing back and forth between kernel and user space,
+like we saw with Netfilter and <code>iptables</code>.</p>
+
+<p>Before eBPF, there was the <a data-type="indexterm" data-primary="Berkeley Packet Filter (BPF)" id="idm46219943197992"/><a data-type="indexterm" data-primary="BPF (Berkeley Packet Filter)" id="idm46219943197272"/>Berkeley Packet Filter (BPF). BPF is a technology used in the kernel,
+among other things, to analyze network traffic. BPF supports filtering packets, which allows a userspace process to
+supply a filter that specifies which packets it wants to inspect. <a data-type="indexterm" data-primary="tcpdump tool" data-secondary="with BPF and eBPF" data-secondary-sortas="BPF and eBPF" id="idm46219943196184"/>One of BPF’s use cases is <code>tcpdump</code>, shown in <a data-type="xref" href="#img-epbf">Figure 2-7</a>. When you specify
+a filter on <code>tcpdump</code>, it compiles it as a BPF program and passes it to BPF. The techniques in BPF have been extended
+to other processes and kernel operations.</p>
+
+<figure><div id="img-epbf" class="figure">
+<img src="Images/neku_0207.png" alt="tcpdump-ebpf" width="3192" height="1412"/>
+<h6><span class="label">Figure 2-7. </span><code>tcpdump</code></h6>
+</div></figure>
+
+<p>An eBPF program has <a data-type="indexterm" data-primary="syscalls" id="idm46219943190584"/>direct access to syscalls.
+eBPF programs can directly watch and block syscalls, without the usual approach of adding kernel hooks to a
+userspace program. Because of its performance characteristics,  it is well suited for writing networking software.</p>
+<div data-type="tip"><h6>Tip</h6>
+<p>You can learn more about eBPF on its <a href="http://ebpf.io">website</a>.</p>
+</div>
+
+<p>In addition to socket filtering, other supported <a data-type="indexterm" data-primary="kprobes, eBPF" id="idm46219943187144"/><a data-type="indexterm" data-primary="perf_events, eBPF" id="idm46219943186440"/><a data-type="indexterm" data-primary="tracepoints, eBPF" id="idm46219943185768"/><a data-type="indexterm" data-primary="uprobes, eBPF" id="idm46219943185096"/><a data-type="indexterm" data-primary="XDP, eBPF" id="idm46219943184424"/>attach points in the kernel are as 
+<span class="keep-together">follows:</span></p>
+<dl>
+<dt>Kprobes</dt>
+<dd>
+<p>Dynamic kernel tracing of internal kernel components.</p>
+</dd>
+<dt>Uprobes</dt>
+<dd>
+<p>User-space tracing.</p>
+</dd>
+<dt>Tracepoints</dt>
+<dd>
+<p>Kernel static tracing. These are programed into the kernel by developers and are more stable as
+compared to kprobes, which may change between kernel versions.</p>
+</dd>
+<dt>perf_events</dt>
+<dd>
+<p>Timed sampling of data and events.</p>
+</dd>
+<dt>XDP</dt>
+<dd>
+<p>Specialized eBPF programs that can go lower than kernel space to access driver space to act directly on packets.</p>
+</dd>
+</dl>
+
+<p>Let’s <a data-type="indexterm" data-primary="tcpdump tool" data-secondary="with BPF and eBPF" data-secondary-sortas="BPF and eBPF" id="idm46219943175128"/>return to <code>tcpdump</code> as an example. <a data-type="xref" href="#img-epbf-example">Figure 2-8</a> shows a simplified rendition of <code>tcpdump</code>’s interactions with eBPF.</p>
+
+<figure><div id="img-epbf-example" class="figure">
+<img src="Images/neku_0208.png" alt="ebpf" width="646" height="637"/>
+<h6><span class="label">Figure 2-8. </span>eBPF example</h6>
+</div></figure>
+
+<p>Suppose we run <code>tcpdump -i any</code>.</p>
+
+<p>The string is compiled by <code>pcap_compile</code> into a BPF program. The kernel will then use this BPF program to filter all
+packets that go through all the network devices we specified, any with the <code>-I</code> in our case.</p>
+
+<p>It will make this data available to <code>tcpdump</code> via a map. Maps are a data structure consisting of key-value pairs used by
+the BPF programs to exchange <a data-type="indexterm" data-startref="ch2_term61" id="idm46219943166600"/>data.</p>
+
+<p>There are <a data-type="indexterm" data-primary="eBPF (Berkeley Packet Filtering)" data-secondary="Kubernetes and" id="idm46219943165352"/><a data-type="indexterm" data-primary="Kubernetes" data-secondary="eBPF with" id="idm46219943164280"/>many reasons to use eBPF with Kubernetes:</p>
+<dl>
+<dt>Performance (hashing table versus <code>iptables</code> list)</dt>
+<dd>
+
+<p>For every service added to Kubernetes, the <a data-type="indexterm" data-primary="rules, iptables" data-secondary="versus eBPF hashing table" data-secondary-sortas="eBPF hashing table" id="idm46219943160968"/><a data-type="indexterm" data-primary="iptables, Linux" data-secondary="rules of" id="idm46219943159704"/><a data-type="indexterm" data-primary="performance, improving" id="idm46219943158760"/>list of <code>iptables</code> rules that have to be traversed grows exponentially.
+Because of the lack of incremental updates, the entire list of rules has to be replaced each time a new rule is added.
+This leads to a total duration of 5 hours to install the 160,000 <code>iptables</code> rules representing 20,000 Kubernetes services.</p>
+</dd>
+<dt>Tracing</dt>
+<dd>
+
+<p>Using <a data-type="indexterm" data-primary="tracing with cgroup-bpf" id="idm46219943155496"/>BPF, we can gather pod and container-level network statistics. The BPF socket filter is nothing new, but the <a data-type="indexterm" data-primary="cgroup-bpf, eBPF" id="idm46219943154504"/>BPF socket
+filter per cgroup is. Introduced in Linux 4.10, <code>cgroup-bpf</code> allows  attaching eBPF programs to cgroups. Once attached,
+the program is executed for all packets entering or exiting any process in the cgroup.</p>
+</dd>
+<dt>Auditing <code>kubectl exec</code> with eBPF</dt>
+<dd>
+
+<p>With eBPF, you can attach a program that will record any commands executed in the <code>kubectl exec</code> session and
+pass those commands to a userspace program that logs those events.</p>
+</dd>
+<dt>Security</dt>
+<dd>
+<div class="openblock"><dl>
+<dt>Seccomp</dt>
+<dd>
+<p>Secured <a data-type="indexterm" data-primary="Seccomp filters" id="idm46219943147688"/><a data-type="indexterm" data-primary="security" data-secondary="eBPF for" id="idm46219943146952"/>computing that restricts what syscalls are allowed. Seccomp filters can be written in eBPF.</p>
+</dd>
+<dt>Falco</dt>
+<dd>
+<p>Open <a data-type="indexterm" data-primary="Falco security" id="idm46219943144488"/>source container-native runtime security that uses eBPF.</p>
+</dd>
+</dl>
+</div>
+
+</dd>
+</dl>
+
+<p>The most common <a data-type="indexterm" data-primary="Application layer (L7)" data-secondary="with Cilium" data-secondary-sortas="Cilium" id="idm46219943142648"/><a data-type="indexterm" data-primary="Cilium" data-secondary="eBPF for" id="idm46219943141400"/><a data-type="indexterm" data-primary="kube-proxy, Kubernetes" data-secondary="Cilium as replacement for" id="idm46219943140424"/>use of eBPF in Kubernetes is Cilium,
+CNI and service implementation.
+Cilium replaces <code>kube-proxy</code>, which writes <code>iptables</code> rules to map a service’s IP address
+to its corresponding pods.</p>
+
+<p>Through eBPF, Cilium can intercept and route all packets directly in the kernel,
+which is faster and allows for application-level (layer 7) load <a data-type="indexterm" data-startref="ch2_term31" id="idm46219943137896"/><a data-type="indexterm" data-startref="ch2_term62" id="idm46219943137192"/><a data-type="indexterm" data-startref="ch2_term63" id="idm46219943136520"/><a data-type="indexterm" data-startref="ch2_term64" id="idm46219943135848"/>balancing.
+We will cover <code>kube-proxy</code> in <a data-type="xref" href="ch04.xhtml#kubernetes_networking_introduction">Chapter 4</a>.</p>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Network Troubleshooting Tools"><div class="sect1" id="idm46219943205592">
+<h1>Network Troubleshooting Tools</h1>
+
+<p>Troubleshooting <a data-type="indexterm" data-primary="debugging" id="ch2_term65"/><a data-type="indexterm" data-primary="Linux networking" data-secondary="troubleshooting tools for" id="ch2_term66"/><a data-type="indexterm" data-primary="troubleshooting" id="ch2_term67"/>network-related issues with Linux is a complex topic
+and could easily fill its own book.
+In this section, we will introduce some key troubleshooting tools
+and the basics of <a data-type="indexterm" data-primary="troubleshooting tools, cheat sheet of Linux" id="idm46219943128456"/>their use (<a data-type="xref" href="#cheatsheet_of_common_debugging_cases_and_tools">Table 2-12</a> is provided as a simple cheat sheet of tools and applicable use cases).
+Think of this section as a jumping-off point for common Kubernetes-related tool uses.
+Man pages, <code>--help</code>, and the internet can guide you further.
+There is substantial overlap in the tools that we describe,
+so you may find learning about some tools (or tool features) redundant.
+Some are better suited to a given task than others
+(for example, multiple tools will catch TLS errors,
+but OpenSSL provides the richest debugging information).
+Exact tool use may come down to preference, familiarity, and availability.</p>
+<table id="cheatsheet_of_common_debugging_cases_and_tools">
+<caption><span class="label">Table 2-12. </span>Cheat sheet of common debugging cases and tools</caption>
+<thead>
+<tr>
+<th>Case</th>
+<th>Tools</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><p>Checking connectivity</p></td>
+<td><p><code>traceroute</code>, <code>ping</code>, <code>telnet</code>, <code>netcat</code></p></td>
+</tr>
+<tr>
+<td><p>Port scanning</p></td>
+<td><p><code>nmap</code></p></td>
+</tr>
+<tr>
+<td><p>Checking DNS records</p></td>
+<td><p><code>dig</code>, commands mentioned in “Checking Connectivity”</p></td>
+</tr>
+<tr>
+<td><p>Checking HTTP/1</p></td>
+<td><p>cURL, <code>telnet</code>, <code>netcat</code></p></td>
+</tr>
+<tr>
+<td><p>Checking HTTPS</p></td>
+<td><p>OpenSSL, cURL</p></td>
+</tr>
+<tr>
+<td><p>Checking listening programs</p></td>
+<td><p><code>netstat</code></p></td>
+</tr>
+</tbody>
+</table>
+
+<p>Some networking tools that we describe likely won’t be preinstalled in your distro of choice,
+but all should be available through your distro’s package manager.
+We will sometimes use <code># Truncated</code> in command output where we have omitted text
+to avoid examples becoming repetitive or overly long.</p>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Security Warning"><div class="sect2" id="idm46219943108584">
+<h2>Security Warning</h2>
+
+<p>Before we get into tooling details, we need to talk about <a data-type="indexterm" data-primary="security" data-secondary="networking tools and" id="idm46219943107080"/>security.
+An attacker <a data-type="indexterm" data-primary="attacker strategies" data-secondary="with networking tools" data-secondary-sortas="networking tools" id="idm46219943105896"/>can utilize any tool listed here
+in order to explore and access additional systems.
+There are many strong opinions on this topic,
+but we consider it best practice to leave the fewest possible networking tools installed on a given machine.</p>
+
+<p>An attacker may still be able to download tools themselves (e.g., by downloading a binary from the internet)
+or use the standard package manager (if they have sufficient permission).
+In most cases,
+you are simply introducing some additional friction
+prior to exploring and exploiting.
+However, in some cases you can reduce an attacker’s capabilities by not preinstalling networking tools.</p>
+
+<p>Linux file <a data-type="indexterm" data-primary="setuid bit set, Linux" id="idm46219943102840"/>permissions include something called the <em>setuid bit</em> that
+is sometimes used by networking tools.
+If a file has the setuid bit set,
+executing said file causes the file to be executed <em>as the user who owns the file</em>,
+rather than the current user.
+You can observe this by looking for an <code>s</code> rather than an <code>x</code> in the permission readout of a file:</p>
+
+<pre data-type="programlisting">$ ls -la /etc/passwd
+-rwsr-xr-x 1 root root 68208 May 28  2020 /usr/bin/passwd</pre>
+
+<p>This allows programs to expose limited, privileged capabilities (for example, <code>passwd</code> uses this ability to allow a
+user to update their password, without allowing arbitrary writes to the password file). A number of networking tools
+(<code>ping</code>, <code>nmap</code>, etc.) may use the setuid bit on some systems to send raw packets, sniff packets, etc. If an attacker downloads their own copy
+of a tool and cannot gain root privileges, they will be able to do less with said tool than if it was installed by the system with the setuid bit set.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="ping"><div class="sect2" id="idm46219943097224">
+<h2>ping</h2>
+
+<p><code>ping</code> is a simple <a data-type="indexterm" data-primary="ping network utility" data-secondary="defined" id="idm46219943095208"/>program that <a data-type="indexterm" data-primary="echo requests, ICMP" id="idm46219943094072"/><a data-type="indexterm" data-primary="ICMP (Internet Control Message Protocol)" data-secondary="echo requests and replies" id="idm46219943093432"/>sends ICMP <code>ECHO_REQUEST</code> packets to networked devices.
+It is a common, simple <a data-type="indexterm" data-primary="testing for network connections" id="idm46219943092072"/>way to test network connectivity from one host to another.</p>
+
+<p>ICMP is a <a data-type="indexterm" data-primary="ping network utility" data-secondary="failure of Kubernetes with" id="idm46219943090952"/>layer 4 protocol, like TCP and UDP.
+Kubernetes services support TCP and UDP, but not ICMP.
+This means that pings to a Kubernetes service will always fail.
+Instead, you will need to use <code>telnet</code> or a higher-level tool such as cURL to check connectivity to a service.
+Individual pods may still be reachable by <code>ping</code>, depending on your network configuration.</p>
+<div data-type="warning" epub:type="warning"><h6>Warning</h6>
+<p>Firewalls and <a data-type="indexterm" data-primary="ICMP (Internet Control Message Protocol)" data-secondary="routing packets in" id="idm46219943087496"/>routing software are aware of ICMP packets
+and can be configured to filter or route specific ICMP packets.
+It is common, but not guaranteed (or necessarily advisable), to have permissive rules for ICMP packets.
+Some network administrators, network software, or cloud providers will allow ICMP packets by default.</p>
+</div>
+
+<p>The basic <a data-type="indexterm" data-primary="ping network utility" data-secondary="ping &lt;address&gt; command" id="idm46219943085416"/>use of <code>ping</code> is simply <code>ping &lt;address&gt;</code>.
+The address can be an IP address or a domain.
+<code>ping</code> will send a packet, wait,
+and report the status of that request when a response or timeout happens.</p>
+
+<p>By default, <code>ping</code> will send packets forever,
+and must be manually stopped (e.g., with Ctrl-C).
+<code>-c &lt;count&gt;</code> will make <code>ping</code> perform a fixed number
+before shutting down.
+On shutdown, <code>ping</code> also prints a summary:</p>
+
+<pre data-type="programlisting">$ ping -c 2 k8s.io
+PING k8s.io (34.107.204.206): 56 data bytes
+64 bytes from 34.107.204.206: icmp_seq=0 ttl=117 time=12.665 ms
+64 bytes from 34.107.204.206: icmp_seq=1 ttl=117 time=12.403 ms
+
+--- k8s.io ping statistics ---
+2 packets transmitted, 2 packets received, 0.0% packet loss
+round-trip min/avg/max/stddev = 12.403/12.534/12.665/0.131 ms</pre>
+
+<p><a data-type="xref" href="#useful_ping_options">Table 2-13</a> shows <a data-type="indexterm" data-primary="ping network utility" data-secondary="options for" id="idm46219943078360"/>common <code>ping</code> options.</p>
+<table id="useful_ping_options">
+<caption><span class="label">Table 2-13. </span>Useful <code>ping</code> options</caption>
+<thead>
+<tr>
+<th>Option</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><p>-c &lt;count&gt;</p></td>
+<td><p>Sends the specified number of packets. Exits after the final packet is received or times out.</p></td>
+</tr>
+<tr>
+<td><p>-i &lt;seconds&gt;</p></td>
+<td><p>Sets the wait interval between sending packets. Defaults to 1 second. Extremely low values are not recommended, as <code>ping</code> can flood the network.</p></td>
+</tr>
+<tr>
+<td><p>-o</p></td>
+<td><p>Exit after receiving 1 packet. Equivalent to <code>-c 1</code>.</p></td>
+</tr>
+<tr>
+<td><p>-S &lt;source address&gt;</p></td>
+<td><p>Uses the specified source address for the packet.</p></td>
+</tr>
+<tr>
+<td><p>-W &lt;milliseconds&gt;</p></td>
+<td><p>Sets the wait interval to receive a packet. If <code>ping</code> receives the packet later than the wait time, it will still count toward the final summary.</p></td>
+</tr>
+</tbody>
+</table>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="traceroute"><div class="sect2" id="idm46219943062712">
+<h2>traceroute</h2>
+
+<p><code>traceroute</code> shows the <a data-type="indexterm" data-primary="traceroute" id="idm46219943060984"/><a data-type="indexterm" data-primary="routing" data-secondary="traceroute for hosts in" id="idm46219943060248"/>network route taken from one host to another. This allows users to easily validate and debug the
+route taken (or where routing fails) from one machine to another.</p>
+
+<p><code>traceroute</code> sends packets with specific IP time-to-live values.
+Recall from <a data-type="xref" href="ch01.xhtml#networking_introduction">Chapter 1</a> that each host that <a data-type="indexterm" data-primary="time to live (TTL) value" id="idm46219943057224"/>handles a packet decrements the time-to-live (TTL) value on packets by 1,
+therefore limiting the number of hosts that a request can be handled by.
+When a host receives a packet
+and decrements the TTL to 0, it sends a <code>TIME_EXCEEDED</code> packet
+and discards the original packet.
+The <code>TIME_EXCEEDED</code> response packet contains the source address of the machine where the packet timed out.
+By starting with a TTL of 1 and raising the TTL by 1 for each packet,
+<code>traceroute</code> is able to get a response from each host along the route to the destination address.</p>
+
+<p><code>traceroute</code> displays hosts line by line,
+starting with the first external machine.
+Each line contains the hostname (if available), IP address, and response time:</p>
+
+<pre data-type="programlisting">$traceroute k8s.io
+traceroute to k8s.io (34.107.204.206), 64 hops max, 52 byte packets
+ 1  router (10.0.0.1)  8.061 ms  2.273 ms  1.576 ms
+ 2  192.168.1.254 (192.168.1.254)  2.037 ms  1.856 ms  1.835 ms
+ 3  adsl-71-145-208-1.dsl.austtx.sbcglobal.net (71.145.208.1)
+4.675 ms  7.179 ms  9.930 ms
+ 4  * * *
+ 5  12.122.149.186 (12.122.149.186)  20.272 ms  8.142 ms  8.046 ms
+ 6  sffca22crs.ip.att.net (12.122.3.70)  14.715 ms  8.257 ms  12.038 ms
+ 7  12.122.163.61 (12.122.163.61)  5.057 ms  4.963 ms  5.004 ms
+ 8  12.255.10.236 (12.255.10.236)  5.560 ms
+    12.255.10.238 (12.255.10.238)  6.396 ms
+    12.255.10.236 (12.255.10.236)  5.729 ms
+ 9  * * *
+10  206.204.107.34.bc.googleusercontent.com (34.107.204.206)
+64.473 ms  10.008 ms  9.321 ms</pre>
+
+<p>If <code>traceroute</code> receives no response from a given hop before timing out,
+it prints a <em>*</em>.
+Some hosts may refuse to send a <code>TIME_EXCEEDED</code> packet,
+or a firewall along the way may prevent successful delivery.</p>
+
+<p><a data-type="xref" href="#useful_traceroute_options">Table 2-14</a> shows common <code>traceroute</code> options.</p>
+<table id="useful_traceroute_options">
+<caption><span class="label">Table 2-14. </span>Useful <code>traceroute</code> options</caption>
+<thead>
+<tr>
+<th>Option</th>
+<th>Syntax</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><p>First TTL</p></td>
+<td><p><code>-f &lt;TTL&gt;</code>, <code>-M &lt;TTL&gt;</code></p></td>
+<td><p>Set the starting IP TTL (default value: 1). Setting the TTL to <code>n</code> will cause 
+<span class="keep-together"><code>traceroute</code></span> to not report the first <code>n-1</code> hosts en route to the destination.</p></td>
+</tr>
+<tr>
+<td><p>Max TTL</p></td>
+<td><p><code>-m &lt;TTL&gt;</code></p></td>
+<td><p>Set the maximum TTL, i.e., the maximum number of hosts that <code>traceroute</code> will attempt to route through.</p></td>
+</tr>
+<tr>
+<td><p>Protocol</p></td>
+<td><p><code>-P &lt;protocol&gt;</code></p></td>
+<td><p>Send packets of the specified protocol (TCP, UDP, ICMP, and sometimes other options). UDP is default.</p></td>
+</tr>
+<tr>
+<td><p>Source address</p></td>
+<td><p><code>-s &lt;address&gt;</code></p></td>
+<td><p>Specify the source IP address of outgoing packets.</p></td>
+</tr>
+<tr>
+<td><p>Wait</p></td>
+<td><p><code>-w &lt;seconds&gt;</code></p></td>
+<td><p>Set the time to wait for a probe response.</p></td>
+</tr>
+</tbody>
+</table>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="dig"><div class="sect2" id="idm46219943030088">
+<h2>dig</h2>
+
+<p><code>dig</code> is a <a data-type="indexterm" data-primary="dig DNS lookup tool" id="ch2_term68"/><a data-type="indexterm" data-primary="DNS (Domain Name System)" data-secondary="dig lookup tool for" id="ch2_term69"/>DNS lookup tool.
+You can use it to make DNS queries from the command line
+and display the results.</p>
+
+<p>The general form of a <code>dig</code> command is <code>dig [options] &lt;domain&gt;</code>.
+By default, <code>dig</code> will display the CNAME, A, and AAAA records:</p>
+
+<pre data-type="programlisting">$ dig kubernetes.io
+
+; &lt;&lt;&gt;&gt; DiG 9.10.6 &lt;&lt;&gt;&gt; kubernetes.io
+;; global options: +cmd
+;; Got answer:
+;; -&gt;&gt;HEADER&lt;&lt;- opcode: QUERY, status: NOERROR, id: 51818
+;; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1452
+;; QUESTION SECTION:
+;kubernetes.io.			IN	A
+
+;; ANSWER SECTION:
+kubernetes.io.		960	IN	A	147.75.40.148
+
+;; Query time: 12 msec
+;; SERVER: 2600:1700:2800:7d4f:6238:e0ff:fe08:6a7b#53
+(2600:1700:2800:7d4f:6238:e0ff:fe08:6a7b)
+;; WHEN: Mon Jul 06 00:10:35 PDT 2020
+;; MSG SIZE  rcvd: 71</pre>
+
+<p>To display a particular type of DNS record, run <code>dig &lt;domain&gt; &lt;type&gt;</code> (or <code>dig -t &lt;type&gt; &lt;domain&gt;</code>).
+This is overwhelmingly the main use case for <code>dig</code>:</p>
+
+<pre data-type="programlisting">$ dig kubernetes.io TXT
+
+; &lt;&lt;&gt;&gt; DiG 9.10.6 &lt;&lt;&gt;&gt; -t TXT kubernetes.io
+;; global options: +cmd
+;; Got answer:
+;; -&gt;&gt;HEADER&lt;&lt;- opcode: QUERY, status: NOERROR, id: 16443
+;; flags: qr rd ra; QUERY: 1, ANSWER: 2, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 512
+;; QUESTION SECTION:
+;kubernetes.io.			IN	TXT
+
+;; ANSWER SECTION:
+kubernetes.io.		3599	IN	TXT
+"v=spf1 include:_spf.google.com ~all"
+kubernetes.io.		3599	IN	TXT
+"google-site-verification=oPORCoq9XU6CmaR7G_bV00CLmEz-wLGOL7SXpeEuTt8"
+
+;; Query time: 49 msec
+;; SERVER: 2600:1700:2800:7d4f:6238:e0ff:fe08:6a7b#53
+(2600:1700:2800:7d4f:6238:e0ff:fe08:6a7b)
+;; WHEN: Sat Aug 08 18:11:48 PDT 2020
+;; MSG SIZE  rcvd: 171</pre>
+
+<p><a data-type="xref" href="#useful_dig_options">Table 2-15</a> shows common <code>dig</code> options.</p>
+<table id="useful_dig_options">
+<caption><span class="label">Table 2-15. </span>Useful <code>dig</code> options</caption>
+<thead>
+<tr>
+<th>Option</th>
+<th>Syntax</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><p>IPv4</p></td>
+<td><p><code>-4</code></p></td>
+<td><p>Use IPv4 only.</p></td>
+</tr>
+<tr>
+<td><p>IPv6</p></td>
+<td><p><code>-6</code></p></td>
+<td><p>Use IPv6 only.</p></td>
+</tr>
+<tr>
+<td><p>Address</p></td>
+<td><p><code>-b &lt;address&gt;[#&lt;port&gt;]</code></p></td>
+<td><p>Specify the address to make a DNS query to. Port can optionally be included, preceded by <em>#</em>.</p></td>
+</tr>
+<tr>
+<td><p>Port</p></td>
+<td><p><code>-p &lt;port&gt;</code></p></td>
+<td><p>Specify the port to query, in case DNS is exposed on a nonstandard port. The default is 53, the DNS standard.</p></td>
+</tr>
+<tr>
+<td><p>Domain</p></td>
+<td><p><code>-q &lt;domain&gt;</code></p></td>
+<td><p>The domain name to query. The domain name is usually specified as a positional argument.</p></td>
+</tr>
+<tr>
+<td><p>Record Type</p></td>
+<td><p><code>-t &lt;type&gt;</code></p></td>
+<td><p>The DNS record type to query. The record type can alternatively be specified as a positional argument.</p></td>
+</tr>
+</tbody>
+</table>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="telnet"><div class="sect2" id="idm46219942998824">
+<h2>telnet</h2>
+
+<p><code>telnet</code> is both <a data-type="indexterm" data-startref="ch2_term68" id="idm46219942996872"/><a data-type="indexterm" data-startref="ch2_term69" id="idm46219942996136"/><a data-type="indexterm" data-primary="telnet protocol and tool" id="idm46219942995464"/>a network protocol and a tool for using said protocol.
+<code>telnet</code> was once used for remote login,
+in a manner similar to <a data-type="indexterm" data-primary="ssh command, Linux" id="idm46219942994248"/>SSH.
+SSH has become dominant due to having better security,
+but <code>telnet</code> is still extremely useful for debugging servers that use a text-based protocol.
+For example, with <code>telnet</code>,
+you can connect to an HTTP/1 server and manually make requests against it.</p>
+
+<p>The basic syntax of <code>telnet</code> is <code>telnet &lt;address&gt; &lt;port&gt;</code>.
+This establishes a connection and provides an interactive command-line interface.
+Pressing Enter twice will send a command,
+which easily allows multiline commands to be written.
+Press Ctrl-J to exit the session:</p>
+
+<pre data-type="programlisting">$ telnet kubernetes.io
+Trying 147.75.40.148...
+Connected to kubernetes.io.
+Escape character is '^]'.
+&gt; HEAD / HTTP/1.1
+&gt; Host: kubernetes.io
+&gt;
+HTTP/1.1 301 Moved Permanently
+Cache-Control: public, max-age=0, must-revalidate
+Content-Length: 0
+Content-Type: text/plain
+Date: Thu, 30 Jul 2020 01:23:53 GMT
+Location: https://kubernetes.io/
+Age: 2
+Connection: keep-alive
+Server: Netlify
+X-NF-Request-ID: a48579f7-a045-4f13-af1a-eeaa69a81b2f-23395499</pre>
+
+<p>To make full use of <code>telnet</code>, you will need to understand how the application protocol that you are using works. <code>telnet</code>
+is a classic tool to debug servers running HTTP, HTTPS, POP3, IMAP, and so on.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="nmap"><div class="sect2" id="idm46219942988376">
+<h2>nmap</h2>
+
+<p><code>nmap</code> is a <a data-type="indexterm" data-primary="nmap port scanner" id="idm46219942986584"/><a data-type="indexterm" data-primary="ports" data-secondary="nmap scanning for" id="idm46219942985848"/>port scanner,
+which allows you to explore and examine services on your 
+<span class="keep-together">network.</span></p>
+
+<p>The general syntax of <code>nmap</code> is <code>nmap [options] &lt;target&gt;</code>,
+where target is a domain, IP address, or IP CIDR.
+<code>nmap</code>’s default options will give a fast and brief summary of open ports on a host:</p>
+
+<pre data-type="programlisting">$ nmap 1.2.3.4
+Starting Nmap 7.80 ( https://nmap.org ) at 2020-07-29 20:14 PDT
+Nmap scan report for my-host (1.2.3.4)
+Host is up (0.011s latency).
+Not shown: 997 closed ports
+PORT     STATE SERVICE
+22/tcp   open  ssh
+3000/tcp open  ppp
+5432/tcp open  postgresql
+
+Nmap done: 1 IP address (1 host up) scanned in 0.45 seconds</pre>
+
+<p>In the previous example, <code>nmap</code> detects three open ports
+and guesses which service is running on each port.</p>
+<div data-type="tip"><h6>Tip</h6>
+<p>Because <code>nmap</code> can quickly <a data-type="indexterm" data-primary="attacker strategies" data-secondary="nmap for" id="idm46219942978856"/>show you which services are accessible from a remote machine,
+it can be a quick and easy way to spot services that should <em>not</em> be exposed.
+<code>nmap</code> is a favorite tool for attackers for this reason.</p>
+</div>
+
+<p><code>nmap</code> has a dizzying number of options,
+which change the scan behavior
+and level of detail provided.
+As with other commands,
+we will summarize some key options,
+but we <em>highly</em> recommend reading <code>nmap</code>’s help/man pages.</p>
+
+<p><a data-type="xref" href="#useful_nmap_options">Table 2-16</a> shows common <code>nmap</code> options.</p>
+<table id="useful_nmap_options">
+<caption><span class="label">Table 2-16. </span>Useful <code>nmap</code> options</caption>
+<thead>
+<tr>
+<th>Option</th>
+<th>Syntax</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><p>Additional detection</p></td>
+<td><p><code>-A</code></p></td>
+<td><p>Enable OS detection, version detection, and more.</p></td>
+</tr>
+<tr>
+<td><p>Decrease verbosity</p></td>
+<td><p><code>-d</code></p></td>
+<td><p>Decrease the command verbosity. Using multiple <code>d</code>’s (e.g., <code>-dd</code>) increases the effect.</p></td>
+</tr>
+<tr>
+<td><p>Increase verbosity</p></td>
+<td><p><code>-v</code></p></td>
+<td><p>Increase the command verbosity. Using multiple <code>v</code>’s (e.g., <code>-vv</code>) increases the effect.</p></td>
+</tr>
+</tbody>
+</table>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="netstat"><div class="sect2" id="idm46219942959688">
+<h2>netstat</h2>
+
+<p><code>netstat</code> can display <a data-type="indexterm" data-primary="netstat" id="ch2_term70"/><a data-type="indexterm" data-primary="sockets" data-secondary="netstat for displaying" id="ch2_term71"/>a wide range of information about a machine’s network stack and connections:</p>
+
+<pre data-type="programlisting">$ netstat
+Active internet connections (w/o servers)
+Proto Recv-Q Send-Q Local Address           Foreign Address         State
+tcp        0    164 my-host:ssh             laptop:50113            ESTABLISHED
+tcp        0      0 my-host:50051           example-host:48760      ESTABLISHED
+tcp6       0      0 2600:1700:2800:7d:54310 2600:1901:0:bae2::https TIME_WAIT
+udp6       0      0 localhost:38125         localhost:38125         ESTABLISHED
+Active UNIX domain sockets (w/o servers)
+Proto RefCnt Flags   Type    State  I-Node  Path
+unix  13     [ ]     DGRAM          8451    /run/systemd/journal/dev-log
+unix  2      [ ]     DGRAM          8463    /run/systemd/journal/syslog
+[Cut for brevity]</pre>
+
+<p>Invoking <code>netstat</code> with no additional arguments will display all <em>connected</em> sockets on the machine.
+In our example, we see three TCP sockets,
+one UDP socket, and a 
+<span class="keep-together">multitude</span> of UNIX sockets.
+The output includes the address (IP address and port) on both sides of a connection.</p>
+
+<p>We can <a data-type="indexterm" data-primary="listening connections, netstat for" id="idm46219942951656"/><a data-type="indexterm" data-primary="netstat -a and -l flags" id="idm46219942950952"/>use the <code>-a</code> flag to show all connections or <code>-l</code> to show only listening 
+<span class="keep-together">connections:</span></p>
+
+<pre data-type="programlisting">$ netstat -a
+Active internet connections (servers and established)
+Proto Recv-Q Send-Q Local Address           Foreign Address      State
+tcp        0      0 0.0.0.0:ssh             0.0.0.0:*            LISTEN
+tcp        0      0 0.0.0.0:postgresql      0.0.0.0:*            LISTEN
+tcp        0    172 my-host:ssh             laptop:50113         ESTABLISHED
+[Content cut]</pre>
+
+<p>A common use of <code>netstat</code> is to <a data-type="indexterm" data-primary="sudo netstat -lp" id="idm46219942946440"/>check which process is listening on a specific port.
+To do that, we run <code>sudo netstat -lp</code> -
+<code>l</code> for “listening” and <code>p</code> for “program.”
+<code>sudo</code> may be necessary for <code>netstat</code> to view all program information.
+The output for <code>-l</code> shows which address a service is listening on (e.g., <code>0.0.0.0</code> or <code>127.0.0.1</code>).</p>
+
+<p>We can use simple tools like <code>grep</code> to get a clear output from <code>netstat</code>
+when we are looking for a specific result:</p>
+
+<pre data-type="programlisting">$ sudo netstat -lp | grep 3000
+tcp6     0    0 [::]:3000       [::]:*       LISTEN     613/grafana-server</pre>
+
+<p><a data-type="xref" href="#useful_netstat_commands">Table 2-17</a> shows common <code>netstat</code> options.</p>
+<table id="useful_netstat_commands">
+<caption><span class="label">Table 2-17. </span>Useful <code>netstat</code> commands</caption>
+<thead>
+<tr>
+<th>Option</th>
+<th>Syntax</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><p>Show all sockets</p></td>
+<td><p><code>netstat -a</code></p></td>
+<td><p>Shows all sockets, not only open connections.</p></td>
+</tr>
+<tr>
+<td><p>Show statistics</p></td>
+<td><p><code>netstat -s</code></p></td>
+<td><p>Shows networking statistics. By default, <code>netstat</code> shows stats from all protocols.</p></td>
+</tr>
+<tr>
+<td><p>Show listening sockets</p></td>
+<td><p><code>netstat -l</code></p></td>
+<td><p>Shows sockets that are listening. This is an easy way to find running services.</p></td>
+</tr>
+<tr>
+<td><p>TCP</p></td>
+<td><p><code>netstat -t</code></p></td>
+<td><p>The <code>-t</code> flag shows only TCP data. It can be used with other flags, e.g., <code>-lt</code> (show sockets listening with TCP).</p></td>
+</tr>
+<tr>
+<td><p>UDP</p></td>
+<td><p><code>netstat -u</code></p></td>
+<td><p>The <code>-u</code> flag shows only UDP data. It can be used with other flags, e.g., <code>-lu</code> (show sockets listening with UDP).</p></td>
+</tr>
+</tbody>
+</table>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="netcat"><div class="sect2" id="idm46219942959096">
+<h2>netcat</h2>
+
+<p><code>netcat</code> is a <a data-type="indexterm" data-startref="ch2_term70" id="idm46219942917848"/><a data-type="indexterm" data-startref="ch2_term71" id="idm46219942917112"/><a data-type="indexterm" data-primary="nc (netcat) tool" id="idm46219942916440"/><a data-type="indexterm" data-primary="netcat (nc) tool" id="idm46219942915768"/>multipurpose tool for making connections, sending data, or listening on a socket.
+It can be helpful as a way to “manually” run a server or client
+to inspect what happens in greater detail.
+<code>netcat</code> is arguably similar to <code>telnet</code> in this regard,
+though <code>netcat</code> is capable of many more things.</p>
+<div data-type="tip"><h6>Tip</h6>
+<p><code>nc</code> is an alias for <code>netcat</code> on most systems.</p>
+</div>
+
+<p><code>netcat</code> can connect to a server when invoked as <code>netcat &lt;address&gt; &lt;port&gt;</code>.
+<code>netcat</code> has an interactive <code>stdin</code>, which allows you to
+manually type data or pipe data to <code>netcat</code>.
+It’s very <code>telnet</code>-esque so far:</p>
+
+<pre data-type="programlisting">$ echo -e "GET / HTTP/1.1\nHost: localhost\n" &gt; cmd
+$ nc localhost 80 &lt; cmd
+HTTP/1.1 302 Found
+Cache-Control: no-cache
+Content-Type: text/html; charset=utf-8
+[Content cut]</pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Openssl"><div class="sect2" id="idm46219942907560">
+<h2>Openssl</h2>
+
+<p>The OpenSSL <a data-type="indexterm" data-primary="HTTP" data-secondary="OpenSSL and" id="idm46219942905832"/><a data-type="indexterm" data-primary="certificates and keys" data-secondary="OpenSSL for" id="ch2_term72"/><a data-type="indexterm" data-primary="OpenSSL" id="ch2_term73"/><a data-type="indexterm" data-primary="OpenSSL" data-secondary="certificates and keys with" id="ch2_term74"/>technology powers a substantial chunk of the world’s HTTPS connections.
+Most heavy lifting with OpenSSL is done with language bindings,
+but it also has a CLI for operational tasks and debugging.
+<code>openssl</code> can do things such as creating keys and certificates,
+signing certificates, and,
+most relevant to us, <a data-type="indexterm" data-primary="testing for network connections" id="idm46219942900648"/>testing TLS/SSL connections.
+Many other tools,
+including ones outlined in this chapter,
+can test TLS/SSL connections.
+However, <code>openssl</code> stands out for its feature-richness and level of detail.</p>
+
+<p>Commands usually take the form <code>openssl [sub-command] [arguments] [options]</code>.
+<code>openssl</code> has a vast <a data-type="indexterm" data-primary="OpenSSL" data-secondary="subcommands in" id="idm46219942897832"/>number of subcommands (for example,
+<code>openssl rand</code> allows you to generate pseudo random data).
+The <code>list</code> subcommand allows you to list capabilities,
+with some search options
+(e.g., <code>openssl list --commands</code> for commands).
+To learn more about individual sub commands,
+you can check <code>openssl &lt;subcommand&gt; --help</code>
+or its man page (<code>man openssl-&lt;subcommand&gt;</code> or just <code>man &lt;subcommand&gt;</code>).</p>
+
+<p><code>openssl s_client -connect</code> will connect to a server and display detailed information about the server’s certificate.
+Here is the default invocation:</p>
+
+<pre data-type="programlisting">openssl s_client -connect k8s.io:443
+CONNECTED(00000003)
+depth=2 O = Digital Signature Trust Co., CN = DST Root CA X3
+verify return:1
+depth=1 C = US, O = Let's Encrypt, CN = Let's Encrypt Authority X3
+verify return:1
+depth=0 CN = k8s.io
+verify return:1
+---
+Certificate chain
+0 s:CN = k8s.io
+i:C = US, O = Let's Encrypt, CN = Let's Encrypt Authority X3
+1 s:C = US, O = Let's Encrypt, CN = Let's Encrypt Authority X3
+i:O = Digital Signature Trust Co., CN = DST Root CA X3
+---
+Server certificate
+-----BEGIN CERTIFICATE-----
+[Content cut]
+-----END CERTIFICATE-----
+subject=CN = k8s.io
+
+issuer=C = US, O = Let's Encrypt, CN = Let's Encrypt Authority X3
+
+---
+No client certificate CA names sent
+Peer signing digest: SHA256
+Peer signature type: RSA-PSS
+Server Temp Key: X25519, 253 bits
+---
+SSL handshake has read 3915 bytes and written 378 bytes
+Verification: OK
+---
+New, TLSv1.3, Cipher is TLS_AES_256_GCM_SHA384
+Server public key is 2048 bit
+Secure Renegotiation IS NOT supported
+Compression: NONE
+Expansion: NONE
+No ALPN negotiated
+Early data was not sent
+Verify return code: 0 (ok)
+---</pre>
+
+<p>If you are using a self-signed CA,
+you can use <code>-CAfile &lt;path&gt;</code> to use that CA.
+This will allow you to establish and verify connections against a <a data-type="indexterm" data-startref="ch2_term72" id="idm46219942890792"/><a data-type="indexterm" data-startref="ch2_term73" id="idm46219942890152"/><a data-type="indexterm" data-startref="ch2_term74" id="idm46219942889480"/>self-signed certificate.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="cURL"><div class="sect2" id="idm46219942888552">
+<h2>cURL</h2>
+
+<p>cURL is a data <a data-type="indexterm" data-primary="cURL/curl tool" data-secondary="for data transfer" data-secondary-sortas="data transfer" id="ch2_term76"/>transfer tool that supports multiple protocols,
+notably HTTP and HTTPS.</p>
+<div data-type="tip"><h6>Tip</h6>
+<p><code>wget</code> is a similar <a data-type="indexterm" data-primary="wget tool" id="idm46219942883384"/>tool to the command <code>curl</code>.
+Some distros or administrators may install it instead of <code>curl</code>.</p>
+</div>
+
+<p>cURL commands <a data-type="indexterm" data-primary="cURL/curl tool" data-secondary="commands with" id="ch2_term75"/>are of the form <code>curl [options] &lt;URL&gt;</code>. cURL prints the URL’s contents and sometimes cURL-specific
+messages to <code>stdout</code>. The <a data-type="indexterm" data-primary="cURL/curl tool" data-secondary="client requests with" id="idm46219942878792"/>default behavior is to make an HTTP GET request:</p>
+
+<pre data-type="programlisting">$ curl example.org
+&lt;!doctype html&gt;
+&lt;html&gt;
+&lt;head&gt;
+    &lt;title&gt;Example Domain&lt;/title&gt;
+# Truncated</pre>
+
+<p>By default, cURL does not follow redirects,
+such as HTTP 301s or protocol upgrades.
+The <code>-L</code> flag (or <code>--location</code>) will enable redirect following:</p>
+
+<pre data-type="programlisting">$ curl kubernetes.io
+Redirecting to https://kubernetes.io
+
+$ curl -L kubernetes.io
+&lt;!doctype html&gt;&lt;html lang=en class=no-js&gt;&lt;head&gt;
+# Truncated</pre>
+
+<p>Use the <code>-X</code> option to perform a specific HTTP verb;
+e.g., use <code>curl -X DELETE foo/bar</code> to make a <code>DELETE</code> request.</p>
+
+<p>You can supply data (for a POST, PUT, etc.) in a few ways:</p>
+
+<ul>
+<li>
+<p>URL encoded: <code>-d "key1=value1&amp;key2=value2"</code></p>
+</li>
+<li>
+<p>JSON: <code>-d '{"key1":"value1", "key2":"value2"}'</code></p>
+</li>
+<li>
+<p>As a file in either format: <code>-d @data.txt</code></p>
+</li>
+</ul>
+
+<p>The <code>-H</code> option adds an explicit header,
+although basic headers such as <code>Content-Type</code> are added automatically:</p>
+
+<p><code>-H "Content-Type: application/x-www-form-urlencoded"</code></p>
+
+<p>Here are some examples:</p>
+
+<pre data-type="programlisting">$ curl -d "key1=value1" -X PUT localhost:8080
+
+$ curl -H "X-App-Auth: xyz" -d "key1=value1&amp;key2=value2"
+-X POST https://localhost:8080/demo</pre>
+<div data-type="tip"><h6>Tip</h6>
+<p>cURL can be of <a data-type="indexterm" data-primary="cURL/curl tool" data-secondary="for debugging TLS" data-secondary-sortas="debugging TLS" id="idm46219942863704"/>some help when debugging TLS issues,
+but more specialized tools such as <code>openssl</code> may be more helpful.</p>
+</div>
+
+<p>cURL can help diagnose TLS issues.
+Just like a reputable browser,
+cURL validates <a data-type="indexterm" data-primary="certificates and keys" data-secondary="cURL for" id="idm46219942861336"/>the certificate chain returned by HTTP sites
+and checks against the host’s CA certs:</p>
+
+<pre data-type="programlisting">$ curl https://expired-tls-site
+curl: (60) SSL certificate problem: certificate has expired
+More details here: https://curl.haxx.se/docs/sslcerts.html
+
+curl failed to verify the legitimacy of the server and therefore could not
+establish a secure connection to it. To learn more about this situation and
+how to fix it, please visit the web page mentioned above.</pre>
+
+<p>Like many programs, cURL <a data-type="indexterm" data-primary="Application layer (L7)" data-secondary="with HTTP" data-secondary-sortas="HTTP" id="idm46219942858728"/><a data-type="indexterm" data-primary="verbose flag, cURL" id="idm46219942857480"/>has a verbose flag, <code>-v</code>,
+which will print more information about the request and response.
+This is extremely valuable when debugging a layer 7 protocol such as HTTP:</p>
+
+<pre data-type="programlisting">$ curl https://expired-tls-site -v
+*   Trying 1.2.3.4...
+* TCP_NODELAY set
+* Connected to expired-tls-site (1.2.3.4) port 443 (#0)
+* ALPN, offering h2
+* ALPN, offering http/1.1
+* successfully set certificate verify locations:
+*   CAfile: /etc/ssl/cert.pem
+  CApath: none
+* TLSv1.2 (OUT), TLS handshake, Client hello (1):
+* TLSv1.2 (IN), TLS handshake, Server hello (2):
+* TLSv1.2 (IN), TLS handshake, Certificate (11):
+* TLSv1.2 (OUT), TLS alert, certificate expired (557):
+* SSL certificate problem: certificate has expired
+* Closing connection 0
+curl: (60) SSL certificate problem: certificate has expired
+More details here: https://curl.haxx.se/docs/sslcerts.html
+
+# Truncated</pre>
+
+<p>cURL has many additional features that we have not covered, such as the ability to use timeouts, custom CA certs,
+custom DNS, and <a data-type="indexterm" data-startref="ch2_term65" id="idm46219942854072"/><a data-type="indexterm" data-startref="ch2_term66" id="idm46219942853368"/><a data-type="indexterm" data-startref="ch2_term67" id="idm46219942852696"/><a data-type="indexterm" data-startref="ch2_term75" id="idm46219942852024"/><a data-type="indexterm" data-startref="ch2_term76" id="idm46219942851352"/>so on.</p>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Conclusion"><div class="sect1" id="idm46219943133144">
+<h1>Conclusion</h1>
+
+<p>This chapter has provided you with a whirlwind tour of networking in Linux. We focused primarily on concepts that are
+required to understand Kubernetes’ implementation, cluster setup constraints, and debugging Kubernetes-related
+networking problems (in workloads on Kubernetes, or Kubernetes itself). This chapter was by no means exhaustive, and
+you may find it valuable to learn more.</p>
+
+<p>Next, we will start to look at containers in Linux and how containers interact with the network.</p>
+</div></section>
+
+
+
+
+
+
+
+</div></section></div></body></html>

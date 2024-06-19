@@ -1,0 +1,302 @@
+<html><head></head><body><div id="sbo-rt-content"><section data-type="chapter" epub:type="chapter" data-pdf-bookmark="Chapter 13. Writing Falco Rules"><div class="chapter" id="writing_falco_rules">
+<h1><span class="label">Chapter 13. </span>Writing Falco Rules</h1>
+<p><a contenteditable="false" data-primary="writing Falco rules" data-type="indexterm" id="ch13.html0"/>Welcome to <a data-type="xref" href="part04.xhtml#iv_extending_falco">Part IV</a> of the book! Now that you’ve learned what Falco is and does (<a data-type="xref" href="part01.xhtml#i_the_basics">Part I</a>), understand the intricacies of its architecture (<a data-type="xref" href="part02.xhtml#ii_the_architecture_of_falco">Part II</a>), and are a pro at deploying and running it (<a data-type="xref" href="part03.xhtml#iii_running_falco_in_production">Part III</a>), it’s time, once more, to step up your game.</p>
+<p>The final part of this book (Chapters <a data-type="xref" data-xrefstyle="select:labelnumber" href="#writing_falco_rules">13</a> through <a data-type="xref" data-xrefstyle="select:labelnumber" href="ch15.xhtml#how_to_contribute">15</a>) is about going beyond what comes out of the box. You will learn how to customize Falco for your specific needs and how, if you desire, you can contribute your improvements to the project so that the community can benefit from them. This is where you get to unleash your creativity.</p>
+<p>We’ve already covered rules extensively in the book, in particular in <a data-type="xref" href="ch07.xhtml#falco_rules">Chapter 7</a>. But you unlock the true power of Falco when you become capable of creating your own rules and adapting the existing ones to your environment—which is what we’re going to show you how to do here.</p>
+<p>This chapter assumes you have a good understanding of fields and filters (covered in <a data-type="xref" href="ch06.xhtml#fields_and_filters">Chapter 6</a>) and of the basics of rules and rules files (<a data-type="xref" href="ch07.xhtml#falco_rules">Chapter 7</a>). If you feel you need a refresher, just go back to those chapters. We’ll wait for you here until you’re ready.</p>
+<section data-type="sect1" data-pdf-bookmark="Customizing the Default Falco Rules"><div class="sect1" id="customizing_the_default_falco_rules">
+<h1>Customizing the Default Falco Rules</h1>
+<p><a contenteditable="false" data-primary="writing Falco rules" data-secondary="customizing default rules" data-type="indexterm" id="idm45324223019648"/>Although Falco’s default set of rules is rich and constantly expanding, it’s not uncommon to encounter situations where those rules require customization. Here are some examples:</p>
+<ul>
+<li><p>You want to expand the scope of a rule or increase its coverage.</p></li>
+<li><p>You want to tighten the number of rules that Falco loads to decrease its CPU usage.</p></li>
+<li><p>You want to reduce alerting noise by controlling a rule’s behavior or adding exceptions to it.</p></li>
+</ul>
+<p>Falco offers a framework to accomplish these things without having to fork the default rules files and maintain your own copies. <a data-type="xref" href="ch07.xhtml#falco_rules">Chapter 7</a> taught you how to replace and append to macros, lists, and rules, as well as how to disable rules. This is especially useful since, as you learned in <a data-type="xref" href="ch10.xhtml#configuring_and_running">Chapter 10</a>, the order in which rules files are loaded is important, and you control that order. This means you can change an existing rule in a separate file that is loaded later in the initialization chain.</p>
+<p>The default Falco configuration is crafted to take advantage of this mechanism, providing two places out of the box where you can customize existing rules without touching the default ruleset. The first is <em>falco_rules.local.yaml</em>. This file, which is initially empty, is loaded after <em>falco_rules.yaml</em> and is therefore a good place to disable or modify rules in the default ruleset. The second is <em>/etc/falco/rules.d</em>. Falco, by default, loads all the rules files that it finds in this directory after loading <em>falco_rules.yaml</em> and <em>falco_rules.local.yaml</em>. This makes it another good place for customizations.</p>
+</div></section>
+<section data-type="sect1" data-pdf-bookmark="Writing New Falco Rules"><div class="sect1" id="writing_new_falco_rules">
+<h1>Writing New Falco Rules</h1>
+<p><a contenteditable="false" data-primary="writing Falco rules" data-secondary="writing new rules" data-type="indexterm" id="ch13.html1"/>At its core, writing a new rule is just a matter of crafting the condition and the output, so conceptually it is a very straightforward process. In practice, however, there are several factors to take into account. Improvised rule development often results in imperfect or even nonfunctional rules. Seasoned Falco users tend to develop their own processes for rule writing, and we recommend you do the same. What the best process is depends on your setup, target environment, and taste, so we won’t be able to offer you absolute prescriptions. Instead, we’ll share the way we do it, hoping it can serve as inspiration and guidance.</p>
+<section data-type="sect2" data-pdf-bookmark="Our Rule Development Method"><div class="sect2" id="our_rule_development_method">
+<h2>Our Rule Development Method</h2>
+<p><a contenteditable="false" data-primary="writing Falco rules" data-secondary="rule development method" data-type="indexterm" id="idm45324223004016"/>The method for rule development used by this book’s authors consists of nine steps:</p>
+<ol>
+<li><p>Replicate the events you want to detect.</p></li>
+<li><p>Capture the events and save them in a trace file.</p></li>
+<li><p>Craft and test the condition filter with the aid of sysdig.</p></li>
+<li><p>Craft and test the output with the aid of sysdig.</p></li>
+<li><p>Convert the sysdig command line into a rule.</p></li>
+<li><p>Validate the rule in Falco.</p></li>
+<li><p>Modularize and optimize the rule.</p></li>
+<li class="pagebreak-before less_space"><p>Create a regression.</p></li>
+<li><p>Share the rule with the community.</p></li>
+</ol>
+<p>In the following sections we’ll expand on each item in this list and provide a real-world example, walking you through crafting a new rule that detects attempts to create symlinks<sup><a data-type="noteref" id="ch01fn18-marker" href="ch13.xhtml#ch01fn18">1</a></sup> inside the <em>/proc</em>, <em>/bin</em>, and <em>/etc</em> directories. This is, at minimum, strange behavior and could potentially indicate fishy activity. Here’s how you would apply our method to build such a rule.</p>
+<section data-type="sect3" data-pdf-bookmark="1. Replicate the events you want to detect"><div class="sect3" id="onedot_replicate_the_events_you_want_to">
+<h3>1. Replicate the events you want to detect</h3>
+<p>It’s almost impossible to create a reliable rule without testing and validating it, so the first step is to re-create the scenario (or scenarios) that the rule should detect. In this case, you want to detect the creation of symlinks in three specific directories. You can re-create that scenario from within a terminal using the <code>ln</code> command:</p>
+<pre data-type="programlisting">$ <strong>ln -s ~ /proc/evillink</strong>
+$ <strong>ln -s ~ /bin/evillink</strong>
+$ <strong>ln -s ~ /etc/evillink</strong></pre>
+</div></section>
+<section data-type="sect3" data-pdf-bookmark="2. Capture the events and save them in a trace file"><div class="sect3" id="twodot_capture_the_events_and_save_them">
+<h3>2. Capture the events and save them in a trace file</h3>
+<p><a contenteditable="false" data-primary="trace files" data-secondary="saving events in" data-type="indexterm" id="idm45324222985520"/>Now you can capture the suspicious activity using sysdig. (If you need a refresher on sysdig and trace files, go back to <a data-type="xref" href="ch04.xhtml#observing_system_calls">“Observing System Calls”</a>.) sysdig allows you to easily store the activity in a trace file using the <code>-w</code> command-line flag. To see how it works, issue this command in a terminal:</p>
+<pre data-type="programlisting">$ <strong>sysdig -w evillinks.scap</strong></pre>
+<p>In another terminal, run the three <code>ln</code> commands again, then go back to the first terminal and stop sysdig with Ctrl-C. You now have your activity in a trace file that you can inspect as many times you want:</p>
+<pre data-type="programlisting">$ <strong>sysdig -r evillinks.scap</strong></pre>
+<p>You will notice that the trace file contains all of the host’s activity, not only your <code>ln</code> commands. You will also notice that the file is pretty big. You can make it smaller and easier to inspect by using a filter when you run the capture:</p>
+<pre data-type="programlisting">$ <strong>sysdig -w evillinks.scap proc.name=ln</strong></pre>
+<p>Now you have a noise-free file that is less than 1 MB in size, containing only the specific activity that you need to craft your rule. Saving the rule-triggering activity in a trace file has several advantages:</p>
+<ul>
+<li><p>It requires replicating complex behaviors only once. (Not all suspicious behaviors are as simple to detect as running <code>ln</code> three times!)</p></li>
+<li><p>It allows you to focus on the events and stay in a single terminal, without having to replicate the rule-triggering commands many times.</p></li>
+<li><p>It allows you to develop rules on a different machine. You don’t even need to deploy and configure Falco on the machine where the behavior is happening! This is really nice if you want to capture behaviors in “unfriendly” environments like cloud containers or edge devices.</p></li>
+<li><p>It lets you develop rules with normal user privileges.</p></li>
+<li><p>It provides consistency, which is useful not only for creating the rule but also for implementing regressions when the rule is done.</p></li>
+</ul>
+</div></section>
+<section data-type="sect3" data-pdf-bookmark="3. Craft and test the condition filter with the aid of sysdig"><div class="sect3" id="threedot_craft_and_test_the_condition_f">
+<h3>3. Craft and test the condition filter with the aid of sysdig</h3>
+<p><a contenteditable="false" data-primary="sysdig" data-secondary="condition filter crafting with" data-type="indexterm" id="idm45324222970176"/>Now that you have the data you need, it’s time to work on the condition. Typically, at this stage you’ll want to answer a couple of questions:</p>
+<ol>
+<li><p>What type of system call (or system calls) do you need to target? Of course, not all Falco rules are based on system calls; for example, you might be using a plugin. But in general, identifying the type of event that will trigger the rule is the first order of business.</p></li>
+<li><p>Once you know which event to parse, which of its parameters or arguments do you need to check?</p></li>
+</ol>
+<p>sysdig can help you answer these questions. Use it to read and decode the capture file:</p>
+<pre data-type="programlisting">$ <strong>sysdig -r evillinks.scap</strong></pre>
+<p>Toward the end of the output file is where the magic happens:</p>
+<pre data-type="programlisting">2313 11:21:22.782601383 1 ln (23859) &gt; symlinkat 
+2314 11:21:22.782662611 1 ln (23859) &lt; symlinkat res=0 target=/home/foo 
+linkdirfd=-100(AT_FDCWD) linkpath=/etc/evillink</pre>
+<p>Our system call is <code>symlinkat</code>. The system call’s <a href="https://oreil.ly/oW7rT">manpage</a> tells you that it’s a variation of another system call, <code>symlink</code>. You can also see that the <code>linkpath</code> argument contains the filesystem path of the symbolic link. This is exactly what you need to know to craft your filter, which should look like this:</p>
+<pre data-type="programlisting">(evt.type=symlink or evt.type=symlinkat) and (
+  evt.arg.linkpath startswith /proc/ or 
+  evt.arg.linkpath startswith /bin/ or 
+  evt.arg.linkpath startswith /etc/
+)</pre>
+<p>You can immediately leverage sysdig to validate that this is the right filter:</p>
+<pre data-type="programlisting">$ <strong>sysdig -r evillinks.scap \
+  "(evt.type=symlink or evt.type=symlinkat) and \
+   (evt.arg.linkpath startswith /proc/ or \
+   evt.arg.linkpath startswith /bin/ or \
+   evt.arg.linkpath startswith /etc/)"</strong>
+438 11:21:13.204948767 2 ln (23814) &lt; symlinkat res=-2(ENOENT) target=/home/foo 
+linkdirfd=-100(AT_FDCWD) linkpath=/proc/evillink 
+1679 11:21:19.420360948 0 ln (23850) &lt; symlinkat res=0 target=/home/foo 
+linkdirfd=-100(AT_FDCWD) linkpath=/bin/evillink 
+2314 11:21:22.782662611 1 ln (23859) &lt; symlinkat res=0 target=/home/foo 
+linkdirfd=-100(AT_FDCWD) linkpath=/etc/evillink</pre>
+<p>Bingo! The output correctly shows the three system calls that should trigger the rule.</p>
+</div></section>
+<section data-type="sect3" data-pdf-bookmark="4. Craft and test the output with the aid of sysdig"><div class="sect3" id="fourdot_craft_and_test_the_output_with">
+<h3>4. Craft and test the output with the aid of sysdig</h3>
+<p><a contenteditable="false" data-primary="sysdig" data-secondary="output crafting/testing with" data-type="indexterm" id="idm45324222956336"/>sysdig, handily, can help you craft the rule’s output too. The sysdig <code>-p</code> flag, in particular, receives a Falco output–compatible string as input and uses it to print a Falco-like output to the terminal for each event accepted by the filter. This makes it effortless to craft and test the rule’s output, knowing that Falco will show the same thing when the rule triggers. For example, this looks like a nice output for your rule:</p>
+<pre data-type="programlisting">a symlink was created in a sensitive directory (link=%evt.arg.linkpath, 
+target=%evt.arg.target, cmd=%proc.cmdline)</pre>
+<p>Test it, together with the filter, in sysdig:</p>
+<pre data-type="programlisting">$ <strong>sysdig -r evillinks.scap \
+  -p"a symlink was created in a sensitive directory \
+  (link=%evt.arg.linkpath, target=%evt.arg.target, cmd=%proc.cmdline)" \
+  "(evt.type=symlink or evt.type=symlinkat) and \
+  (evt.arg.linkpath startswith /proc/ or \
+  evt.arg.linkpath startswith /bin/ or \
+  evt.arg.linkpath startswith /etc/)"</strong>
+a symlink was created in a sensitive directory (link=/proc/evillink, 
+target=/home/foo, cmd=ln -s /home/foo /proc/evillink)
+a symlink was created in a sensitive directory (link=/bin/evillink, 
+target=/home/foo, cmd=ln -s /home/foo /bin/evillink)
+a symlink was created in a sensitive directory (link=/etc/evillink, 
+target=/home/foo, cmd=ln -s /home/foo /etc/evillink)</pre>
+<p>Note the quotation marks around both the filter and the output condition. This prevents the shell from getting confused by any characters they contain.</p>
+<p>Your condition and output look pretty good. Time to switch to Falco!</p>
+</div></section>
+<section data-type="sect3" data-pdf-bookmark="5. Convert the sysdig command line into a rule"><div class="sect3" id="fivedot_convert_the_sysdig_command_line">
+<h3>5. Convert the sysdig command line into a rule</h3>
+<p><a contenteditable="false" data-primary="sysdig" data-secondary="converting command line into rule" data-type="indexterm" id="idm45324222948752"/>The next step is converting what you have into a Falco rule. This is little more than a copy-and-paste exercise, since you already know that the condition and output work:</p>
+<pre data-type="programlisting" data-code-language="yaml"><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">rule</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Symlink in a Sensitive Directory</code><code class="w"/>
+<code class="w">  </code><code class="nt">desc</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">&gt;</code><code class="w"/>
+<code class="w">    </code><code class="no">Detect the creation of a symbolic link </code><code class="w"/>
+<code class="w">    </code><code class="no">in a sensitive directory like /etc or /bin.</code><code class="w"/>
+<code class="w">  </code><code class="nt">condition</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">&gt;</code><code class="w"> </code>
+<code class="w">    </code><code class="no">(evt.type=symlink or evt.type=symlinkat) and (</code><code class="w"/>
+<code class="w">      </code><code class="no">evt.arg.linkpath startswith /proc/ or </code><code class="w"/>
+<code class="w">      </code><code class="no">evt.arg.linkpath startswith /bin/ or </code><code class="w"/>
+<code class="w">      </code><code class="no">evt.arg.linkpath startswith /etc/)</code><code class="w"/>
+<code class="w">  </code><code class="nt">output</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">&gt;</code><code class="w"/>
+<code class="w">    </code><code class="no">a symlink was created in a sensitive directory </code><code class="w"/>
+<code class="w">    </code><code class="no">(link=%evt.arg.linkpath, target=%evt.arg.target, cmd=%proc.cmdline)</code><code class="w"/>
+<code class="w">  </code><code class="nt">priority</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">WARNING</code><code class="w"/></pre>
+</div></section>
+<section data-type="sect3" data-pdf-bookmark="6. Validate the rule in Falco"><div class="sect3" id="sixdot_validate_the_rule_in_falco">
+<h3>6. Validate the rule in Falco</h3>
+<p>Save the rule in a YAML file called <em>symlink.yaml</em>. Now testing it in Falco is a matter of loading it with the <code>-r</code> flag, then using the <code>-e</code> flag to use the capture file as input:</p>
+<pre data-type="programlisting">$ <strong>falco -r symlink.yaml -e evillinks.scap</strong>
+2022-02-05T01:09:23+0000: Falco version 0.31.0 (driver version 
+319368f1ad778691164d33d59945e00c5752cd27)
+2022-02-05T01:09:23+0000: Falco initialized with configuration file 
+/etc/falco/falco.yaml
+2022-02-05T01:09:23+0000: Loading rules from file symlink.yaml:
+2022-02-05T01:09:23+0000: Reading system call events from file: evillinks.scap
+2022-02-04T19:21:13.204948767+0000: Warning a symlink was created in a 
+sensitive directory (link=/proc/evillink, target=/home/foo, cmd=ln -s /home/foo 
+/proc/evillink)
+2022-02-04T19:21:19.420360948+0000: Warning a symlink was created in a 
+sensitive directory (link=/bin/evillink, target=/home/foo, cmd=ln -s /home/foo 
+/bin/evillink)
+2022-02-04T19:21:22.782662611+0000: Warning a symlink was created in a 
+sensitive directory (link=/etc/evillink, target=/home/foo, cmd=ln -s /home/foo 
+/etc/evillink)
+Events detected: 3
+Rule counts by severity:
+   WARNING: 3
+Triggered rules by rule name:
+   Symlink in a Sensitive Directory: 3
+Syscall event drop monitoring:
+   - event drop detected: 0 occurrences
+   - num times actions taken: 0</pre>
+<p>The rule triggered the expected number of times and displayed the correct output. Congratulations!</p>
+<p>Note how, in Falco, you can leverage the same trace file that you created with sysdig. The <code>-e</code> command-line option tells Falco: “Read system calls from the given file instead of using a driver. When you reach the end of the file, print a summary and return.” Very handy for quick iteration!</p>
+</div></section>
+<section data-type="sect3" data-pdf-bookmark="7. Modularize and optimize the rule"><div class="sect3" id="sevendot_modularize_and_optimize_the_ru">
+<h3>7. Modularize and optimize the rule</h3>
+<p>You have a working rule and you’ve tested it, but there’s room to make it prettier. <span class="keep-together">Step 7</span> is adding modularity to the rule:</p>
+<pre data-type="programlisting" data-code-language="yaml"><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">macro</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">sensitive_sylink_dir</code><code class="w"/>
+<code class="w">  </code><code class="nt">condition</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">&gt;</code><code class="w"/>
+<code class="w">    </code><code class="no">(evt.arg.linkpath startswith /proc/ or </code><code class="w"/>
+<code class="w">     </code><code class="no">evt.arg.linkpath startswith /bin/ or </code><code class="w"/>
+<code class="w">     </code><code class="no">evt.arg.linkpath startswith /etc/)</code><code class="w"/>
+<code class="w">  </code>
+<code class="p-Indicator">-</code><code class="w"> </code><code class="nt">macro</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">create_symlink</code><code class="w"/>
+<code class="w">  </code><code class="nt">condition</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">(evt.type=symlink or evt.type=symlinkat)</code><code class="w"/>
+<code class="w">  </code>
+<code class="p-Indicator">-</code><code class="w"> </code><code class="nt">rule</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Symlink in a Sensitive Directory</code><code class="w"/>
+<code class="w">  </code><code class="nt">desc</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">&gt;</code><code class="w"> </code>
+<code class="w">    </code><code class="no">Detect the creation of a symbolic link</code><code class="w"/>
+<code class="w">    </code><code class="no">in a sensitive directory like /etc or /bin.</code><code class="w"/>
+<code class="w">  </code><code class="nt">condition</code><code class="p">:</code><code class="w">  </code><code class="l-Scalar-Plain">create_symlink and sensitive_sylink_dir</code><code class="w"/>
+<code class="w">  </code><code class="nt">output</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">&gt;</code><code class="w"/>
+<code class="w">    </code><code class="no">a symlink was created in a sensitive directory </code><code class="w"/>
+<code class="w">    </code><code class="no">(link=%evt.arg.linkpath, target=%evt.arg.target, cmd=%proc.cmdline)</code><code class="w"/>
+<code class="w">  </code><code class="nt">priority</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">WARNING</code><code class="w"/></pre>
+<p>This moves the condition’s checks into macros, which makes the condition shorter and more readable. That’s great, but you can do even better:</p>
+<pre data-type="programlisting" data-code-language="yaml"><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">list</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">symlink_syscalls</code><code class="w"/>
+<code class="w">  </code><code class="nt">items</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">[</code><code class="nv">symlink</code><code class="p-Indicator">,</code><code class="w"> </code><code class="nv">symlinkat</code><code class="p-Indicator">]</code><code class="w"/>
+<code class="p-Indicator">-</code><code class="w"> </code><code class="nt">list</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">sensitive_dirs</code><code class="w"/>
+<code class="w">  </code><code class="nt">items</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">[</code><code class="nv">/proc/</code><code class="p-Indicator">,</code><code class="w"> </code><code class="nv">/bin/</code><code class="p-Indicator">,</code><code class="w"> </code><code class="nv">/etc/</code><code class="p-Indicator">]</code><code class="w"/>
+<code class="w">  </code>
+<code class="p-Indicator">-</code><code class="w"> </code><code class="nt">macro</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">create_symlink</code><code class="w"/>
+<code class="w">  </code><code class="nt">condition</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">(evt.type in (symlink_syscalls))</code><code class="w"/>
+<code class="p-Indicator">-</code><code class="w"> </code><code class="nt">macro</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">sensitive_sylink_dir</code><code class="w"/>
+<code class="w">  </code><code class="nt">condition</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">(evt.arg.linkpath pmatch (sensitive_dirs))</code><code class="w"/>
+<code class="w">  </code>
+<code class="p-Indicator">-</code><code class="w"> </code><code class="nt">rule</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Symlink in a Sensitive Directory</code><code class="w"/>
+<code class="w">  </code><code class="nt">desc</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">&gt;</code><code class="w"/>
+<code class="w">    </code><code class="no">Detect the creation of a symbolic link </code><code class="w"/>
+<code class="w">    </code><code class="no">in a sensitive directory like /etc or /bin.</code><code class="w"/>
+<code class="w">  </code><code class="nt">condition</code><code class="p">:</code><code class="w">  </code><code class="l-Scalar-Plain">create_symlink and sensitive_sylink_dir</code><code class="w"/>
+<code class="w">  </code><code class="nt">output</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">&gt;</code><code class="w"/>
+<code class="w">    </code><code class="no">a symlink was created in a sensitive directory</code><code class="w"/>
+<code class="w">    </code><code class="no">(link=%evt.arg.linkpath, target=%evt.arg.target, cmd=%proc.cmdline)</code><code class="w"/>
+<code class="w">  </code><code class="nt">priority</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">WARNING</code><code class="w"/></pre>
+<p>What you did here is to move the condition constants into lists. This has multiple benefits. First, it makes the rule easy to extend, in a noninvasive way. If you want to add another sensitive directory, you can do it easily by adding the relevant item to the list or, even better, by creating a second <code>symlink_syscalls</code> list in append mode. This also gives you an opportunity to optimize the rule by using operators like <code>in</code> and <code>pmatch</code> that can perform multiple checks in an efficient way.</p>
+</div></section>
+<section data-type="sect3" data-pdf-bookmark="8. Create a regression"><div class="sect3" id="eightdot_create_a_regression">
+<h3>8. Create a regression</h3>
+<p><a contenteditable="false" data-primary="regression, for testing rules" data-type="indexterm" id="idm45324222608816"/>When you create a new rule, particularly if your goal is including it in the official ruleset, you might like to be able to test it in the future. For example, you might want to ensure it still works with new versions of Falco or on different Linux distributions. You might also want to measure its performance (such as its CPU utilization) under stress. The capture file you created at the beginning of the process is a good base for a regression.</p>
+<p><a contenteditable="false" data-primary="event-generator tool" data-type="indexterm" id="idm45324222606864"/>As an alternative, the Falco community has created a tool called event-generator (mentioned in <a data-type="xref" href="ch02.xhtml#getting_started_with_falco">Chapter 2</a>) that’s useful for testing. If you add an action for your rule in event-generator, you or other people will be able to trigger the rule in real time on an arbitrary machine. The tool can replay your rule-triggering scenario in a flexible way, including triggering the rule multiple times and at specific frequencies. That way, you can precisely measure its CPU utilization. You can also check if, under heavy stress, the rule will slow Falco down to the point where the driver starts dropping system calls.</p>
+<p>A full discussion of event-generator goes beyond the scope of this book, but you can take a look at its <a href="https://oreil.ly/jERpD">GitHub repository</a> to learn more about it.</p>
+</div></section>
+<section data-type="sect3" data-pdf-bookmark="9. Share the rule with the community"><div class="sect3" id="ninedot_share_the_rule_with_the_communi">
+<h3>9. Share the rule with the community</h3>
+<p><a contenteditable="false" data-primary="community" data-secondary="sharing rules with" data-type="indexterm" id="idm45324222601808"/>Congratulations, you’ve completed the development of a brand new rule! At this point, it is important to remember that Falco is a tool written by the community for the community. Every new rule you write could be valuable to many others, so you should consider contributing it to the default ruleset. <a data-type="xref" href="ch15.xhtml#how_to_contribute">Chapter 15</a> will teach you everything you need to know about contributing to Falco. As Falco maintainers and community members, we’d like to thank you in advance for any rules you decide to share with the community.<a contenteditable="false" data-primary="" data-startref="ch13.html1" data-type="indexterm" id="idm45324222599024"/></p>
+</div></section>
+</div></section>
+</div></section>
+<section data-type="sect1" data-pdf-bookmark="Things to Keep in Mind When Writing Rules"><div class="sect1" id="things_to_keep_in_mind_when_writing_rul">
+<h1>Things to Keep in Mind When Writing Rules</h1>
+<p><a contenteditable="false" data-primary="writing Falco rules" data-secondary="important concepts for" data-type="indexterm" id="ch13.html2"/>Now that we’ve covered the basics, let’s discuss some concepts that are a bit more advanced but very important to keep in mind when developing rules.</p>
+<section data-type="sect2" data-pdf-bookmark="Priorities"><div class="sect2" id="priorities">
+<h2>Priorities</h2>
+<p><a contenteditable="false" data-primary="writing Falco rules" data-secondary="priorities" data-type="indexterm" id="idm45324222560304"/>As mentioned in <a data-type="xref" href="ch07.xhtml#falco_rules">Chapter 7</a>, every Falco rule must have a priority. The rule priority is typically reported in conjunction with the output and can have one of the following values:</p>
+<ul>
+<li><p><code>EMERGENCY</code></p></li>
+<li><p><code>ALERT</code></p></li>
+<li><p><code>CRITICAL</code></p></li>
+<li><p><code>ERROR</code></p></li>
+<li><p><code>WARNING</code></p></li>
+<li><p><code>NOTICE</code></p></li>
+<li><p><code>INFORMATIONAL</code></p></li>
+<li><p><code>DEBUG</code></p></li>
+</ul>
+<p>Picking the right priorities for your rules is crucial, because typically rules are filtered based on priority. Assigning too high a priority to a rule could cause alert flooding and diminish its value.</p>
+<p>Here is what the official Falco documentation has to say about how priorities are used in the default ruleset:</p>
+<ul>
+<li><p>If a rule is related to writing state (filesystem, etc.), its priority is <code>ERROR</code>.</p></li>
+<li><p>If a rule is related to an unauthorized read of state (reading sensitive files, etc.), its priority is <code>WARNING</code>.</p></li>
+<li><p>If a rule is related to unexpected behavior (spawning an unexpected shell in a container, opening an unexpected network connection, etc.), its priority is <code>NOTICE</code>.</p></li>
+<li><p>If a rule is related to behaving against good practices (unexpected privileged containers, containers with sensitive mounts, running interactive commands as root), its priority is <code>INFORMATIONAL</code>.</p></li>
+</ul>
+</div></section>
+<section data-type="sect2" data-pdf-bookmark="Noise"><div class="sect2" id="noise">
+<h2>Noise</h2>
+<p><a contenteditable="false" data-primary="noise, rule writing and" data-type="indexterm" id="idm45324222543920"/><a contenteditable="false" data-primary="writing Falco rules" data-secondary="noise considerations" data-type="indexterm" id="idm45324222542816"/>Noise is one of the most critical factors to take into account when crafting rules, as well as a generally complex topic in security. The trade-off between detection accuracy and false positive generation is a constant source of tension in detection tools like Falco.</p>
+<p>It’s often said that the only ruleset with no false positives is one with no rules. Completely avoiding false positives is extremely difficult and often an unrealistic goal, but there are some guidelines you can follow to reduce the problem:</p>
+<dl>
+<dt>Guideline 1: Test and validate.</dt>
+<dd><p>Before using a rule in production, make sure you test it extensively in as many environments as possible (different OS distributions, kernels, container engines, and orchestrators).</p></dd>
+<dt>Guideline 2: Priorities, and priority-based filtering, are your friends.</dt>
+<dd><p>Avoid deploying a rule for the first time with <code>ERROR</code> or <code>CRITICAL</code> as the priority. Start with <code>DEBUG</code> or <code>INFO</code>, see what happens, and increase the value if it’s not too noisy. Lower-priority rules can be easily filtered out at different stages of the output pipeline, so they don’t run the risk of waking up the security operations center team in the middle of the night.</p></dd>
+<dt>Guideline 3: Leverage tags.</dt>
+<dd><p>The tags that you assign to your rules are included in Falco’s gRPC and JSON outputs. This means you can use them to complement priorities and filter Falco’s output in an even more flexible way.</p></dd>
+<dt>Guideline 4: Plan for exceptions.</dt>
+<dd><p>Good rules are designed to account for known and unknown exceptions in a way that is readable and modular and can easily be extended.</p></dd>
+</dl>
+<p>Take a look, for example, at the <em>Write below rpm database</em> rule from the default ruleset:</p>
+<pre data-type="programlisting" data-code-language="yaml"><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">rule</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Write below rpm database</code><code class="w"/>
+<code class="w">  </code><code class="nt">desc</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">an attempt to write to the rpm database by any non-rpm related program</code><code class="w"/>
+<code class="w">  </code><code class="nt">condition</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">&gt;</code><code class="w"/>
+<code class="w">    </code><code class="no">fd.name startswith /var/lib/rpm and open_write</code><code class="w"/>
+<code class="w">    </code><code class="no">and not rpm_procs</code><code class="w"/>
+<code class="w">    </code><code class="no">and not ansible_running_python</code><code class="w"/>
+<code class="w">    </code><code class="no">and not python_running_chef</code><code class="w"/>
+<code class="w">    </code><code class="no">and not exe_running_docker_save</code><code class="w"/>
+<code class="w">    </code><code class="no">and not amazon_linux_running_python_yum</code><code class="w"/>
+<code class="w">    </code><code class="no">and not user_known_write_rpm_database_activities</code><code class="w"/>
+<code class="w">  </code><code class="nt">output</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">&gt;</code><code class="w"/>
+<code class="w">    </code><code class="no">Rpm database opened for writing by a non-rpm program </code><code class="w"/>
+<code class="w">    </code><code class="no">(command=%proc.cmdline file=%fd.name </code><code class="w"/>
+<code class="w">    </code><code class="no">parent=%proc.pname pcmdline=%proc.pcmdline</code><code class="w"/>
+<code class="w">    </code><code class="no">container_id=%container.id image=%container.image.repository)</code><code class="w"/>
+<code class="w">  </code><code class="nt">priority</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">ERROR</code><code class="w"/>
+<code class="w">  </code><code class="nt">tags</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">[</code><code class="nv">filesystem</code><code class="p-Indicator">,</code><code class="w"> </code><code class="nv">software_mgmt</code><code class="p-Indicator">,</code><code class="w"> </code><code class="nv">mitre_persistence</code><code class="p-Indicator">]</code><code class="w"/></pre>
+<p>Note how known exceptions are included in the rule as macros (<code>rpm_procs</code>, <code>ansible_running_python</code>, etc.), but the rule also includes a macro (<code>user_known_write_rpm_database_activities</code>) that lets the user add their own exceptions through the override mechanism.</p>
+</div></section>
+<section data-type="sect2" data-pdf-bookmark="Performance"><div class="sect2" id="performance-id000042">
+<h2>Performance</h2>
+<p><a contenteditable="false" data-primary="writing Falco rules" data-secondary="performance considerations" data-type="indexterm" id="idm45324222487776"/>Performance is another important topic to consider when writing and deploying rules, because Falco typically operates with high-frequency data sources. When you are using Falco with a system call source like the kernel module or the eBPF probe, your whole ruleset might need to be evaluated millions of times per second. At such frequencies, rule performance is key.</p>
+<p>Having a tight ruleset is definitely a good practice to keep Falco’s CPU utilization under control, as you learned in <a data-type="xref" href="ch10.xhtml#configuring_and_running">Chapter 10</a>. It is also important, however, to make sure every new rule you create is optimized for performance. The overhead of your rule is more or less proportional to the number of field comparisons that the rule’s condition needs to perform for every input event. Therefore, you should expect that a simple condition like this:</p>
+<pre data-type="programlisting">proc.name=p1</pre>
+<p>will use around 20% of the CPU of a more complex rule like this one:</p>
+<pre data-type="programlisting">proc.name=p1 or proc.name=p2 or proc.name=p3 or proc.name=p4 or proc.name=p5</pre>
+<p>Optimizing a rule is all about making sure that, in most common situations, it requires the Falco engine to perform the smallest possible number of comparisons.</p>
+<p>Here are some guidelines you should follow to reduce the CPU utilization of your rules:</p>
+<ul>
+<li><p>The rule should always start with a check on the event type (such as <code>evt.type=open</code> or <code>evt.type in (mkdir, mkdirat)</code>). Falco is smart about this: it understands when your rule is restricted to only some event types and will evaluate the rule only when it receives a matching event. In other words, if your rule starts with <code>evt.type=open</code>, Falco won’t even start evaluating it for any event that is not an <code>open</code> system call. This is so effective (and important!) that Falco emits a warning when a rule doesn’t include a check on the event type.</p></li>
+<li><p>Include aggressive comparisons that have a high probability of failing earlier, rather than later, in your rule. A Falco condition works like an <code>if</code> statement in a programming language: it’s evaluated left to right until something fails. The sooner you make the condition fail, the less work it will require to complete. Try to find simple ways to restrict the scope of your rule. Can you limit it to specific processes, files, or containers? Can you apply it to only a subset of users? Encode these restrictions in the rule, toward the beginning.</p></li>
+<li><p>Heavy, complex rule logic should be included after (to the right of) the aggressive comparisons and restrictions. For example, long exception lists belong at the end of the rule.</p></li>
+<li><p>Whenever possible, use multiple value operators like <code>in</code> and <code>pmatch</code> instead of writing multiple comparisons. In other words, <code>evt.type in (mkdir, mkdirat)</code> is better than <code>evt.type=mkdir or evt.type=mkdirat</code>. Multiple value operators are heavily optimized and become progressively more effective as the number of values grows.</p></li>
+<li><p>In general, small is good. Develop the habit of keeping things as simple as possible. This will not only speed up processing of your rules, it will also ensure they are readable and maintainable!</p></li>
+</ul>
+</div></section>
+<section data-type="sect2" data-pdf-bookmark="Tagging"><div class="sect2" id="tagging">
+<h2>Tagging</h2>
+<p><a contenteditable="false" data-primary="tagging" data-secondary="rule writing and" data-type="indexterm" id="idm45324222398656"/><a contenteditable="false" data-primary="writing Falco rules" data-secondary="tagging" data-type="indexterm" id="idm45324222397280"/>Tagging is a powerful tool for crafting rules. It has three important uses: flexibly filtering the rules Falco loads, adding context to its output, and supporting notification filtering and prioritization, therefore reducing noise. Using tags generously will improve your Falco experience and ensure you get the most out of your rules.<a contenteditable="false" data-primary="" data-startref="ch13.html2" data-type="indexterm" id="idm45324222395424"/></p>
+</div></section>
+</div></section>
+<section data-type="sect1" data-pdf-bookmark="Conclusion"><div class="sect1" id="conclusion-id000012">
+<h1>Conclusion</h1>
+<p>This was an intense chapter! Rule writing is a demanding topic, but it can also be fun and creative. Plus, writing the perfect rule to perform an impressive detection will earn you a lot of points with your coworkers.<a contenteditable="false" data-primary="" data-startref="ch13.html0" data-type="indexterm" id="idm45324222391952"/></p>
+</div></section>
+<div data-type="footnotes"><p data-type="footnote" id="ch01fn18"><sup><a href="ch13.xhtml#ch01fn18-marker">1</a></sup> The term <em>symlink</em> is short for <em>symbolic link</em>; in Unix, it indicates a filesystem entry that is a reference to another file or directory.</p></div></div></section></div></body></html>

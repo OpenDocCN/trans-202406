@@ -1,0 +1,1174 @@
+<html><head></head><body><div id="sbo-rt-content"><section data-type="chapter" epub:type="chapter" data-pdf-bookmark="Chapter 14. Validating and Reformatting Data"><div class="chapter" id="nch-format"><h1><span class="label">Chapter 14. </span>Validating and Reformatting Data</h1><aside data-type="sidebar" epub:type="sidebar"><div class="sidebar" id="idm45820352783600"><h5>A note for Early Release readers</h5><p>With Early Release ebooks, you get books in their earliest form—the author’s raw and unedited content as they write—so you can take advantage of these technologies long before the official release of these titles.</p></div></aside><section data-type="sect1" data-pdf-bookmark="14.0 Introduction"><div class="sect1" id="nch-format-format-intro"><h1>14.0 Introduction</h1><p>The previous chapter, <a data-type="xref" href="ch13.xhtml#nch-xfer">Chapter 13</a>, focused on
+    methods for moving data into and out of MySQL, by reading lines and breaking them
+      into separate columns. In this chapter, we’ll focus on the content rather than structure issues. 
+    For example, if you don’t know whether the
+    values contained in a file or recieved via web form are legal, preprocess them to check or reformat
+    them:</p><ul><li><p>It’s often a good idea to validate data values to make sure
+          they’re legal for the data types into which you store them. For example, you
+          can make sure that values intended for <code>INT</code>, <code>DATE</code>, and <code>ENUM</code> columns are integers, dates in ISO
+          format (<em><code>YYYY-MM-DD</code></em> ), and legal enumeration
+          values, respectively.</p></li><li><p>Data values may need reformatting. You might store credit card
+          values as a string of digits but permit users of a web application
+          to separate blocks of digits by spaces or dashes. These values must
+          be rewritten before storing them. Rewriting dates from one format to
+          another is especially common; for example, if a program writes dates
+          in <em><code>MM-DD-YY</code></em> format to ISO format for import into MySQL. If a program
+          understands only date and time formats and not a combined
+          date-and-time format (such as MySQL uses for the <code>DATETIME</code> and <code>TIMESTAMP</code> data types), you must split
+          date-and-time values into separate date and time values.</p></li></ul><p>The chapter deals with formatting and validation issues primarily
+    within the context of checking entire files, but many of the techniques
+    discussed here can be applied to one-time validations as well. Consider a
+    web-based application that presents a form for a user to fill in and then
+    processes its contents to create a new row in the database. Web APIs
+    generally make form contents available as a set of already parsed discrete
+    values, so the application may not need to deal with record and column
+    delimiters. On the other hand, validation issues remain paramount. You
+    really have no idea what kind of values a user is sending your script, so
+    it’s important to check them.</p><p>
+      First three recipes introduce you data validation capabilities, available in MySQL. Starting from <a data-type="xref" href="#nch-format-format-validate-input-loop">Recipe 14.4</a> we focus on validating and pre-processing data on the application side. We introduce technicques that allow to process large bulks of data effectively.
+    </p><aside data-type="sidebar" epub:type="sidebar"><div class="sidebar" id="idm45820352774608"><h5>Server-Side Versus Client-Side Validation</h5><p>As described in <a data-type="xref" href="#nch-format-format-sql-mode">Recipe 14.1</a>, <a data-type="xref" href="#nch-format-format-check">Recipe 14.2</a>, and <a data-type="xref" href="#nch-format-format-triggers">Recipe 14.3</a>
+        you can cause data validation to be done on the server side to be restrictive about accepting bad input data. In this
+        case, the MySQL server raises an error for values that are invalid for
+        the data types of the columns into which you insert them.</p><p>In the next few recipes, the focus is validation on the client
+        side rather than on the server side. Client-side validation can be
+        useful when you require more control over validation than simply
+        receiving an error from the server. (For example, if you test values
+        yourself, it’s often easier to provide more informative messages to
+        users about the exact nature of problems with the values.) Also, it
+        might be necessary to couple validation with reformatting to transform
+        complex values so that they are compatible with MySQL data types. You
+        have more flexibility to do this on the client side.</p></div></aside><p>Source code for program fragments and scripts discussed in this
+    chapter is located in the <em class="filename">transfer</em>
+    directory of the <code>recipes</code> distribution,
+    with the exception that some utility functions are contained in library
+    files located in the <em class="filename">lib</em>
+    directory.</p></div></section><section data-type="sect1" data-pdf-bookmark="14.1 Using the SQL Mode to Reject Bad Input Values"><div class="sect1" id="nch-format-format-sql-mode"><h1>14.1 Using the SQL Mode to Reject Bad Input Values</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820352767472"><h2>Problem</h2><p>MySQL accepts data values that are invalid,
+      out of range, or otherwise unsuitable for the data types of the columns
+      into which you insert them. You want the server to be more
+      restrictive and not accept bad data.</p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820352766496"><h2>Solution</h2><p>Check the SQL mode and make sure it is not empty. There are several modes that you can use to control how strict the server is on data values. Some modes apply generally to all input values.
+      Others apply to specific data types such as dates.</p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820352765296"><h2>Discussion</h2><p>When the SQL mode is not setor is set to an empty value, MySQL allows all input values for your table columns, even if the input data types do not match the column’s data type. Consider the following table,
+      which has integer, string, and date columns:</p><pre data-type="programlisting">mysql&gt; <strong><code>SELECT @@sql_mode;</code></strong>
++------------+
+| @@sql_mode |
++------------+
+|            |
++------------+
+1 row in set (0,00 sec)
+mysql&gt; <strong><code>CREATE TABLE t (i INT, c CHAR(6), d DATE);</code></strong></pre><p>Inserting a row with unsuitable data values into the table causes
+      warnings (which you can see with <code>SHOW</code>
+      <code>WARNINGS</code>), but the server loads the values into the table after converting
+      them to some value that fits the column:</p><pre data-type="programlisting">mysql&gt; <strong><code>INSERT INTO t (i,c,d) VALUES('-1x','too-long string!','1999-02-31');</code></strong>
+mysql&gt; <strong><code>SHOW WARNINGS;</code></strong>
++---------+------+--------------------------------------------+
+| Level   | Code | Message                                    |
++---------+------+--------------------------------------------+
+| Warning | 1265 | Data truncated for column 'i' at row 1     |
+| Warning | 1265 | Data truncated for column 'c' at row 1     |
+| Warning | 1264 | Out of range value for column 'd' at row 1 |
++---------+------+--------------------------------------------+
+mysql&gt; <strong><code>SELECT * FROM t;</code></strong>
++------+--------+------------+
+| i    | c      | d          |
++------+--------+------------+
+|   -1 | too-lo | 0000-00-00 |
++------+--------+------------+</pre><p>One way to prevent these converstions to happen is to check the input data on
+      the client side to make sure that it’s legal. This is a
+      reasonable strategy in certain circumstances (see the sidebar in <a data-type="xref" href="#nch-format-format-intro">Recipe 14.0</a>), but there is an alternative:
+      let the server check data values on the server side and reject them with an error if
+      they’re invalid.</p><p>To do this, set the <code>sql_mode</code> system
+      variable to enable server restrictions on input data acceptance. With
+      the proper restrictions in place, data values that would otherwise
+      result in conversions and warnings result in errors instead. Try the
+       <code>INSERT</code> statement from the previous example again
+      after enabling <q>strict</q> SQL mode:</p><pre data-type="programlisting">mysql&gt; <strong><code>SET sql_mode = 'STRICT_ALL_TABLES';</code></strong>
+mysql&gt; <strong><code>INSERT INTO t (i,c,d) VALUES('-1x','too-long string!','1999-02-31');</code></strong>
+ERROR 1265 (01000): Data truncated for column 'i' at row 1</pre><p>Here the statement doesn’t even progress to the second and third
+      data values because the first is invalid for an integer column and the
+      server raises an error.</p><p>Without input restrictions enabled, the server checks that the
+      month part of date values is in the range from 1 to 12 and that the day
+      value is legal for the given month. This means that <code>'2005-02-31'</code> generates a warning by default
+      (with conversion to zero date <code>'0000-00-00'</code>). In
+      strict mode, an error occurs.</p><p>MySQL still permits dates such as <code>'1999-11-00'</code> or <code>'1999-00-00'</code> that have zero parts, or the
+      <q>zero</q> date (<code>'0000-00-00'</code>). To restrict these kinds of date values, enable
+      the <code>NO_ZERO_IN_DATE</code> and <code>NO_ZERO_DATE</code> SQL modes to cause warnings, or errors in strict mode. For example,
+      to prohibit dates with zero parts or <q>zero</q> dates, set the
+      SQL mode like this:</p><pre data-type="programlisting">mysql&gt; <strong><code>SET sql_mode = 'STRICT_ALL_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE';</code></strong></pre><p>A simpler way to enable these restrictions, and a few more
+      besides, is to enable <code>TRADITIONAL</code> SQL mode. <code>TRADITIONAL</code> mode is actually a constellation
+      of modes, as you can see by setting and displaying the <code>sql_mode</code> value:</p><pre data-type="programlisting">mysql&gt; <strong><code>SET sql_mode = 'TRADITIONAL';</code></strong>
+mysql&gt; <strong><code>SELECT @@sql_mode\G</code></strong>
+*************************** 1. row ***************************
+@@sql_mode: STRICT_TRANS_TABLES,STRICT_ALL_TABLES,NO_ZERO_IN_DATE,
+            NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,TRADITIONAL,
+            NO_ENGINE_SUBSTITUTION</pre><p>You can read more about the various SQL modes in the
+      <a href="https://dev.mysql.com/doc/refman/8.0/en/sql-mode.html">MySQL Reference Manual</a>.</p><p>The examples shown set the session value of the <code>sql_mode</code> system variable, so they change the
+      SQL mode only for your current session. To set the mode globally for all
+      clients, start the server with a
+      <code class="option">--sql_mode=</code><em><code>mode_value</code></em>
+      option. Alternatively, if you have the <code>SYSTEM_VARIABLES_ADMIN</code> or <code>SUPER</code> privilege,
+      you can set the global mode at runtime:</p><pre data-type="programlisting">mysql&gt; <strong><code>SET GLOBAL sql_mode = '</code></strong><em><code>mode_value</code></em><strong><code>';</code></strong></pre><div data-type="note" epub:type="note"><h6>Note</h6><p>
+          Before MySQL 5.7, the SQL mode was forgiving by default. Newer versions are much more restrictive, and SQL mode is set to <code>ONLY_FULL_GROUP_BY, STRICT_TRANS_TABLES, NO_ZERO_IN_DATE, NO_ZERO_DATE, ERROR_FOR_DIVISION_BY_ZERO, NO_AUTO_CREATE_USER, NO_ENGINE_SUBSTITUTION</code>. Therefore, if you want to have a restrictive server, you don’t need to do anything extra, unless you intentionally relaxed the SQL mode earlier.
+        </p></div></div></section></div></section><section data-type="sect1" data-pdf-bookmark="14.2 Using CHECK Constraints to Reject Invalid Values"><div class="sect1" id="nch-format-format-check"><h1>14.2 Using CHECK Constraints to Reject Invalid Values</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820352735712"><h2>Problem</h2><p>
+        You want to validate data so it follows business logic of your application and rejects values if they do not satisfy requirements.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820352734608"><h2>Solution</h2><p>
+        Use <code>CHECK</code> constraints.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820352733216"><h2>Discussion</h2><p>
+        If a value matches the MySQL data type format, it does not mean it matches logic of the application. For example, if you want to store only even numbers you cannot simply use data type integer, because both odd and even numbers are valid integers.
+      </p><p>
+        <code>CHECK</code> constraints, introduced in version 8.0, allow to setup a custom condition on the table column and rejects the statement if value does not satisfy it. Thus, to create a table that will store only even values, you would need to use <code>CHECK</code> to check if the number can be divided by two without a reminder.
+        </p><pre data-type="programlisting" data-code-language="sql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">CREATE</code><code> </code><code class="k">TABLE</code><code> </code><code class="n">even</code><code> </code><code class="p">(</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="n">even_value</code><code> </code><code class="nb">INT</code><code> </code><code class="k">CHECK</code><code class="p">(</code><code class="n">even_value</code><code> </code><code class="o">%</code><code> </code><code class="mi">2</code><code> </code><code class="o">=</code><code> </code><code class="mi">0</code><code class="p">)</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="p">)</code><code> </code><code class="n">ENGINE</code><code class="o">=</code><code class="n">InnoDB</code><code class="p">;</code></strong><code>
+</code><code class="n">Query</code><code> </code><code class="n">OK</code><code class="p">,</code><code> </code><code class="mi">0</code><code> </code><code class="k">rows</code><code> </code><code class="n">affected</code><code> </code><code class="p">(</code><code class="mi">0</code><code class="p">.</code><code class="mi">03</code><code> </code><code class="n">sec</code><code class="p">)</code></pre><p>
+        Now we can successfully insert even numbers into this table.
+        </p><pre data-type="programlisting" data-code-language="sql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">INSERT</code><code> </code><code class="k">INTO</code><code> </code><code class="n">even</code><code> </code><code class="k">VALUES</code><code class="p">(</code><code class="mi">2</code><code class="p">)</code><code class="p">;</code></strong><code>
+</code><code class="n">Query</code><code> </code><code class="n">OK</code><code class="p">,</code><code> </code><code class="mi">1</code><code> </code><code class="k">row</code><code> </code><code class="n">affected</code><code> </code><code class="p">(</code><code class="mi">0</code><code class="p">.</code><code class="mi">01</code><code> </code><code class="n">sec</code><code class="p">)</code></pre><p>
+        Odd values would be rejected.
+        </p><pre data-type="programlisting" data-code-language="sql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">INSERT</code><code> </code><code class="k">INTO</code><code> </code><code class="n">even</code><code> </code><code class="k">VALUES</code><code class="p">(</code><code class="mi">1</code><code class="p">)</code><code class="p">;</code></strong><code>
+</code><code class="n">ERROR</code><code> </code><code class="mi">3819</code><code> </code><code class="p">(</code><code class="n">HY000</code><code class="p">)</code><code class="p">:</code><code> </code><code class="k">Check</code><code> </code><code class="k">constraint</code><code> </code><code class="s1">'even_chk_1'</code><code> </code><code class="k">is</code><code> </code><code class="n">violated</code><code class="p">.</code></pre><p>
+      </p><p>
+        You can also create multiple <code>CHECK</code> constraints for a single column. For example, to accept only even values that are less than 100 create two constraints.
+        </p><pre data-type="programlisting" data-code-language="sql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">CREATE</code><code> </code><code class="k">TABLE</code><code> </code><code class="n">even_100</code><code> </code><code class="p">(</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="n">even_value</code><code> </code><code class="nb">INT</code><code> </code><code class="k">CHECK</code><code class="p">(</code><code class="n">even_value</code><code> </code><code class="o">%</code><code> </code><code class="mi">2</code><code> </code><code class="o">=</code><code> </code><code class="mi">0</code><code class="p">)</code><code> </code><code class="k">CHECK</code><code class="p">(</code><code class="n">even_value</code><code> </code><code class="o">&lt;</code><code> </code><code class="mi">100</code><code class="p">)</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="p">)</code><code> </code><code class="n">ENGINE</code><code class="o">=</code><code class="n">InnoDB</code><code class="p">;</code></strong><code>
+</code><code class="n">Query</code><code> </code><code class="n">OK</code><code class="p">,</code><code> </code><code class="mi">0</code><code> </code><code class="k">rows</code><code> </code><code class="n">affected</code><code> </code><code class="p">(</code><code class="mi">0</code><code class="p">.</code><code class="mi">02</code><code> </code><code class="n">sec</code><code class="p">)</code></pre><p>
+        In this case, MySQL will check the first condition and if it is satisfied it will process the second one.
+        </p><pre data-type="programlisting" data-code-language="sql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">INSERT</code><code> </code><code class="k">INTO</code><code> </code><code class="n">even_100</code><code> </code><code class="k">VALUES</code><code class="p">(</code><code class="mi">101</code><code class="p">)</code><code class="p">;</code></strong><code>
+</code><code class="n">ERROR</code><code> </code><code class="mi">3819</code><code> </code><code class="p">(</code><code class="n">HY000</code><code class="p">)</code><code class="p">:</code><code> </code><code class="k">Check</code><code> </code><code class="k">constraint</code><code> </code><code class="s1">'even_100_chk_1'</code><code> </code><code class="k">is</code><code> </code><code class="n">violated</code><code class="p">.</code><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">INSERT</code><code> </code><code class="k">INTO</code><code> </code><code class="n">even_100</code><code> </code><code class="k">VALUES</code><code class="p">(</code><code class="mi">102</code><code class="p">)</code><code class="p">;</code></strong><code>
+</code><code class="n">ERROR</code><code> </code><code class="mi">3819</code><code> </code><code class="p">(</code><code class="n">HY000</code><code class="p">)</code><code class="p">:</code><code> </code><code class="k">Check</code><code> </code><code class="k">constraint</code><code> </code><code class="s1">'even_100_chk_2'</code><code> </code><code class="k">is</code><code> </code><code class="n">violated</code><code class="p">.</code></pre><p>
+      </p><p>
+        If you specify a <code>CHECK</code> constraint when defining a column it will validate only this column. If you want to check two or more columns in the single constraint you will need to specify it separately.
+      </p><p>
+        A common validation task is to check if the departure date is later than the arrival date. We can add such a check to the <code>patients</code> table.
+        </p><pre data-type="programlisting" data-code-language="sql"><code class="k">ALTER</code> <code class="k">TABLE</code> <code class="n">patients</code> <code class="k">ADD</code> <code class="k">CONSTRAINT</code> <code class="n">date_check</code> 
+<code class="k">CHECK</code><code class="p">((</code><code class="n">date_departed</code> <code class="k">IS</code> <code class="k">NULL</code><code class="p">)</code> <code class="k">OR</code> <code class="p">(</code><code class="n">date_departed</code> <code class="o">&gt;=</code> <code class="n">date_arrived</code><code class="p">));</code></pre><p>
+        Now, it will not allow you to insert records where departure date is earlier than the arrival date.
+        </p><pre data-type="programlisting" data-code-language="sql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">INSERT</code><code> </code><code class="k">INTO</code><code> </code><code class="n">patients</code><code> </code><code class="p">(</code><code class="n">national_id</code><code class="p">,</code><code> </code><code class="n">name</code><code class="p">,</code><code> </code><code class="n">surname</code><code class="p">,</code><code> </code><code class="n">gender</code><code class="p">,</code><code> </code><code class="n">age</code><code class="p">,</code><code> </code><code class="n">diagnosis</code><code class="p">,</code><code> </code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="n">date_arrived</code><code class="p">,</code><code> </code><code class="n">date_departed</code><code class="p">)</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="k">VALUES</code><code class="p">(</code><code class="s1">'34GD429520'</code><code class="p">,</code><code> </code><code class="s1">'John'</code><code class="p">,</code><code> </code><code class="s1">'Doe'</code><code class="p">,</code><code> </code><code class="s1">'M'</code><code class="p">,</code><code> </code><code class="mi">45</code><code class="p">,</code><code> </code><code class="s1">'Data Phobia'</code><code class="p">,</code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="s1">'2020-07-20'</code><code class="p">,</code><code> </code><code class="s1">'2020-05-31'</code><code class="p">)</code><code class="p">;</code></strong><code>
+</code><code class="n">ERROR</code><code> </code><code class="mi">3819</code><code> </code><code class="p">(</code><code class="n">HY000</code><code class="p">)</code><code class="p">:</code><code> </code><code class="k">Check</code><code> </code><code class="k">constraint</code><code> </code><code class="s1">'date_check'</code><code> </code><code class="k">is</code><code> </code><code class="n">violated</code><code class="p">.</code></pre><p>
+      </p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="14.3 Using Triggers to Reject Input Values"><div class="sect1" id="nch-format-format-triggers"><h1>14.3 Using Triggers to Reject Input Values</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820352273376"><h2>Problem</h2><p>
+        You want to validate if data to be inserted into the table follows business logic, but your logic is more complicated than <code>CHECK</code> constraints can handle. You may also need to rewrite the data instead of rejecting it. Or you are using an earlier version of MySQL where <code>CHECK</code> constraints are not available.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820352286944"><h2>Solution</h2><p>
+        Use <code>BEFORE</code> triggers.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820352285616"><h2>Discussion</h2><p>
+        <code>CHECK</code> constraints have certain limitations. They do not allow you to use stored or user-defined functions, subqueries, or user-defined variables. They also do not allow you to modify inserted data. If you want to format inserted value to satisfy your business standards you may want to explore another solution, such as validation on the application side or <code>BEFORE</code> triggers on MySQL side.
+      </p><p>
+        To perform more complicated validation on MySQL side create a trigger and raise a SQL exception in it.
+      </p><p>
+        Let’s take a look at an example. Suppose that a groceries table stores details about the products in a supermarket. In some countries, it is forbidden to sell alcohol in supermarkets between certain hours. For example, in Turkey, you wouldn’t be able to buy alcohol in a supermarket between 10 pm and 6 am. If you are working with such limitations, you may want to limit times when users can place orders.
+      </p><p>
+        Suppose that a <code>groceries</code> table stores details about groceries in the supermarket.
+        </p><pre data-type="programlisting" data-code-language="sql"><code class="k">CREATE</code> <code class="k">TABLE</code> <code class="o">`</code><code class="n">groceries</code><code class="o">`</code> <code class="p">(</code>
+  <code class="o">`</code><code class="n">id</code><code class="o">`</code> <code class="nb">int</code> <code class="k">NOT</code> <code class="k">NULL</code><code class="p">,</code>
+  <code class="o">`</code><code class="n">name</code><code class="o">`</code> <code class="nb">varchar</code><code class="p">(</code><code class="mi">255</code><code class="p">)</code> <code class="k">DEFAULT</code> <code class="k">NULL</code><code class="p">,</code>
+  <code class="o">`</code><code class="n">forbidden_after</code><code class="o">`</code> <code class="n">time</code> <code class="k">DEFAULT</code> <code class="k">NULL</code><code class="p">,</code>
+  <code class="o">`</code><code class="n">forbidden_before</code><code class="o">`</code> <code class="n">time</code> <code class="k">DEFAULT</code> <code class="k">NULL</code><code class="p">,</code>
+  <code class="k">PRIMARY</code> <code class="k">KEY</code> <code class="p">(</code><code class="o">`</code><code class="n">id</code><code class="o">`</code><code class="p">)</code>
+<code class="p">)</code> <code class="n">ENGINE</code><code class="o">=</code><code class="n">InnoDB</code><code class="p">;</code></pre><p>
+        Columns <code>forbidden_after</code> and <code>forbidden_before</code> define time range when it is not allowed to sell particular item.
+      </p><p>
+        Another table, named <code>groceries_order_items</code>, contains information about purchases.
+        </p><pre data-type="programlisting" data-code-language="sql"><code class="k">CREATE</code> <code class="k">TABLE</code> <code class="n">groceries_order_items</code>
+<code class="p">(</code>
+  <code class="n">order_id</code> <code class="nb">INT</code> <code class="k">NOT</code> <code class="k">NULL</code><code class="p">,</code>
+  <code class="n">groceries_id</code> <code class="nb">INT</code> <code class="k">NOT</code> <code class="k">NULL</code><code class="p">,</code>
+  <code class="n">quantity</code> <code class="nb">INT</code> <code class="k">DEFAULT</code> <code class="mi">0</code><code class="p">,</code>
+  <code class="k">PRIMARY</code> <code class="k">KEY</code> <code class="p">(</code><code class="n">order_id</code><code class="p">,</code><code class="n">groceries_id</code><code class="p">)</code>
+<code class="p">)</code> <code class="n">ENGINE</code><code class="o">=</code><code class="n">InnoDB</code><code class="p">;</code></pre><p>
+      </p><p>
+        To disallow the purchase of items during certain times, you could create a trigger that checks the current time and if there are any restrictions to a selected product. If restrictions exist the purchase will be rejected.
+      </p><p>
+        </p><pre data-type="programlisting" data-code-language="sql"><code class="k">CREATE</code><code> </code><code class="k">TRIGGER</code><code> </code><code class="n">check_time</code><code>
+</code><code class="k">BEFORE</code><code> </code><code class="k">INSERT</code><code> </code><code class="k">ON</code><code> </code><code class="n">groceries_order_items</code><code>
+</code><code class="k">FOR</code><code> </code><code class="k">EACH</code><code> </code><code class="k">ROW</code><code> </code><code class="k">BEGIN</code><code>
+</code><code class="k">DECLARE</code><code> </code><code class="n">forbidden_after_val</code><code> </code><code class="n">TIME</code><code class="p">;</code><code> </code><a class="co" id="co_nch-format-format-triggers_declare_co" href="#callout_nch-format-format-triggers_declare_co"><img src="Images/1.png" alt="1" width="12" height="12"/></a><code>
+</code><code class="k">DECLARE</code><code> </code><code class="n">forbidden_before_val</code><code> </code><code class="n">TIME</code><code class="p">;</code><code>
+</code><code class="k">DECLARE</code><code> </code><code class="n">name_val</code><code> </code><code class="nb">VARCHAR</code><code class="p">(</code><code class="mi">255</code><code class="p">)</code><code class="p">;</code><code>
+</code><code class="k">DECLARE</code><code> </code><code class="n">message</code><code> </code><code class="nb">VARCHAR</code><code class="p">(</code><code class="mi">400</code><code class="p">)</code><code class="p">;</code><code>
+
+</code><code class="k">SELECT</code><code> </code><code class="n">forbidden_after</code><code class="p">,</code><code> </code><code class="n">forbidden_before</code><code class="p">,</code><code> </code><code class="n">name</code><code> </code><a class="co" id="co_nch-format-format-triggers_select_co" href="#callout_nch-format-format-triggers_select_co"><img src="Images/2.png" alt="2" width="12" height="12"/></a><code>
+</code><code class="k">INTO</code><code> </code><code class="n">forbidden_after_val</code><code class="p">,</code><code> </code><code class="n">forbidden_before_val</code><code class="p">,</code><code> </code><code class="n">name_val</code><code>
+</code><code class="k">FROM</code><code> </code><code class="n">groceries</code><code> </code><code class="k">WHERE</code><code> </code><code class="n">id</code><code> </code><code class="o">=</code><code> </code><code class="k">NEW</code><code class="p">.</code><code class="n">groceries_id</code><code class="p">;</code><code>
+
+</code><code class="n">IF</code><code> </code><code class="p">(</code><code class="n">forbidden_after_val</code><code> </code><code class="k">IS</code><code> </code><code class="k">NOT</code><code> </code><code class="k">NULL</code><code> </code><code class="k">AND</code><code> </code><code class="n">TIME</code><code class="p">(</code><code class="n">NOW</code><code class="p">(</code><code class="p">)</code><code class="p">)</code><code> </code><code class="o">&gt;</code><code class="o">=</code><code> </code><code class="n">forbidden_after_val</code><code class="p">)</code><code> </code><a class="co" id="co_nch-format-format-triggers_check_co" href="#callout_nch-format-format-triggers_check_co"><img src="Images/3.png" alt="3" width="12" height="12"/></a><code>
+  </code><code class="k">OR</code><code> </code><code class="p">(</code><code class="n">forbidden_before_val</code><code> </code><code class="k">IS</code><code> </code><code class="k">NOT</code><code> </code><code class="k">NULL</code><code> </code><code class="k">AND</code><code> </code><code class="n">TIME</code><code class="p">(</code><code class="n">NOW</code><code class="p">(</code><code class="p">)</code><code class="p">)</code><code> </code><code class="o">&lt;</code><code class="o">=</code><code> </code><code class="n">forbidden_before_val</code><code class="p">)</code><code>
+</code><code class="k">THEN</code><code>
+  </code><code class="k">SET</code><code> </code><code class="n">message</code><code class="o">=</code><code class="n">CONCAT</code><code class="p">(</code><code class="s1">'It is forbidden to buy '</code><code class="p">,</code><code> </code><code class="n">name_val</code><code class="p">,</code><code>
+      </code><code class="s1">' between '</code><code class="p">,</code><code> </code><code class="n">forbidden_after_val</code><code class="p">,</code><code> </code><code class="s1">' and '</code><code class="p">,</code><code> </code><code class="n">forbidden_before_val</code><code class="p">)</code><code class="p">;</code><code> </code><a class="co" id="co_nch-format-format-triggers_message_co" href="#callout_nch-format-format-triggers_message_co"><img src="Images/4.png" alt="4" width="12" height="12"/></a><code>
+  </code><code class="n">SIGNAL</code><code> </code><code class="k">SQLSTATE</code><code> </code><code class="s1">'45000'</code><code> </code><a class="co" id="co_nch-format-format-triggers_signal_co" href="#callout_nch-format-format-triggers_signal_co"><img src="Images/5.png" alt="5" width="12" height="12"/></a><code>
+    </code><code class="k">SET</code><code> </code><code class="k">MESSAGE_TEXT</code><code> </code><code class="o">=</code><code> </code><code class="n">message</code><code class="p">;</code><code>
+</code><code class="k">END</code><code> </code><code class="n">IF</code><code class="p">;</code><code>
+</code><code class="k">END</code><code class="p">;</code></pre><p>
+
+        </p><dl class="calloutlist"><dt><a class="co" id="callout_nch-format-format-triggers_declare_co" href="#co_nch-format-format-triggers_declare_co"><img src="Images/1.png" alt="1" width="12" height="12"/></a></dt><dd><p>Declare variables to store time range when the purchase is forbidden, the name of the product, and an error message.</p></dd><dt><a class="co" id="callout_nch-format-format-triggers_select_co" href="#co_nch-format-format-triggers_select_co"><img src="Images/2.png" alt="2" width="12" height="12"/></a></dt><dd><p>Select restricted time range and name of the product into variables.</p></dd><dt><a class="co" id="callout_nch-format-format-triggers_check_co" href="#co_nch-format-format-triggers_check_co"><img src="Images/3.png" alt="3" width="12" height="12"/></a></dt><dd><p>Check if current time fails into forbidden range for the selected product.</p></dd><dt><a class="co" id="callout_nch-format-format-triggers_message_co" href="#co_nch-format-format-triggers_message_co"><img src="Images/4.png" alt="4" width="12" height="12"/></a></dt><dd><p>If the time fails into forbidden range craft a message, explaining restrictions for the product.</p></dd><dt><a class="co" id="callout_nch-format-format-triggers_signal_co" href="#co_nch-format-format-triggers_signal_co"><img src="Images/5.png" alt="5" width="12" height="12"/></a></dt><dd><p>Raise an error and reject the insert.</p></dd></dl><p>
+      </p><p>
+        As a result you can purchase cheese or water at 3 am, but you cannot purchase beer or wine at that time.
+        </p><pre data-type="programlisting" data-code-language="sql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">SELECT</code><code> </code><code class="k">CURRENT_TIME</code><code class="p">(</code><code class="p">)</code><code class="p">;</code></strong><code>
+</code><code class="o">+</code><code class="c1">----------------+
+</code><code class="o">|</code><code> </code><code class="k">CURRENT_TIME</code><code class="p">(</code><code class="p">)</code><code> </code><code class="o">|</code><code>
+</code><code class="o">+</code><code class="c1">----------------+
+</code><code class="o">|</code><code> </code><code class="mi">03</code><code class="p">:</code><code class="mi">01</code><code class="p">:</code><code class="mi">40</code><code>       </code><code class="o">|</code><code>
+</code><code class="o">+</code><code class="c1">----------------+
+</code><code class="mi">1</code><code> </code><code class="k">row</code><code> </code><code class="k">in</code><code> </code><code class="k">set</code><code> </code><code class="p">(</code><code class="mi">0</code><code class="p">.</code><code class="mi">00</code><code> </code><code class="n">sec</code><code class="p">)</code><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">INSERT</code><code> </code><code class="k">INTO</code><code> </code><code class="n">groceries_order_items</code><code> </code><code class="k">VALUES</code><code class="p">(</code><code class="mi">1</code><code class="p">,</code><code class="mi">3</code><code class="p">,</code><code class="mi">1</code><code class="p">)</code><code class="p">;</code><code> </code><code class="c1">-- cheese</code></strong><code class="c1">
+</code><code class="n">Query</code><code> </code><code class="n">OK</code><code class="p">,</code><code> </code><code class="mi">1</code><code> </code><code class="k">row</code><code> </code><code class="n">affected</code><code> </code><code class="p">(</code><code class="mi">0</code><code class="p">.</code><code class="mi">03</code><code> </code><code class="n">sec</code><code class="p">)</code><code>
+
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">INSERT</code><code> </code><code class="k">INTO</code><code> </code><code class="n">groceries_order_items</code><code> </code><code class="k">VALUES</code><code class="p">(</code><code class="mi">1</code><code class="p">,</code><code class="mi">8</code><code class="p">,</code><code class="mi">3</code><code class="p">)</code><code class="p">;</code><code> </code><code class="c1">-- water</code></strong><code class="c1">
+</code><code class="n">Query</code><code> </code><code class="n">OK</code><code class="p">,</code><code> </code><code class="mi">1</code><code> </code><code class="k">row</code><code> </code><code class="n">affected</code><code> </code><code class="p">(</code><code class="mi">0</code><code class="p">.</code><code class="mi">01</code><code> </code><code class="n">sec</code><code class="p">)</code><code>
+
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">INSERT</code><code> </code><code class="k">INTO</code><code> </code><code class="n">groceries_order_items</code><code> </code><code class="k">VALUES</code><code class="p">(</code><code class="mi">1</code><code class="p">,</code><code class="mi">7</code><code class="p">,</code><code class="mi">6</code><code class="p">)</code><code class="p">;</code><code> </code><code class="c1">-- beer</code></strong><code class="c1">
+</code><code class="n">ERROR</code><code> </code><code class="mi">1644</code><code> </code><code class="p">(</code><code class="mi">45000</code><code class="p">)</code><code class="p">:</code><code> </code><code class="n">It</code><code> </code><code class="k">is</code><code> </code><code class="n">forbidden</code><code> </code><code class="k">to</code><code> </code><code class="n">buy</code><code> </code><code class="n">beer</code><code> </code><code class="k">between</code><code> </code><code class="mi">22</code><code class="p">:</code><code class="mi">00</code><code class="p">:</code><code class="mi">00</code><code> </code><code class="k">and</code><code> </code><code class="mi">06</code><code class="p">:</code><code class="mi">00</code><code class="p">:</code><code class="mi">00</code><code>
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">INSERT</code><code> </code><code class="k">INTO</code><code> </code><code class="n">groceries_order_items</code><code> </code><code class="k">VALUES</code><code class="p">(</code><code class="mi">1</code><code class="p">,</code><code class="mi">6</code><code class="p">,</code><code class="mi">1</code><code class="p">)</code><code class="p">;</code><code> </code><code class="c1">-- wine</code></strong><code class="c1">
+</code><code class="n">ERROR</code><code> </code><code class="mi">1644</code><code> </code><code class="p">(</code><code class="mi">45000</code><code class="p">)</code><code class="p">:</code><code> </code><code class="n">It</code><code> </code><code class="k">is</code><code> </code><code class="n">forbidden</code><code> </code><code class="k">to</code><code> </code><code class="n">buy</code><code> </code><code class="n">wine</code><code> </code><code class="k">between</code><code> </code><code class="mi">22</code><code class="p">:</code><code class="mi">00</code><code class="p">:</code><code class="mi">00</code><code> </code><code class="k">and</code><code> </code><code class="mi">06</code><code class="p">:</code><code class="mi">00</code><code class="p">:</code><code class="mi">00</code></pre><p>
+      </p><p>
+        The purchase limitation is relaxed during day time.
+        </p><pre data-type="programlisting" data-code-language="sql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">SELECT</code><code> </code><code class="k">CURRENT_TIME</code><code class="p">(</code><code class="p">)</code><code class="p">;</code></strong><code>
+</code><code class="o">+</code><code class="c1">----------------+
+</code><code class="o">|</code><code> </code><code class="k">CURRENT_TIME</code><code class="p">(</code><code class="p">)</code><code> </code><code class="o">|</code><code>
+</code><code class="o">+</code><code class="c1">----------------+
+</code><code class="o">|</code><code> </code><code class="mi">14</code><code class="p">:</code><code class="mi">00</code><code class="p">:</code><code class="mi">35</code><code>       </code><code class="o">|</code><code>
+</code><code class="o">+</code><code class="c1">----------------+
+</code><code class="mi">1</code><code> </code><code class="k">row</code><code> </code><code class="k">in</code><code> </code><code class="k">set</code><code> </code><code class="p">(</code><code class="mi">0</code><code class="p">.</code><code class="mi">00</code><code> </code><code class="n">sec</code><code class="p">)</code><code>
+
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">INSERT</code><code> </code><code class="k">INTO</code><code> </code><code class="n">groceries_order_items</code><code> </code><code class="k">VALUES</code><code class="p">(</code><code class="mi">1</code><code class="p">,</code><code class="mi">7</code><code class="p">,</code><code class="mi">6</code><code class="p">)</code><code class="p">;</code><code> </code><code class="c1">-- beer</code></strong><code class="c1">
+</code><code class="n">Query</code><code> </code><code class="n">OK</code><code class="p">,</code><code> </code><code class="mi">1</code><code> </code><code class="k">row</code><code> </code><code class="n">affected</code><code> </code><code class="p">(</code><code class="mi">0</code><code class="p">.</code><code class="mi">01</code><code> </code><code class="n">sec</code><code class="p">)</code><code>
+
+</code><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">INSERT</code><code> </code><code class="k">INTO</code><code> </code><code class="n">groceries_order_items</code><code> </code><code class="k">VALUES</code><code class="p">(</code><code class="mi">1</code><code class="p">,</code><code class="mi">6</code><code class="p">,</code><code class="mi">1</code><code class="p">)</code><code class="p">;</code><code> </code><code class="c1">-- wine</code></strong><code class="c1">
+</code><code class="n">Query</code><code> </code><code class="n">OK</code><code class="p">,</code><code> </code><code class="mi">1</code><code> </code><code class="k">row</code><code> </code><code class="n">affected</code><code> </code><code class="p">(</code><code class="mi">0</code><code class="p">.</code><code class="mi">01</code><code> </code><code class="n">sec</code><code class="p">)</code></pre><p>
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="See Also"><div class="sect2" id="idm45820352285152"><h2>See Also</h2><p>For additional information about using triggers to reject or modify invalid values,
+      see <a data-type="xref" href="ch11.xhtml#nch-routines-preprocess-reject">Recipe 11.11</a>.</p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="14.4 Writing an Input-Processing Loop"><div class="sect1" id="nch-format-format-validate-input-loop"><h1>14.4 Writing an Input-Processing Loop</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820351522368"><h2>Problem</h2><p>You want to make sure that the data values in a file are legal.</p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820351541216"><h2>Solution</h2><p>Write an input process loop that will check them, possibly rewriting them into a more suitable
+      format.</p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820351540144"><h2>Discussion</h2><p>Many of the validation recipes shown in this chapter are typical of those that
+        you perform within the context of a program that reads a file and
+        checks individual column values. The general framework for such a
+        file-processing utility looks like this:</p><pre data-type="programlisting" data-code-language="python"><code class="ch">#!/usr/bin/python3</code>
+<code class="c1"># loop.py: Typical input-processing loop.</code>
+
+<code class="c1"># Assumes tab-delimited, linefeed-terminated input lines.</code>
+
+<code class="kn">import</code> <code class="nn">sys</code>
+
+<code class="k">for</code> <code class="n">line</code> <code class="ow">in</code> <code class="n">sys</code><code class="o">.</code><code class="n">stdin</code><code class="p">:</code>
+    <code class="n">line</code> <code class="o">=</code> <code class="n">line</code><code class="o">.</code><code class="n">rstrip</code><code class="p">()</code>
+    <code class="c1"># split line at tabs, preserving all fields</code>
+    <code class="n">values</code> <code class="o">=</code> <code class="n">line</code><code class="o">.</code><code class="n">split</code><code class="p">(</code><code class="s2">"</code><code class="se">\t</code><code class="s2">"</code><code class="p">)</code>
+    <code class="k">for</code> <code class="n">val</code> <code class="ow">in</code> <code class="n">values</code><code class="p">:</code> <code class="c1"># iterate through fields in line</code>
+        <code class="c1"># ... test val here ...</code>
+        <code class="k">pass</code></pre><p>The <code>for()</code> loop reads each
+        input line. Within the loop, each line is broken into fields. The inner
+        <code>for()</code> loop iterates through the
+        fields, enabling each to be processed in sequence. If you don’t apply
+        a given test uniformly to all the fields, replace the <code>for()</code> loop with separate column-specific
+        tests.</p><p>This loop assumes tab-delimited, linefeed-terminated input, an
+        assumption shared by most of the utilities discussed throughout this
+        chapter. To use these utilities with datafiles in other formats, you
+        may be able to convert such files to tab-delimited format using the
+        <span class="command"><em>cvt_file.pl</em></span> script, available in the recipes distribution.</p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="14.5 Putting Common Tests in Libraries"><div class="sect1" id="idm45820351436240"><h1>14.5 Putting Common Tests in Libraries</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820351435616"><h2>Problem</h2><p>
+            You want to do repeated validation operations. 
+          </p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820351434672"><h2>Solution</h2><p>
+            Package validation operations as library routines.
+          </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820351433728"><h2>Discussion</h2><p>It’s not unusual for
+      certain validation operations to occur repeatedly, in which case you’ll
+      probably find it useful to construct a library of functions. By
+      packaging validation operations as library routines, it is easier to
+      write utilities based on them, and the utilities make it easier to
+      perform command-line operations on entire files so that you can avoid
+      editing them yourself. This also gives the operation a
+        name that’s likely to make the meaning of it clearer than
+        the comparison code itself. The following test in Python language performs a pattern
+        match to check that <code>val</code> consists
+        entirely of digits (optionally preceded by a plus sign), and then
+        makes sure the value is greater than zero:</p><pre data-type="programlisting" data-code-language="python"><code class="n">p</code> <code class="o">=</code> <code class="n">re</code><code class="o">.</code><code class="n">compile</code><code class="p">(</code><code class="s1">'^\+?\d+$'</code><code class="p">)</code>
+  <code class="n">s</code> <code class="o">=</code> <code class="n">p</code><code class="o">.</code><code class="n">search</code><code class="p">(</code><code class="n">val</code><code class="p">)</code>
+  <code class="n">valid</code> <code class="o">=</code> <code class="n">s</code> <code class="ow">and</code> <code class="p">(</code><code class="n">s</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">0</code><code class="p">)</code> <code class="o">!=</code> <code class="s1">'0'</code><code class="p">)</code></pre><p>In other words, the test looks for strings that represent
+        positive integers. To make the test easier to use and its intent
+        clearer, package it as a function that is used like this:</p><pre data-type="programlisting" data-code-language="python"><code class="n">valid</code> <code class="o">=</code> <code class="n">is_positive_integer</code> <code class="p">(</code><code class="n">val</code><code class="p">);</code></pre><p>Define the function as follows:</p><pre data-type="programlisting" data-code-language="python"><code class="k">def</code> <code class="nf">is_positive_integer</code><code class="p">(</code><code class="n">val</code><code class="p">):</code>
+  <code class="n">p</code> <code class="o">=</code> <code class="n">re</code><code class="o">.</code><code class="n">compile</code><code class="p">(</code><code class="s1">'^\+?\d+$'</code><code class="p">)</code>
+  <code class="n">s</code> <code class="o">=</code> <code class="n">p</code><code class="o">.</code><code class="n">search</code><code class="p">(</code><code class="n">val</code><code class="p">)</code>
+  <code class="k">return</code> <code class="n">s</code> <code class="ow">and</code> <code class="p">(</code><code class="n">s</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">0</code><code class="p">)</code> <code class="o">!=</code> <code class="s1">'0'</code><code class="p">)</code></pre><p>Now put the function definition into a library file so that
+        multiple scripts can use it easily. The <span class="command"><em>cookbook_utils.py</em></span> module file in the
+        <em class="filename">lib</em> directory of the <code>recipes</code> distribution is an example of a
+        library file that contains a number of validation functions. Take a
+        look through it to see which functions may be useful in your own
+        programs (or as a model for writing your own library files). To gain
+        access to this module from within a script, include a <code>use</code> statement like this:</p><pre data-type="programlisting" data-code-language="python"><code class="kn">import</code> <code class="nn">cookbook_utils</code> <code class="kn">as</code> <code class="nn">cu</code></pre><p>You must of course install the module file in a directory where
+        Python will find it (see <a data-type="xref" href="ch04.xhtml#nch-api-api-library">Recipe 4.3</a>).</p><p>A significant benefit of putting a collection of utility
+        routines into a library file is that you can use it for all kinds of
+        programs. It’s rare for a data manipulation problem to be completely
+        unique. If you can pick and choose at least a few validation routines
+        from a library, it reduces the amount of code you must write, even for
+        highly specialized programs.</p><div data-type="tip"><h6>Tip</h6><p>To avoid writing your own library routines, look around to see if
+      someone else has already written suitable routines that you can use. For
+      example, if you check the Perl CPAN (<em class="filename">cpan.perl.org</em>), you’ll find a Data::Validate
+      module hierarchy. The modules there provide library routines that
+      standardize a number of common validation tasks.
+      Data::Validate::MySQL deals specifically with MySQL data types.</p></div></div></section></div></section><section data-type="sect1" data-pdf-bookmark="14.6 Using Pattern Matching to Validate Data"><div class="sect1" id="nch-format-format-pattern"><h1>14.6 Using Pattern Matching to Validate Data</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820351270880"><h2>Problem</h2><p>You want to compare a value to a set of values that is difficult to
+      specify without writing a really ugly expression.</p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820351263488"><h2>Solution</h2><p>Use pattern matching.</p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820351262544"><h2>Discussion</h2><p>Pattern matching is a powerful validation tool that enables you to
+      test entire classes of values with a single expression. You can also use
+      pattern tests to break matched values into subparts for further
+      individual testing or in substitution operations to rewrite matched
+      values. For example, you might break a matched date into pieces to
+      verify that the month is in the range from 1 to 12, and the day is
+      within the number of days in the month. You might use a substitution to
+      reorder <em><code>MM-DD-YYYY</code></em> or
+      <em><code>DD-MM-YYYY</code></em> values into
+      <em><code>YYYY-MM-DD</code></em> format.</p><p>The next few sections describe how to use patterns to test several
+      types of values, but first let’s review some general pattern-matching
+      principles. The following discussion focuses on Python’s
+      regular-expression capabilities. Pattern matching in Ruby, PHP, Go, and Perl is similar, although you should
+      consult the relevant documentation for any differences. For Java,
+      use the <code>java.util.regex</code>
+      package.</p><p>In Python, regular expressions are part of the module <code>re</code>. The pattern constructor is <code>re.compile(</code><em><code>pat</code></em><code>)</code>:</p><pre data-type="programlisting" data-code-language="python">pattern = re.compile(<em><code>pat</code></em>)</pre><p>
+        To find if a value matches a pattern use method <code>match</code>:
+      </p><pre data-type="programlisting" data-code-language="python"><code class="n">it_matched</code> <code class="o">=</code> <code class="n">pattern</code><code class="o">.</code><code class="n">match</code><code class="p">(</code><code class="n">val</code><code class="p">)</code>    <code class="c1"># pattern match</code></pre><p>
+        You can construct regular expression in the method <code>match</code>:
+      </p><pre data-type="programlisting" data-code-language="python">it_matched = re.match(<em><code>pat</code></em>, val)    # pattern match</pre><p>Put a flag <code>re.I</code> as the second argument to the regular expression constructor to make the pattern match
+      case insensitive:</p><pre data-type="programlisting" data-code-language="python">it_matched = re.match(<em><code>pat</code></em>, val, re.I)   # case-insensitive match</pre><p>To look for a nonmatch, replace the <code>=</code> operator with the combination of the <code>=</code> and <code>not</code> operators:</p><pre data-type="programlisting" data-code-language="python">no_match = not re.match(<em><code>pat</code></em>, val)     # negated pattern match</pre><p>To perform a substitution in <code>val</code> based on a pattern match, use <code>re.sub(/</code><em><code>pat</code></em><code>, </code><em><code>replacement</code></em><code>, val)</code><em><code>replacement</code></em><code>/</code>. If <em><code>pat</code></em> occurs
+      within <code>val</code>, it’s replaced by
+      <em><code>replacement</code></em>. For a case-insensitive
+      match, put an <code>re.I</code> flag.
+      To conduct a substitution that replaces only few instances of
+      <em><code>pat</code></em> rather than all of them, add an option
+      <code>count</code>:</p><pre data-type="programlisting" data-code-language="python">val = re.sub(<em><code>pat</code></em>, <em><code>replacement</code></em>, val)    # substitution
+val = re.sub(<em><code>pat</code></em>, <em><code>replacement</code></em>, val, flags = re.I)   # case-insensitive substitution
+val = re.sub(<em><code>pat</code></em>, <em><code>replacement</code></em>, val, count = 1)   # substitution of the first match
+val = re.sub(<em><code>pat</code></em>, <em><code>replacement</code></em>, val, count = 1, flags = re.I)  
+             # case-insensitive and the first match</pre><p>The <a data-type="xref" href="#nch-format-format-pattern-special">Table 14-1</a> shows some of the special pattern elements
+      available in Python regular expressions:</p><table id="nch-format-format-pattern-special"><caption><span class="label">Table 14-1. </span>Pattern elements in Python regular expressions</caption><thead><tr><th>Pattern</th><th>What the pattern matches</th></tr></thead><tbody><tr><td><code>^</code></td><td>Beginning of string</td></tr><tr><td><code>$</code></td><td>End of string</td></tr><tr><td><code>.</code></td><td>Any character except a newline</td></tr><tr><td><code>\s</code>, <code>\S</code></td><td>Whitespace or nonwhitespace character</td></tr><tr><td><code>\d</code>, <code>\D</code></td><td>Digit or nondigit character</td></tr><tr><td><code>\w</code>, <code>\W</code></td><td>Word (alphanumeric or underscore) or nonword
+              character</td></tr><tr><td><code>[...]</code></td><td>Any character listed between
+              the square brackets</td></tr><tr><td><code>[^...]</code></td><td>Any character not listed
+              between the square brackets</td></tr><tr><td><em><code>p1</code></em><code>|</code><em><code>p2</code></em><code>|</code><em><code>p3</code></em></td><td>Alternation; matches any of
+              the patterns <em><code>p1</code></em>,
+              <em><code>p2</code></em>, or
+              <em><code>p3</code></em></td></tr><tr><td><code>*</code></td><td>Zero or more instances of preceding element</td></tr><tr><td><code>+</code></td><td>One or more instances of preceding element</td></tr><tr><td><code>{</code><em><code>n</code></em><code>}</code></td><td><em><code>n</code></em>
+              instances of preceding element</td></tr><tr><td><code>{</code><em><code>m</code></em><code>,</code><em><code>n</code></em><code>}</code></td><td><em><code>m</code></em>
+              through <em><code>n</code></em> instances of preceding
+              element</td></tr></tbody></table><p>Many of these pattern elements are the same as those available for MySQL’s <code>REGEXP</code> regular-expression operator (see <a data-type="xref" href="ch07.xhtml#nch-strings-strings-pat-regexp">Recipe 7.11</a>).</p><p>To match a literal instance of a character that is special within
+      patterns, such as <code>*</code>, <code>^</code>, or <code>$</code>,
+      precede it with a backslash. Similarly, to include a character within a
+      character class construction that is special in character classes
+      (<code>[</code>, <code>]</code>, or <code>-</code>),
+      precede it with a backslash. To include a literal <code>^</code> in a character class, list it somewhere
+      other than as the first character between the parentheses.</p><p>Many of the validation patterns shown in the following recipes
+      are of the form <code>^</code><em><code>pat</code></em><code>$</code>. Beginning and ending a pattern with
+      <code>^</code> and <code>$</code> has the effect of requiring
+      <em><code>pat</code></em> to match the entire string that you test.
+      This is common in data validation contexts because it’s generally
+      desirable to know that a pattern matches an entire input value, not only
+      part of it. (To be sure that a value represents an integer, for example,
+      it does no good to know only that it contains an integer somewhere.)
+      This is not a hard-and-fast rule, however, and sometimes it’s useful to
+      perform a more relaxed test by omitting the <code>^</code> and <code>$</code>
+      characters as appropriate. For example, if you want to strip leading and trailing whitespace from a value, use one
+      pattern anchored only to the beginning of the string, and another
+      anchored only to the end:</p><pre data-type="programlisting" data-code-language="python"><code class="n">val</code> <code class="o">=</code> <code class="n">re</code><code class="o">.</code><code class="n">sub</code><code class="p">(</code><code class="s1">'^\s+'</code><code class="p">,</code> <code class="s1">''</code><code class="p">,</code> <code class="n">val</code><code class="p">)</code>   <code class="c1"># trim leading whitespace</code>
+<code class="n">val</code> <code class="o">=</code> <code class="n">re</code><code class="o">.</code><code class="n">sub</code><code class="p">(</code><code class="s1">'\s+$'</code><code class="p">,</code> <code class="s1">''</code><code class="p">,</code> <code class="n">val</code><code class="p">)</code>   <code class="c1"># trim trailing whitespace</code></pre><p>That’s such a common operation, in fact, that it’s a good
+      candidate for being written as a utility function. The <span class="command"><em>cookbook_utils.py</em></span> file contains a function <code>trim_whitespace()</code> that performs both
+      substitutions and returns the result:</p><pre data-type="programlisting" data-code-language="python"><code class="n">val</code> <code class="o">=</code> <code class="n">trim_whitespace</code> <code class="p">(</code><code class="n">val</code><code class="p">)</code></pre><p>To remember subsections of a string matched by a pattern, use
+      parentheses around the relevant pattern parts. After a successful match,
+      you can refer to the matched substrings using the variables <code>\1</code>, <code>\2</code>, and
+      so forth inside the regular expression or using match number as an argument of the method <code>group</code>:</p><pre data-type="programlisting" data-code-language="python"><code class="n">match</code> <code class="o">=</code> <code class="n">re</code><code class="o">.</code><code class="n">match</code><code class="p">(</code><code class="s1">'^(\d+)(.*)$'</code><code class="p">,</code> <code class="s1">'2021-04-25'</code><code class="p">)</code>
+<code class="k">if</code> <code class="n">match</code><code class="p">:</code>
+  <code class="n">first_part</code> <code class="o">=</code> <code class="n">match</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">1</code><code class="p">)</code> <code class="c1"># this is the year, 2021</code>
+  <code class="n">the_rest</code> <code class="o">=</code> <code class="n">match</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">2</code><code class="p">)</code>   <code class="c1"># this is the rest of the date, -04-25</code></pre><p>If you want to indicate that an element within a pattern is optional, follow
+      it with a <code>?</code> character.
+      To match values consisting of a sequence of digits, optionally beginning
+      with a minus sign, and optionally ending with a period, use this
+      pattern:</p><pre data-type="programlisting" data-code-language="python"><code class="o">^-</code><code class="err">?</code>\<code class="n">d</code><code class="o">+</code>\<code class="o">.</code><code class="err">?$</code></pre><p>Use parentheses to group alternations within a pattern. The following pattern
+      matches time values in <em><code>hh:mm</code></em> format,
+      optionally followed by <code>AM</code> or <code>PM</code>:</p><pre data-type="programlisting" data-code-language="python"><code class="o">^</code>\<code class="n">d</code><code class="p">{</code><code class="mi">1</code><code class="p">,</code><code class="mi">2</code><code class="p">}:</code>\<code class="n">d</code><code class="p">{</code><code class="mi">2</code><code class="p">}</code>\<code class="n">s</code><code class="o">*</code><code class="p">(</code><code class="n">AM</code><code class="o">|</code><code class="n">PM</code><code class="p">)</code><code class="err">?$</code></pre><p>The use of parentheses in that pattern also has the side effect of
+      remembering the optional part in <code>\1</code>.
+      To suppress that side effect, use <code>(?:</code><em><code>pat</code></em> <code>)</code> instead:</p><pre data-type="programlisting" data-code-language="python"><code class="o">^</code>\<code class="n">d</code><code class="p">{</code><code class="mi">1</code><code class="p">,</code><code class="mi">2</code><code class="p">}:</code>\<code class="n">d</code><code class="p">{</code><code class="mi">2</code><code class="p">}</code>\<code class="n">s</code><code class="o">*</code><code class="p">(</code><code class="err">?</code><code class="p">:</code><code class="n">AM</code><code class="o">|</code><code class="n">PM</code><code class="p">)</code><code class="err">?$</code></pre><p>You now have sufficient background in Python pattern matching to enable
+      construction of useful validation tests for several types of data
+      values. The following recipes provide patterns that can be used to test
+      for broad content types, numbers, temporal values, and email addresses
+      or URLs.</p><p>The <em class="filename">transfer</em> directory of the
+      <code>recipes</code> distribution contains a
+      <span class="command"><em>test_pat.py</em></span> script that reads input
+      values, matches them against several patterns, and reports which
+      patterns each value matches. The script is easily extensible, so you can
+      use it as a test harness to try your own patterns.</p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="14.7 Using Patterns to Match Broad Content Types"><div class="sect1" id="nch-format-format-pat-broad"><h1>14.7 Using Patterns to Match Broad Content Types</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820350916048"><h2>Problem</h2><p>You want to classify values into categories.</p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820350915104"><h2>Solution</h2><p>Use a pattern that uses a similarly broad categories.</p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820350914160"><h2>Discussion</h2><p>To check whether values are empty or nonempty, or consist only of
+      certain types of characters, the patterns listed in the <a data-type="xref" href="#nch-format-format-pat-broad-chars">Table 14-2</a>
+      may suffice:</p><table id="nch-format-format-pat-broad-chars"><caption><span class="label">Table 14-2. </span>Commonly used categories of characters</caption><thead><tr><th>Pattern</th><th>Type of value the pattern matches</th></tr></thead><tbody><tr><td><code>^$ </code></td><td>Empty value</td></tr><tr><td><code>.</code></td><td>Nonempty value</td></tr><tr><td><code>^\s*$ </code></td><td>Whitespace, possibly empty</td></tr><tr><td><code>^\s+$ </code></td><td>Nonempty whitespace</td></tr><tr><td><code>\S </code></td><td>Nonempty, and not
+              whitespace</td></tr><tr><td><code>^\d+$ </code></td><td>Digits only,
+              nonempty</td></tr><tr><td><code>^[a-zA-Z]+$ </code></td><td>Alphabetic characters only (case insensitive),
+              nonempty</td></tr><tr><td><code>^\w+$ </code></td><td>Alphanumeric or underscore
+              characters only, nonempty</td></tr></tbody></table></div></section></div></section><section data-type="sect1" data-pdf-bookmark="14.8 Using Patterns to Match Numeric Values"><div class="sect1" id="nch-format-format-pat-numeric"><h1>14.8 Using Patterns to Match Numeric Values</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820350903040"><h2>Problem</h2><p>You want to make sure a string looks like a number.</p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820350902160"><h2>Solution</h2><p>Use a pattern that matches the type of number you’re looking
+      for.</p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820350901216"><h2>Discussion</h2><p>Patterns can be used to classify values into several types of
+      numbers, as shown in the <a data-type="xref" href="#nch-format-format-pat-numeric-int">Table 14-3</a> </p><table id="nch-format-format-pat-numeric-int"><caption><span class="label">Table 14-3. </span>Patterns that match numbers</caption><thead><tr><th>Pattern</th><th>Type of value the pattern matches</th></tr></thead><tbody><tr><td><code>^\d+$ </code></td><td>Unsigned integer</td></tr><tr><td><code>^-?\d+$ </code></td><td>Negative or unsigned
+              integer</td></tr><tr><td><code>^[-+]?\d+$ </code></td><td>Signed or unsigned
+              integer</td></tr><tr><td><code>^[-+]?(\d+(\.\d*)?|\.\d+)$ </code></td><td>Floating-point
+              number</td></tr></tbody></table><p>The pattern <code>^\d+$</code> matches
+      unsigned integers by requiring a nonempty value that consists only of
+      digits from the beginning to the end of the value. If you care only that
+      a value begins with an integer, you can match an initial numeric part
+      and extract it. To do this, match only the initial part of the string
+      (omit the <code>$</code> that requires the pattern
+      to match to the end of the string) and place parentheses around the
+      <code>\d+</code> part. Then refer to the matched
+      number as <code>group(1)</code> after a successful
+      match:</p><pre data-type="programlisting" data-code-language="python"><code class="n">match</code> <code class="o">=</code> <code class="n">re</code><code class="o">.</code><code class="n">match</code><code class="p">(</code><code class="s1">'^(\d+)'</code><code class="p">,</code> <code class="n">val</code><code class="p">)</code>
+<code class="k">if</code> <code class="n">match</code><code class="p">:</code>
+  <code class="n">val</code> <code class="o">=</code> <code class="n">match</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">1</code><code class="p">)</code></pre><p>Some kinds of numeric values have a special format or other
+      unusual constraints. Here are a few examples and how to deal with
+      them:</p><dl><dt>ZIP codes</dt><dd><p>ZIP and ZIP+4 codes are postal codes used for mail delivery in the United
+            States. They have values like <code>12345</code> or <code>12345-6789</code> (that is, five digits,
+            possibly followed by a dash and four more digits). To match one
+            form or the other, or both forms, use the patterns shown in the
+            <a data-type="xref" href="#nch-format-format-pat-numeric-zips">Table 14-4</a>:</p><table id="nch-format-format-pat-numeric-zips"><caption><span class="label">Table 14-4. </span>Patterns that match ZIP codes</caption><thead><tr><th>Pattern</th><th>Type of value the pattern matches</th></tr></thead><tbody><tr><td><code>^\d{5}$ </code></td><td>ZIP code, five digits
+                    only</td></tr><tr><td><code>^\d{5}-\d{4}$ </code></td><td>ZIP+4 code</td></tr><tr><td><code>^\d{5}(-\d{4})?$ </code></td><td>ZIP or ZIP+4
+                    code</td></tr></tbody></table></dd><dt>Credit card numbers</dt><dd><p>Credit card numbers typically consist of digits, but it’s common for
+            values to be written with spaces, dashes, or other characters
+            between groups of digits. For example, the following numbers are
+            equivalent:</p><pre data-type="programlisting">0123456789012345
+0123 4567 8901 2345
+0123-4567-8901-2345</pre><p>To match such values, use this pattern:</p><pre data-type="programlisting" data-code-language="python"><code class="o">^</code><code class="p">[</code><code class="o">-</code> \<code class="n">d</code><code class="p">]</code><code class="o">+</code></pre><p>(Python permits the <code>\d</code>
+            digit specifier within character classes.) However, that pattern
+            doesn’t identify values of the wrong length, and it may be useful
+            to remove extraneous characters before storing values in MySQL. To
+            require credit card values to contain 16 digits, use a
+            substitution that removes all nondigits, then check the length of
+            the result:</p><pre data-type="programlisting" data-code-language="python"><code class="n">val</code> <code class="o">=</code> <code class="n">re</code><code class="o">.</code><code class="n">sub</code><code class="p">(</code><code class="s1">'\D'</code><code class="p">,</code> <code class="s1">''</code><code class="p">,</code> <code class="n">val</code><code class="p">)</code>
+<code class="n">valid</code> <code class="o">=</code> <code class="nb">len</code><code class="p">(</code><code class="n">val</code><code class="p">)</code> <code class="o">==</code> <code class="mi">16</code></pre></dd></dl></div></section></div></section><section data-type="sect1" data-pdf-bookmark="14.9 Using Patterns to Match Dates or Times"><div class="sect1" id="nch-format-format-pat-temporal"><h1>14.9 Using Patterns to Match Dates or Times</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820350795904"><h2>Problem</h2><p>You want to make sure a string looks like a date or time.</p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820350795024"><h2>Solution</h2><p>Use a pattern that matches the type of temporal value you expect.
+      Be sure to consider issues such as how strict to be about delimiters
+      between subparts and the lengths of the subparts.</p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820350794144"><h2>Discussion</h2><p>Dates are a validation headache because they come in so many
+      formats. Pattern tests are extremely useful for weeding out illegal
+      values, but often insufficient for full verification: a date might have
+      a number where you expect a month, but the date isn’t valid if the
+      number is 13. This section introduces some patterns that match a few
+      common date formats. <a data-type="xref" href="#nch-format-format-date-part">Recipe 14.14</a>
+      revisits this topic in more detail and discusses combining pattern tests
+      with content verification.</p><p>To require values to be dates in ISO (<em><code>YYYY-MM-DD</code></em>)
+      format, use this pattern:</p><pre data-type="programlisting" data-code-language="python"><code class="o">^</code>\<code class="n">d</code><code class="p">{</code><code class="mi">4</code><code class="p">}</code><code class="o">-</code>\<code class="n">d</code><code class="p">{</code><code class="mi">2</code><code class="p">}</code><code class="o">-</code>\<code class="n">d</code><code class="p">{</code><code class="mi">2</code><code class="p">}</code><code class="err">$</code></pre><p>The pattern requires the <code>-</code>
+      character as the delimiter between date parts. To permit either <code>-</code> or <code>/</code> as
+      the delimiter, use a character class between the numeric parts:</p><pre data-type="programlisting" data-code-language="python"><code class="o">^</code>\<code class="n">d</code><code class="p">{</code><code class="mi">4</code><code class="p">}[</code><code class="o">-/</code><code class="p">]</code>\<code class="n">d</code><code class="p">{</code><code class="mi">2</code><code class="p">}[</code><code class="o">-/</code><code class="p">]</code>\<code class="n">d</code><code class="p">{</code><code class="mi">2</code><code class="p">}</code><code class="err">$</code></pre><p>
+        This pattern will match dates in format <em><code>YYYY-MM-DD</code></em>, <em><code>YYYY/MM/DD</code></em>, <em><code>YYYY/MM-DD</code></em>, and <em><code>YYYY-MM/DD</code></em>.
+      </p><p>To permit any nondigit delimiter (which corresponds to how MySQL
+      operates when it interprets strings as dates), use this pattern:</p><pre data-type="programlisting" data-code-language="python"><code class="o">^</code>\<code class="n">d</code><code class="p">{</code><code class="mi">4</code><code class="p">}</code>\<code class="n">D</code>\<code class="n">d</code><code class="p">{</code><code class="mi">2</code><code class="p">}</code>\<code class="n">D</code>\<code class="n">d</code><code class="p">{</code><code class="mi">2</code><code class="p">}</code><code class="err">$</code></pre><p>To permit leading zeros in values like <code>03</code> to be missing, just look for three nonempty
+      digit sequences:</p><pre data-type="programlisting" data-code-language="python"><code class="o">^</code>\<code class="n">d</code><code class="o">+</code>\<code class="n">D</code>\<code class="n">d</code><code class="o">+</code>\<code class="n">D</code>\<code class="n">d</code><code class="o">+</code><code class="err">$</code></pre><p>Of course, that pattern is so general that it also matches other
+      values such as US Social Security numbers (which have the format
+      012-34-5678). To constrain the subpart lengths by requiring two to four
+      digits in the year part and one or two digits in the month and day
+      parts, use this pattern:</p><pre data-type="programlisting" data-code-language="python"><code class="o">^</code>\<code class="n">d</code><code class="p">{</code><code class="mi">2</code><code class="p">,</code><code class="mi">4</code><code class="p">}</code><code class="err">?</code>\<code class="n">D</code>\<code class="n">d</code><code class="p">{</code><code class="mi">1</code><code class="p">,</code><code class="mi">2</code><code class="p">}</code>\<code class="n">D</code>\<code class="n">d</code><code class="p">{</code><code class="mi">1</code><code class="p">,</code><code class="mi">2</code><code class="p">}</code><code class="err">$</code></pre><p>For dates in other formats such as <em><code>MM-DD-YY</code></em> or
+      <em><code>DD-MM-YY</code></em>, similar patterns apply, but the
+      subparts are arranged in a different order. This pattern matches both of
+      those formats:</p><pre data-type="programlisting" data-code-language="python"><code class="o">^</code>\<code class="n">d</code><code class="p">{</code><code class="mi">2</code><code class="p">}</code><code class="o">-</code>\<code class="n">d</code><code class="p">{</code><code class="mi">2</code><code class="p">}</code><code class="o">-</code>\<code class="n">d</code><code class="p">{</code><code class="mi">2</code><code class="p">}</code><code class="err">$</code></pre><p>To check the values of individual date parts, use parentheses in the pattern and extract the substrings
+      after a successful match. If you expect dates to be in ISO format, for
+      example, do this:</p><pre data-type="programlisting" data-code-language="python"><code class="n">match</code> <code class="o">=</code> <code class="n">re</code><code class="o">.</code><code class="n">match</code><code class="p">(</code><code class="s1">'^(\d{2,4})\D(\d{1,2})\D(\d{1,2})$'</code><code class="p">,</code> <code class="n">val</code><code class="p">)</code>
+<code class="k">if</code> <code class="n">match</code><code class="p">:</code>
+  <code class="p">(</code><code class="n">year</code><code class="p">,</code> <code class="n">month</code><code class="p">,</code> <code class="n">day</code><code class="p">)</code> <code class="o">=</code> <code class="p">(</code><code class="n">match</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">1</code><code class="p">),</code> <code class="n">match</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">2</code><code class="p">),</code> <code class="n">match</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">3</code><code class="p">))</code></pre><p>The library file <span class="command"><em>lib/cookbook_utils.py</em></span> in the <code>recipes</code> distribution contains several of these
+      pattern tests, packaged as function calls. If the date doesn’t match the
+      pattern, they return <code>None</code>.
+      Otherwise, they return a reference to an array containing the broken-out
+      values for the year, month, and day. This can be useful for performing
+      further checking on the components of the date. For example, <code>is_iso_date()</code> looks for dates that match ISO format. It’s defined as follows:</p><pre data-type="programlisting" data-code-language="python"><code class="k">def</code> <code class="nf">is_iso_date</code><code class="p">(</code><code class="n">val</code><code class="p">):</code>
+  <code class="n">m</code> <code class="o">=</code> <code class="n">re</code><code class="o">.</code><code class="n">match</code><code class="p">(</code><code class="s1">'^(\d{2,4})\D(\d{1,2})\D(\d{1,2})$'</code><code class="p">,</code> <code class="n">val</code><code class="p">)</code>
+  <code class="k">return</code> <code class="p">[</code><code class="nb">int</code><code class="p">(</code><code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">1</code><code class="p">)),</code>  <code class="nb">int</code><code class="p">(</code><code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">2</code><code class="p">)),</code> <code class="nb">int</code><code class="p">(</code><code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">3</code><code class="p">))]</code> <code class="k">if</code> <code class="n">m</code> <code class="k">else</code> <code class="bp">None</code></pre><p>The function could be used as follows:</p><pre data-type="programlisting" data-code-language="python"><code class="n">ref</code> <code class="o">=</code> <code class="n">cu</code><code class="o">.</code><code class="n">is_iso_date</code><code class="p">(</code><code class="n">val</code><code class="p">)</code>
+<code class="k">if</code> <code class="n">ref</code> <code class="ow">is</code> <code class="ow">not</code> <code class="bp">None</code><code class="p">:</code>
+  <code class="c1"># val matched ISO format pattern;</code>
+  <code class="c1"># check its subparts using ref[0] through ref[2]</code>
+  <code class="k">pass</code>
+<code class="k">else</code><code class="p">:</code>
+  <code class="c1"># val didn't match ISO format pattern</code>
+  <code class="k">pass</code></pre><p>You’ll often find additional processing necessary with dates
+      because date-matching patterns help to weed out values that are
+      syntactically malformed, but don’t assess whether the individual
+      components contain legal values. To do that, some range checking is
+      necessary. <a data-type="xref" href="#nch-format-format-date-part">Recipe 14.14</a> covers that
+      topic.</p><p>If you’re willing to skip subpart testing and just want to rewrite
+      the pieces, use a <span class="keep-together">substitution</span>.
+      For example, to rewrite values assumed to be in
+      <em><code>MM-DD-YY</code></em> format into <em><code>YY-MM-DD</code></em> format, do
+      this:</p><pre data-type="programlisting" data-code-language="python"><code class="n">val</code> <code class="o">=</code> <code class="n">re</code><code class="o">.</code><code class="n">sub</code><code class="p">(</code><code class="s1">'^(\d+)\D(\d+)\D(\d+)$'</code><code class="p">,</code> <code class="sa">r</code><code class="s1">'\3-\1-\2'</code><code class="p">,</code> <code class="n">val</code><code class="p">)</code></pre><p>Time values are somewhat more orderly than dates, usually being
+      written with hours first and seconds last, with two digits per
+      part:</p><pre data-type="programlisting" data-code-language="python"><code class="o">^</code>\<code class="n">d</code><code class="p">{</code><code class="mi">2</code><code class="p">}:</code>\<code class="n">d</code><code class="p">{</code><code class="mi">2</code><code class="p">}:</code>\<code class="n">d</code><code class="p">{</code><code class="mi">2</code><code class="p">}</code><code class="err">$</code></pre><p>To be more lenient, permit the hours part to have a single digit,
+      or the seconds part to be missing:</p><pre data-type="programlisting" data-code-language="python"><code class="o">^</code>\<code class="n">d</code><code class="p">{</code><code class="mi">1</code><code class="p">,</code><code class="mi">2</code><code class="p">}:</code>\<code class="n">d</code><code class="p">{</code><code class="mi">2</code><code class="p">}(:</code>\<code class="n">d</code><code class="p">{</code><code class="mi">2</code><code class="p">})</code><code class="err">?$</code></pre><p>Mark parts of the time with parentheses if you want to range-check
+      the individual parts, or perhaps to reformat the value to include a
+      seconds part of <code>00</code> if it happens to
+      be missing. However, this requires some care with the parentheses and
+      the <code>?</code> characters in the pattern if
+      the seconds part is optional. You want to permit the entire <code>:\d{2}</code> at the end of the pattern to be
+      optional, but not to save the <code>:</code>
+      character in <code>\3</code> if the third time
+      section is present. To accomplish that, use <code>(?:</code><em><code>pat</code></em><code>)</code>, a grouping notation that doesn’t save the
+      matched substring. Within that notation, use parentheses around the
+      digits to save them. Then <code>\3</code> is
+      <code>None</code> if the seconds part is not
+      present, and contains the seconds digits otherwise:</p><pre data-type="programlisting" data-code-language="python"><code class="n">m</code> <code class="o">=</code> <code class="n">re</code><code class="o">.</code><code class="n">match</code><code class="p">(</code><code class="s1">'^(\d{1,2}):(\d{2})(?::(\d{2}))?$'</code><code class="p">,</code> <code class="n">val</code><code class="p">)</code>
+<code class="p">(</code><code class="n">hour</code><code class="p">,</code> <code class="nb">min</code><code class="p">,</code> <code class="n">sec</code><code class="p">)</code> <code class="o">=</code> <code class="p">(</code><code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">1</code><code class="p">),</code> <code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">2</code><code class="p">),</code> <code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">3</code><code class="p">))</code>
+<code class="n">sec</code> <code class="o">=</code> <code class="s1">'00'</code> <code class="k">if</code> <code class="n">sec</code> <code class="ow">is</code> <code class="bp">None</code> <code class="k">else</code> <code class="n">sec</code> <code class="c1"># seconds missing; use 00</code>
+<code class="n">val</code> <code class="o">=</code> <code class="n">hour</code> <code class="o">+</code> <code class="s1">':'</code> <code class="o">+</code> <code class="nb">min</code> <code class="o">+</code> <code class="s1">':'</code> <code class="o">+</code> <code class="n">sec</code></pre><p>To rewrite times from 12-hour format with AM and PM suffixes to
+      24-hour format, do this:</p><pre data-type="programlisting" data-code-language="python"><code class="n">m</code> <code class="o">=</code> <code class="n">re</code><code class="o">.</code><code class="n">match</code><code class="p">(</code><code class="s1">'^(\d{1,2})\D(\d{2})\D(\d{2})(?:\s*(AM|PM))?$'</code><code class="p">,</code> <code class="n">val</code><code class="p">,</code> <code class="n">flags</code> <code class="o">=</code> <code class="n">re</code><code class="o">.</code><code class="n">I</code><code class="p">)</code>
+<code class="p">(</code><code class="n">hour</code><code class="p">,</code> <code class="nb">min</code><code class="p">,</code> <code class="n">sec</code><code class="p">)</code> <code class="o">=</code> <code class="p">(</code><code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">1</code><code class="p">),</code> <code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">2</code><code class="p">),</code> <code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">3</code><code class="p">))</code>
+<code class="c1"># supply missing seconds</code>
+<code class="n">sec</code> <code class="o">=</code> <code class="s1">'00'</code> <code class="k">if</code> <code class="n">sec</code> <code class="ow">is</code> <code class="bp">None</code> <code class="k">else</code> <code class="n">sec</code> 
+<code class="k">if</code> <code class="nb">int</code><code class="p">(</code><code class="n">hour</code><code class="p">)</code> <code class="o">==</code> <code class="mi">12</code> <code class="ow">and</code> <code class="p">(</code><code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">4</code><code class="p">)</code> <code class="ow">is</code> <code class="bp">None</code> <code class="ow">or</code> <code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">4</code><code class="p">)</code><code class="o">.</code><code class="n">upper</code><code class="p">()</code> <code class="o">==</code> <code class="s2">"AM"</code><code class="p">):</code>
+  <code class="n">hour</code> <code class="o">=</code> <code class="s1">'00'</code> <code class="c1"># 12:xx:xx AM times are 00:xx:xx</code>
+<code class="k">elif</code> <code class="nb">int</code><code class="p">(</code><code class="n">hour</code><code class="p">)</code> <code class="o">&lt;</code> <code class="mi">12</code> <code class="ow">and</code> <code class="p">(</code><code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">4</code><code class="p">)</code> <code class="ow">is</code> <code class="ow">not</code> <code class="bp">None</code><code class="p">)</code> <code class="ow">and</code> <code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">4</code><code class="p">)</code><code class="o">.</code><code class="n">upper</code><code class="p">()</code> <code class="o">==</code> <code class="s2">"PM"</code><code class="p">:</code>
+  <code class="n">hour</code> <code class="o">=</code> <code class="nb">int</code><code class="p">(</code><code class="n">hour</code><code class="p">)</code> <code class="o">+</code> <code class="mi">12</code> <code class="c1"># PM times other than 12:xx:xx</code>
+<code class="k">return</code> <code class="p">[</code><code class="n">hour</code><code class="p">,</code> <code class="nb">min</code><code class="p">,</code> <code class="n">sec</code><code class="p">]</code> <code class="c1"># return hour, minute, second</code></pre><p>The time parts are placed into groups <code>1</code>, <code>2</code>, and
+      <code>3</code>, with <code>3</code> set to <code>None</code> if the seconds part is missing. The
+      suffix goes into group <code>	4</code> if it’s present.
+      If the suffix is <code>AM</code> or missing
+      (<code>None</code>), the value is interpreted as
+      an AM time. If the suffix is <code>PM</code>, the
+      value is interpreted as a PM time.</p></div></section><section data-type="sect2" data-pdf-bookmark="See Also"><div class="sect2" id="idm45820349909888"><h2>See Also</h2><p>This recipe shows just the beginning of what you can do when
+      processing dates for data-transfer purposes. Date and time testing and
+      conversion can be highly idiosyncratic, and the sheer number of issues
+      to consider is mind-boggling:</p><ul><li><p>What is the basic date format? Dates come in several common
+          styles, such as ISO (<em><code>YYYY-MM-DD</code></em>), US
+          (<em><code>MM-DD-YY</code></em>), and British
+          (<em><code>DD-MM-YY</code></em>) formats. And these are just
+          some of the more standard formats. Many more are possible. For
+          example, a datafile may contain dates written as <code>June</code> <code>17,</code> <code>1959</code> or as <code>17</code> <code>Jun</code>
+          <code>'59</code>.</p></li><li><p>Are trailing times permitted on dates, or perhaps required?
+          When times are expected, is the full time required or just the hour
+          and minute?</p></li><li><p>Do you permit special values like <code>now</code> or <code>today</code>?</p></li><li><p>Are date parts required to be delimited by a particular
+          character, such as <code>-</code> or <code>/</code>, or are other delimiters
+          permitted?</p></li><li><p>Are date parts required to have a specific number of digits?
+          Or are leading zeros on month and year values permitted to be
+          missing?</p></li><li><p>Are months written numerically, or represented as month names
+          like <code>January</code> or <code>Jan</code>?</p></li><li><p>How two-digit year values should be converted
+          to have four digits? What is the transition point within the
+          range <code>00</code> to <code>99</code> at which values change from one century
+          to another?</p></li><li><p>Should date parts be checked to ensure their validity?
+          Patterns can recognize strings that look like dates or times, but
+          while they’re extremely useful for detecting malformed values, they
+          may not be sufficient. A value like <code>1947-15-99</code> may match a pattern but isn’t a
+          legal date. Pattern testing is thus most useful in conjunction with
+          range checks on the individual parts of the date.</p></li></ul><p>The prevalence of these issues in data-transfer problems means
+      that you’ll probably end up writing some of your own validators on
+      occasion to handle very specific date formats. Other sections of this
+      chapter can provide additional assistance. For example, <a data-type="xref" href="#nch-format-format-year">Recipe 14.13</a> covers conversion of two-digit year
+      values to four-digit form, and <a data-type="xref" href="#nch-format-format-date-part">Recipe 14.14</a> discusses how to perform
+      validity checking on components of date or time values.</p><p>You might be able to save yourself some work by using existing
+      date-checking modules for your API language. Some possibilities: the
+      Perl <code>Date</code> module; the Ruby <code>date</code> module; the Python <code>datetime</code> module; the PHP <code>DateTime</code> class;
+      the Java <code>GregorianCalendar</code> and
+      <code>SimpleDateTime</code> classes.</p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="14.10 Using Patterns to Match Email Addresses or URLs"><div class="sect1" id="nch-format-format-pat-url"><h1>14.10 Using Patterns to Match Email Addresses or URLs</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820349863584"><h2>Problem</h2><p>You want to determine if a value looks like an email address or a
+      URL.</p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820349862576"><h2>Solution</h2><p>In your application use a pattern, tuned to the desired level of strictness on which addresses you accept and which do not.</p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820349861632"><h2>Discussion</h2><p>The immediately preceding recipes use patterns to identify
+      classes of values such as numbers and dates, which are fairly typical
+      applications for regular expressions. But pattern matching has much more
+      widespread applicability for data validation. To give some idea of a few
+      other types of values for which pattern matching can be used, this
+      recipe shows a few tests for email addresses and URLs.</p><p>To check values that are expected to be email addresses, the
+      pattern should require at least an <code>@</code>
+      character with nonempty strings on either side:</p><pre data-type="programlisting" data-code-language="python"><code class="o">.</code><code class="nd">@.</code></pre><div data-type="note" epub:type="note"><h6>Note</h6><p>
+			Full email address specification defined by <a href="https://www.ietf.org/rfc/rfc5322.txt">RFC5322</a> and contains of many parts. Regular expression that rejects all invalid addresses and accepts all valid is pretty complicated to write. Check <a href="http://emailregex.com/"><em class="hyperlink">http://emailregex.com/</em></a> for examples for popular programming languages to have an idea.
+		  </p><p>
+		    In this recipe we will show you a pretty minimal test that still is sufficient to help correcting most of innocent user errors, such as typos when they enter addresses into a web form.
+		  </p></div><p>It’s difficult to come up with a
+      fully general pattern that covers all the legal values and rejects all
+      the illegal ones, but it’s easy to write a pattern that’s at least a
+      little more restrictive. For example, in addition to being nonempty,
+      the username and the domain name should consist entirely
+      of characters other than <code>@</code> characters
+      or spaces:</p><pre data-type="programlisting" data-code-language="python"><code class="o">^</code><code class="p">[</code><code class="o">^</code><code class="err">@</code> <code class="p">]</code><code class="o">+</code><code class="err">@</code><code class="p">[</code><code class="o">^</code><code class="err">@</code> <code class="p">]</code><code class="o">+</code><code class="err">$</code></pre><p>You may also want to require that the domain name part contain at
+      least two parts separated by a dot:</p><pre data-type="programlisting" data-code-language="python"><code class="o">^</code><code class="p">[</code><code class="o">^</code><code class="err">@</code> <code class="p">]</code><code class="o">+</code><code class="err">@</code><code class="p">[</code><code class="o">^</code><code class="err">@</code> <code class="o">.</code><code class="p">]</code><code class="o">+</code>\<code class="o">.</code><code class="p">[</code><code class="o">^</code><code class="err">@</code> <code class="o">.</code><code class="p">]</code><code class="o">+</code></pre><p>To look for URL values that begin with a protocol specifier of
+      <code>http://</code>, <code>https://</code>, <code>ftp://</code>, or <code>mailto:</code>, use an alternation that matches any
+      of them at the beginning of the string.</p><pre data-type="programlisting" data-code-language="python"><code class="n">re</code><code class="o">.</code><code class="n">compile</code><code class="p">(</code><code class="s1">'^(https?://|ftp://|mailto:)'</code><code class="p">,</code> <code class="n">flags</code><code class="o">=</code><code class="n">re</code><code class="o">.</code><code class="n">I</code><code class="p">)</code></pre><p>The alternatives in the pattern are grouped within parentheses
+      because otherwise the <code>^</code> anchors only
+      the first of them to the beginning of the string. The <code>re.I</code> flag follows the pattern because
+      protocol specifiers in URLs are not case sensitive. The pattern is otherwise fairly
+      unrestrictive because it permits anything to follow the protocol
+      specifier. Add further restrictions as necessary.</p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="14.11 Using Table Metadata to Validate Data"><div class="sect1" id="nch-format-format-meta"><h1>14.11 Using Table Metadata to Validate Data</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820349733136"><h2>Problem</h2><p>You want to check input values against the legal members of an <code>ENUM</code> or <code>SET</code>
+      column.</p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820349731392"><h2>Solution</h2><p>Get the column definition, extract the list of members from it,
+      and check data values against the list.</p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820349730288"><h2>Discussion</h2><p>Some forms of validation involve checking input values against
+      information stored in a database. This includes values to be stored in
+      an <code>ENUM</code> or <code>SET</code> column, which can be checked against the
+      valid members stored in the column definition. Database-backed
+      validation also applies to values that must match those listed in a
+      lookup table to be considered legal. For example, input records that
+      contain customer IDs can be required to match a row in a <code>customers</code> table, and state abbreviations in
+      addresses can be verified against a table that lists each state. This
+      recipe describes <code>ENUM</code>- and <code>SET</code>-based validation, and <a data-type="xref" href="#nch-format-format-lookup">Recipe 14.12</a> discusses how to use lookup
+      tables.</p><p>One way to check input values that correspond to the legal values
+      of <code>ENUM</code> or <code>SET</code> columns is to get the list of legal column
+      values into an array using the information in <code>INFORMATION_SCHEMA</code>,
+      then perform an array membership test. For example, the favorite-color
+      column <code>color</code> from the <code>profile</code> table is an <code>ENUM</code> defined as follows:</p><pre data-type="programlisting">mysql&gt; <strong><code>SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS</code></strong>
+    -&gt; <strong><code>WHERE TABLE_SCHEMA = 'cookbook' AND TABLE_NAME = 'profile'</code></strong>
+    -&gt; <strong><code>AND COLUMN_NAME = 'color';</code></strong></pre><pre data-type="programlisting">+----------------------------------------------------+
+| COLUMN_TYPE                                        |
++----------------------------------------------------+
+| enum('blue','red','green','brown','black','white') |
++----------------------------------------------------+</pre><p>If you extract the list of enumeration members from the <code>COLUMN_TYPE</code> value and store them in a list
+      <code>members</code>, you can perform the
+      membership test like this:</p><pre data-type="programlisting" data-code-language="python"><code class="n">valid</code> <code class="o">=</code> <code class="bp">True</code> <code class="err">↩</code>
+<code class="k">if</code> <code class="nb">list</code><code class="p">(</code><code class="nb">map</code><code class="p">(</code><code class="k">lambda</code> <code class="n">v</code><code class="p">:</code> <code class="n">v</code><code class="o">.</code><code class="n">upper</code><code class="p">(),</code> <code class="n">members</code><code class="p">))</code><code class="o">.</code><code class="n">count</code><code class="p">(</code><code class="n">val</code><code class="o">.</code><code class="n">upper</code><code class="p">())</code> <code class="o">&gt;</code> <code class="mi">0</code> <code class="err">↩</code>
+<code class="k">else</code> <code class="bp">False</code></pre><p>We can convert the list <code>members</code> and <code>val</code> to upper case to perform a case-insensitive
+      comparison because the default collation is <code>utf8mb4_0900_ai_ci</code>, which is case-insensitive.
+      (If you have a column with a different collation, adjust
+      accordingly. We discussed how to change column collation in <a data-type="xref" href="ch07.xhtml#nch-strings-strings-charset-checking-changing">Recipe 7.5</a>)</p><p>In <a data-type="xref" href="ch12.xhtml#nch-meta-meta-enum">Recipe 12.6</a>, we wrote a function
+      <code>get_enumorset_info()</code> that returns
+      <code>ENUM</code> or <code>SET</code> column metadata. This includes the list of
+      members, so it’s easy to use that function to write another utility
+      routine, <code>check_enum_value()</code>, that gets the legal
+      enumeration values and performs the membership test. The routine takes
+      four arguments: a database handle, the table name and column name for
+      the <code>ENUM</code> column, and the value to
+      check. It returns true or false to indicate whether the value is
+      legal:</p><pre data-type="programlisting" data-code-language="python"><code class="k">def</code> <code class="nf">check_enum_value</code><code class="p">(</code><code class="n">conn</code><code class="p">,</code> <code class="n">db_name</code><code class="p">,</code> <code class="n">tbl_name</code><code class="p">,</code> <code class="n">col_name</code><code class="p">,</code> <code class="n">val</code><code class="p">):</code>
+  <code class="n">valid</code> <code class="o">=</code> <code class="mi">0</code> 
+  <code class="n">info</code> <code class="o">=</code> <code class="n">get_enumorset_info</code><code class="p">(</code><code class="n">conn</code><code class="p">,</code> <code class="n">db_name</code><code class="p">,</code> <code class="n">tbl_name</code><code class="p">,</code> <code class="n">col_name</code><code class="p">)</code>
+  <code class="k">if</code> <code class="n">info</code> <code class="ow">is</code> <code class="ow">not</code> <code class="bp">None</code> <code class="ow">and</code> <code class="n">info</code><code class="p">[</code><code class="s1">'type'</code><code class="p">]</code><code class="o">.</code><code class="n">upper</code><code class="p">()</code> <code class="o">==</code> <code class="s1">'ENUM'</code><code class="p">:</code>
+    <code class="c1"># use case-insensitive comparison because default collation</code>
+    <code class="c1"># (utf8mb4_0900_ai_ci) is case-insensitive (adjust if you use</code>
+    <code class="c1"># a different collation)</code>
+    <code class="n">valid</code> <code class="o">=</code> <code class="mi">1</code> <code class="err">↩</code>
+    <code class="k">if</code> <code class="nb">list</code><code class="p">(</code><code class="nb">map</code><code class="p">(</code><code class="k">lambda</code> <code class="n">v</code><code class="p">:</code> <code class="n">v</code><code class="o">.</code><code class="n">upper</code><code class="p">(),</code> <code class="n">info</code><code class="p">[</code><code class="s1">'values'</code><code class="p">]))</code><code class="o">.</code><code class="n">count</code><code class="p">(</code><code class="n">val</code><code class="o">.</code><code class="n">upper</code><code class="p">())</code> <code class="o">&gt;</code> <code class="mi">0</code> <code class="err">↩</code>
+    <code class="k">else</code> <code class="mi">0</code>
+  <code class="k">return</code> <code class="n">valid</code></pre><p>For single-value testing, such as to validate a value submitted in
+      a web form, list lookup for each value works well. However, to test a lot of
+      values (like an entire column in a datafile), it’s better to read the
+      enumeration values into memory once, then use them repeatedly to check
+      each data value. Furthermore, it’s a lot more efficient to perform dictionary
+      lookups than list lookups (in Python at least). To do so, retrieve the
+      legal enumeration values and store them as keys of a dictionary. Then test
+      each input value by checking whether it exists as a dictionary key. It’s a
+      little more effort to construct the dictionary, which is why <code>check_enum_value()</code> doesn’t do so. But for bulk
+      validation, the improved lookup speed more than makes up for the dictionary
+      construction overhead. (To check for yourself the relative efficiency of
+      list membership tests versus dictionary lookups, try the <span class="command"><em>lookup_time.py</em></span> script in the <em class="filename">transfer</em> directory of the <code>recipes</code> distribution.)</p><p>Begin by getting the metadata for the column and convert the list
+      of legal enumeration members to a dictionary:</p><pre data-type="programlisting" data-code-language="python"><code class="n">info</code> <code class="o">=</code> <code class="n">get_enumorset_info</code><code class="p">(</code><code class="n">conn</code><code class="p">,</code> <code class="n">db_name</code><code class="p">,</code> <code class="n">tbl_name</code><code class="p">,</code> <code class="n">col_name</code><code class="p">)</code>
+<code class="n">members</code><code class="o">=</code><code class="p">{}</code>
+<code class="c1"># convert dictionary key to consistent lettercase</code>
+<code class="k">for</code> <code class="n">v</code> <code class="ow">in</code> <code class="n">info</code><code class="p">[</code><code class="s1">'values'</code><code class="p">]:</code>
+  <code class="n">members</code><code class="p">[</code><code class="n">v</code><code class="o">.</code><code class="n">lower</code><code class="p">()]</code> <code class="o">=</code> <code class="mi">1</code></pre><p>The <code>for</code> loop makes each
+      enumeration member exist as the key of a dictionary element. The dictionary key is
+      what’s important here; the value associated with it is irrelevant. (The
+      example shown sets the value to <code>1</code>,
+      but you could use <code>None</code>, <code>0</code>, or any other value.) Note that the code
+      converts the dictionary keys to lowercase before storing them. This is done
+      because dictionary key lookups in Python are case sensitive. That’s fine if the
+      values that you check also are case sensitive, but <code>ENUM</code> columns by default are not. By converting
+      the enumeration values to a given lettercase before storing them in the
+      dictionary, and then converting the values you want to check similarly, you
+      perform, in effect, a case-insensitive key existence test:</p><pre data-type="programlisting" data-code-language="python"><code class="n">valid</code> <code class="o">=</code> <code class="mi">1</code> <code class="k">if</code> <code class="n">val</code><code class="o">.</code><code class="n">lower</code><code class="p">()</code> <code class="ow">in</code> <code class="n">members</code> <code class="k">else</code> <code class="mi">0</code></pre><p>The example converts enumeration values and input values
+      to lowercase. You could just as well use uppercase, as long as you do so
+      for all values consistently.</p><p>Note that the existence test may fail if the input value is the
+      empty string. You must decide how to handle that case on a
+      column-by-column basis. For example, if the column permits <code>NULL</code> values, you might interpret the empty
+      string as equivalent to <code>NULL</code> and thus
+      as being a legal value.</p><p>The validation procedure for <code>SET</code> values is similar to that for <code>ENUM</code> values, except that an input value might
+      consist of any number of <code>SET</code> members,
+      separated by commas. For the value to be legal, each element in it must
+      be legal. In addition, because <q>any number of members</q>
+      includes <q>none,</q> the empty string is a legal value for any
+      <code>SET</code> column.</p><p>For one-shot testing of individual input values, use a utility
+      routine <code>check_set_value()</code> that is similar to <code>check_enum_value()</code>:</p><pre data-type="programlisting" data-code-language="python"><code class="k">def</code> <code class="nf">check_set_value</code><code class="p">(</code><code class="n">conn</code><code class="p">,</code> <code class="n">db_name</code><code class="p">,</code> <code class="n">tbl_name</code><code class="p">,</code> <code class="n">col_name</code><code class="p">,</code> <code class="n">val</code><code class="p">):</code>
+  <code class="n">valid</code> <code class="o">=</code> <code class="mi">0</code> 
+  <code class="n">info</code> <code class="o">=</code> <code class="n">get_enumorset_info</code><code class="p">(</code><code class="n">conn</code><code class="p">,</code> <code class="n">db_name</code><code class="p">,</code> <code class="n">tbl_name</code><code class="p">,</code> <code class="n">col_name</code><code class="p">)</code>
+  <code class="k">if</code> <code class="n">info</code> <code class="ow">is</code> <code class="ow">not</code> <code class="bp">None</code> <code class="ow">and</code> <code class="n">info</code><code class="p">[</code><code class="s1">'type'</code><code class="p">]</code><code class="o">.</code><code class="n">upper</code><code class="p">()</code> <code class="o">==</code> <code class="s1">'SET'</code><code class="p">:</code>
+    <code class="k">if</code> <code class="n">val</code> <code class="o">==</code> <code class="s2">""</code><code class="p">:</code> 
+      <code class="k">return</code> <code class="mi">1</code> <code class="c1"># empty string is legal element</code>
+    <code class="c1"># use case-insensitive comparison because default collation</code>
+    <code class="c1"># (utf8mb4_0900_ai_ci) is case-insensitive (adjust if you use</code>
+    <code class="c1"># a different collation)</code>
+    <code class="n">valid</code> <code class="o">=</code> <code class="mi">1</code>  <code class="c1"># assume valid until we find out otherwise</code>
+    <code class="k">for</code> <code class="n">v</code> <code class="ow">in</code> <code class="n">val</code><code class="o">.</code><code class="n">split</code><code class="p">(</code><code class="s1">','</code><code class="p">):</code>
+      <code class="k">if</code> <code class="nb">list</code><code class="p">(</code><code class="nb">map</code><code class="p">(</code><code class="k">lambda</code> <code class="n">x</code><code class="p">:</code> <code class="n">x</code><code class="o">.</code><code class="n">upper</code><code class="p">(),</code> <code class="n">info</code><code class="p">[</code><code class="s1">'values'</code><code class="p">]))</code><code class="o">.</code><code class="n">count</code><code class="p">(</code><code class="n">v</code><code class="o">.</code><code class="n">upper</code><code class="p">())</code> <code class="o">&lt;=</code> <code class="mi">0</code><code class="p">:</code>
+        <code class="n">valid</code> <code class="o">=</code> <code class="mi">0</code> 
+        <code class="k">break</code>
+  <code class="k">return</code> <code class="n">valid</code></pre><p>For bulk testing, construct a dictionary from the legal <code>SET</code> members. The procedure is the same as
+      shown previously for producing a dictionary from <code>ENUM</code> elements.</p><p>To validate a given input value against the <code>SET</code> member dictionary, convert it to the same
+      lettercase as the hash keys, split it at commas to get a list of the
+      individual elements of the value, and then check each one. If any of the
+      elements are invalid, the entire value is invalid:</p><pre data-type="programlisting" data-code-language="python"><code class="n">valid</code> <code class="o">=</code> <code class="mi">1</code> <code class="c1"># assume valid until we find out otherwise</code>
+<code class="k">for</code> <code class="n">v</code> <code class="ow">in</code> <code class="n">val</code><code class="o">.</code><code class="n">split</code><code class="p">(</code><code class="s2">","</code><code class="p">):</code>
+  <code class="k">if</code> <code class="n">v</code><code class="o">.</code><code class="n">lower</code><code class="p">()</code> <code class="ow">not</code> <code class="ow">in</code> <code class="n">members</code><code class="p">:</code>
+    <code class="n">valid</code> <code class="o">=</code> <code class="mi">0</code> 
+    <code class="k">break</code></pre><p>After the loop terminates, <code>valid</code> is true if the value is legal for the
+      <code>SET</code> column, and false otherwise.
+      Empty strings are always legal <code>SET</code>
+      values, but this code performs no special-case test for an empty string.
+      No such test is necessary because in that case the <code>split()</code> operation returns an empty list, the
+      loop never executes, and <code>valid</code>
+      remains true.</p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="14.12 Using a Lookup Table to Validate Data"><div class="sect1" id="nch-format-format-lookup"><h1>14.12 Using a Lookup Table to Validate Data</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820349246560"><h2>Problem</h2><p>You want to check values to make sure they’re listed in a lookup
+      table.</p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820349245584"><h2>Solution</h2><p>Issue statements to check whether the values are in the table. The best way to do
+      this depends on the number of input values and the table size.
+      In this recipe we will start our discussion from issuing individual statements, then create a hash from the entire lookup table and, finally, improve our algorithm by remembering already seen values to avoid querying database several times for large data sets.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820349244640"><h2>Discussion</h2><p>To validate input values against the contents of a lookup table,
+      the techniques are somewhat similar to those shown in <a data-type="xref" href="#nch-format-format-meta">Recipe 14.11</a> for checking <code>ENUM</code> and <code>SET</code> columns. However, whereas <code>ENUM</code> and <code>SET</code> columns usually have a small number of
+      member values, a lookup table can have an essentially unlimited number
+      of values. You might not want to read them all into memory.</p><p>Validation of input values against the contents of a lookup table
+      can be done several ways, as illustrated in the following discussion.
+      The tests shown in the examples perform comparisons against values
+      exactly as they are stored in the lookup table. To perform case-insensitive comparisons, convert all values to a
+      consistent lettercase. (See the discussion of case conversion in <a data-type="xref" href="#nch-format-format-meta">Recipe 14.11</a>.)</p><section data-type="sect3" data-pdf-bookmark="Issue individual statements"><div class="sect3" id="idm45820349228928"><h3>Issue individual statements</h3><p>For one-shot operations, test a value by checking whether it’s
+        listed in the lookup table. The following query returns true (nonzero)
+        for a value that is present and false otherwise:</p><pre data-type="programlisting" data-code-language="python">cursor.execute("select count(*) from <em><code>tbl_name</code></em> where val = %(val)s", {'val': <em><code>value</code></em>})
+valid = cursor.fetchone()[0]</pre><p>This kind of test may be suitable for purposes such as checking a
+        value submitted in a web form, but is inefficient for validating large
+        datasets. It has no memory for the results of previous tests for
+        values that have been seen before; consequently, you execute a query
+        for every input value.</p></div></section><section data-type="sect3" data-pdf-bookmark="Construct a hash from the entire lookup table"><div class="sect3" id="idm45820349225776"><h3>Construct a hash from the entire lookup table</h3><p>To validate a large number of values, it’s better to pull the lookup
+        values into memory, save them in a data structure, and check each
+        input value against the contents of that structure. Using an in-memory
+        lookup avoids the overhead of executing a query for each value.</p><p>First, run a query to retrieve all the lookup table values and
+        construct a dictionary from them:</p><pre data-type="programlisting" data-code-language="python">members = {}  # dictionary for lookup values
+cursor.execute("SELECT val FROM <em><code>tbl_name</code></em>");
+rows = cursor.fetchall()
+for row in rows:
+  members[row[0]] = 1</pre><p>Then, perform a dictionary key existence test to check a given value:</p><pre data-type="programlisting" data-code-language="python"><code class="n">valid</code> <code class="o">=</code> <code class="bp">True</code> <code class="k">if</code> <code class="n">val</code> <code class="ow">in</code> <code class="n">members</code> <code class="k">else</code> <code class="bp">False</code></pre><p>This technique reduces database traffic to a single query.
+        However, for a large lookup table, that could still be a lot of
+        traffic, and you might not want to hold the entire table in
+        memory.</p><aside data-type="sidebar" epub:type="sidebar"><div class="sidebar" id="idm45820349178288"><h5>Performing Lookups with Other Languages</h5><p>The lookup example shown in this recipe uses a Python dictionary to determine whether a given
+          value is present in a set of values.</p><p>Similar data structures exist for other languages. In Ruby,
+          use a hash, and check input values using the <code>has_key?</code>
+          method:</p><pre data-type="programlisting" data-code-language="ruby"><code class="n">valid</code> <code class="o">=</code> <code class="n">members</code><code class="o">.</code><code class="n">has_key?</code><code class="p">(</code><code class="n">val</code><code class="p">)</code></pre><p>In PHP, use an associative array, and perform a key lookup with
+          <code>isset()</code>:</p><pre data-type="programlisting" data-code-language="php"><code class="nv">$valid</code> <code class="o">=</code> <code class="nb">isset</code> <code class="p">(</code><code class="nv">$members</code><code class="p">[</code><code class="nv">$val</code><code class="p">]);</code></pre><p>In Perl, use a hash, and check input values using the <code>exists</code>
+          function:</p><pre data-type="programlisting" data-code-language="perl"><code class="nv">$valid</code> <code class="o">=</code> <code class="nb">exists</code> <code class="p">(</code><code class="nv">$members</code><code class="p">{</code><code class="nv">$val</code><code class="p">});</code></pre><p>For lookups in Java, use a <code>HashMap</code>, and
+          test values with the <code>containsKey()</code>
+          method:</p><pre data-type="programlisting" data-code-language="java"><code class="n">valid</code> <code class="o">=</code> <code class="n">members</code><code class="o">.</code><code class="na">containsKey</code> <code class="o">(</code><code class="n">val</code><code class="o">);</code></pre><p>In Go, use a map, and access its keys directly:</p><pre data-type="programlisting" data-code-language="go"><code class="nx">valid</code><code class="w"> </code><code class="o">:=</code><code class="w"> </code><code class="nx">members</code><code class="p">[</code><code class="nx">val</code><code class="p">]</code><code class="w"/></pre><p>The <em class="filename">transfer</em> directory of
+          the <code>recipes</code> distribution contains
+          some sample code for lookup operations in each language.</p></div></aside></div></section><section data-type="sect3" data-pdf-bookmark="Remember already seen values to avoid database lookups"><div class="sect3" id="idm45820349177984"><h3>Remember already seen values to avoid database lookups</h3><p>Another lookup technique mixes individual statements with a dictionary that
+        stores lookup value existence information. This approach can be useful
+        if you have a very large lookup table. Begin with an empty
+        dictionary:</p><pre data-type="programlisting" data-code-language="python"><code class="n">members</code> <code class="o">=</code> <code class="p">{}</code>  <code class="c1"># dictionary for lookup values</code></pre><p>Then, for each value to be tested, check whether it’s present in
+        the dictionary. If not, execute a query to check whether the value is
+        present in the lookup table, and record the result of the query in the
+        dictionary. The validity of the input value is determined by the value
+        associated with the key, not by the existence of the key:</p><pre data-type="programlisting" data-code-language="python"><code class="k">if</code> <code class="n">val</code> <code class="ow">not</code> <code class="ow">in</code> <code class="n">members</code><code class="p">:</code> <code class="c1"># haven't seen this value yet</code>
+  <code class="n">cursor</code><code class="o">.</code><code class="n">execute</code><code class="p">(</code><code class="n">f</code><code class="s2">"SELECT COUNT(*) FROM {tbl_name} WHERE val = </code><code class="si">%(val)s</code><code class="s2">"</code><code class="p">,</code><code class="err">↩</code>
+                 <code class="p">{</code><code class="s1">'val'</code><code class="p">:</code> <code class="n">val</code><code class="p">})</code>
+  <code class="n">count</code> <code class="o">=</code> <code class="n">cursor</code><code class="o">.</code><code class="n">fetchone</code><code class="p">()[</code><code class="mi">0</code><code class="p">]</code>
+  <code class="c1"># store true/false to indicate whether value was found</code>
+  <code class="n">members</code><code class="p">[</code><code class="n">val</code><code class="p">]</code> <code class="o">=</code> <code class="bp">True</code> <code class="k">if</code> <code class="n">count</code> <code class="o">&gt;</code> <code class="mi">0</code> <code class="k">else</code> <code class="bp">False</code>
+<code class="n">valid</code> <code class="o">=</code> <code class="n">members</code><code class="p">[</code><code class="n">val</code><code class="p">]</code></pre><p>For this method, the dictionary acts as a cache, so that you execute a
+        lookup query for any given value only once, no matter how many times
+        it occurs in the input. For datasets that have repeated values, this
+        approach avoids issuing a separate query for every single test, while
+        requiring an entry in the dictionary only for each unique value. It thus
+        stands between the other two approaches in terms of the trade-off
+        between database traffic and program memory requirements for the
+        dictionary.</p><p>Note that the dictionary is used in a different manner for this method
+        than for the previous method. Previously, the existence of the input
+        value as a key in the dictionary determined the validity of the value, and
+        the value associated with the dictionary key was irrelevant. For the
+        dictionary-as-cache method, the meaning of key existence in the dictionary changes
+        from <q>it’s valid</q> to <q>it’s been tested
+        before.</q> For each key, the value associated with it indicates
+        whether the input value is present in the lookup table. (If you store
+        as keys only those values that are found to be in the lookup table,
+        you issue a query for each instance of an invalid value in the input
+        dataset, which is inefficient.)</p></div></section></div></section></div></section><section data-type="sect1" data-pdf-bookmark="14.13 Converting Two-Digit Year Values to Four-Digit Form"><div class="sect1" id="nch-format-format-year"><h1>14.13 Converting Two-Digit Year Values to <span class="keep-together">Four-Digit Form</span></h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820348924592"><h2>Problem</h2><p>You want to convert years in date values from two digits to four
+      digits.</p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820348923680"><h2>Solution</h2><p>Let MySQL do this for you, or perform the operation yourself if
+      MySQL’s conversion rules aren’t appropriate.</p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820348922608"><h2>Discussion</h2><p>Two-digit year values are a problem because the century is not
+      explicit in the data values. If you know the range of years spanned by
+      your input, you can add the century without ambiguity. Otherwise, you
+      can only guess. For example, the date 10/2/69 would be interpreted by
+      most people in the US as as October 2, 1969. But if it represents
+      Mahatma Gandhi’s birth date, the year is actually 1869.</p><p>One way to convert years to four digits is to let MySQL do it. If
+      you try to insert ino <code>YEAR</code> column a date containing a two-digit year, MySQL automatically
+      converts it to four-digit form. MySQL uses a transition point of 1970;
+      it interprets values from 00 to 69 as the years 2000 to 2069, and values
+      from 70 to 99 as the years 1970 to 1999. These rules are appropriate for
+      year values in the range from 1970 to 2069. If your values lie outside
+      this range, add the proper century yourself before storing them into
+      MySQL.</p><pre data-type="programlisting" data-code-language="sql"><code class="n">mysql</code><code class="o">&gt;</code><code> </code><strong><code class="k">SELECT</code><code> </code><code class="k">CAST</code><code class="p">(</code><code class="mi">69</code><code> </code><code class="k">AS</code><code> </code><code class="k">YEAR</code><code class="p">)</code><code> </code><code class="k">AS</code><code> </code><code class="o">`</code><code class="mi">69</code><code class="o">`</code><code class="p">,</code><code> </code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="k">CAST</code><code class="p">(</code><code class="mi">70</code><code> </code><code class="k">AS</code><code> </code><code class="k">YEAR</code><code class="p">)</code><code> </code><code class="k">AS</code><code> </code><code class="o">`</code><code class="mi">70</code><code class="o">`</code><code class="p">,</code><code> </code></strong><code>
+    </code><code class="o">-</code><code class="o">&gt;</code><code> </code><strong><code class="k">CAST</code><code class="p">(</code><code class="mi">22</code><code> </code><code class="k">AS</code><code> </code><code class="k">YEAR</code><code class="p">)</code><code> </code><code class="k">AS</code><code> </code><code class="o">`</code><code class="mi">22</code><code class="o">`</code><code class="p">;</code></strong><code>
+</code><code class="o">+</code><code class="c1">------+------+------+
+</code><code class="o">|</code><code> </code><code class="mi">69</code><code>   </code><code class="o">|</code><code> </code><code class="mi">70</code><code>   </code><code class="o">|</code><code> </code><code class="mi">22</code><code>   </code><code class="o">|</code><code>
+</code><code class="o">+</code><code class="c1">------+------+------+
+</code><code class="o">|</code><code> </code><code class="mi">2069</code><code> </code><code class="o">|</code><code> </code><code class="mi">1970</code><code> </code><code class="o">|</code><code> </code><code class="mi">2022</code><code> </code><code class="o">|</code><code>
+</code><code class="o">+</code><code class="c1">------+------+------+</code></pre><p>To use a different transition point, convert years to four-digit
+      form yourself. Here’s a general-purpose routine that converts two-digit
+      years to four digits and supports an arbitrary transition
+      point:</p><pre data-type="programlisting" data-code-language="python"><code class="k">def</code> <code class="nf">yy_to_yyyy</code><code class="p">(</code><code class="n">year</code><code class="p">,</code> <code class="n">transition_point</code> <code class="o">=</code> <code class="mi">70</code><code class="p">):</code>
+  <code class="k">if</code> <code class="n">year</code> <code class="o">&lt;</code> <code class="mi">100</code><code class="p">:</code>
+    <code class="n">year</code> <code class="o">+=</code> <code class="mi">1900</code> <code class="k">if</code> <code class="n">year</code> <code class="o">&gt;=</code> <code class="n">transition_point</code> <code class="k">else</code> <code class="mi">2000</code>
+  <code class="k">return</code> <code class="n">year</code></pre><p>The function uses MySQL’s transition point (70) by default. An
+      optional second argument may be given to provide a different transition
+      point. <code>yy_to_yyyy()</code> also verifies
+      that the year actually is less than 100 and needs converting before
+      modifying it. That way you can pass year values regardless of whether
+      they include the century. Some sample invocations using the default
+      transition point have the following results:</p><pre data-type="programlisting" data-code-language="python"><code class="n">val</code> <code class="o">=</code> <code class="n">yy_to_yyyy</code> <code class="p">(</code><code class="mi">60</code><code class="p">)</code>         <code class="c1"># returns 2060</code>
+<code class="n">val</code> <code class="o">=</code> <code class="n">yy_to_yyyy</code> <code class="p">(</code><code class="mi">1960</code><code class="p">)</code>       <code class="c1"># returns 1960 (no conversion done)</code></pre><p>Suppose that you want to convert year values as follows, using a
+      transition point of 50:</p><pre data-type="programlisting">00 .. 49 -&gt; 2000 .. 2049
+50 .. 99 -&gt; 1950 .. 1999</pre><p>To do this, pass an explicit transition point argument to <code>yy_to_yyyy()</code>:</p><pre data-type="programlisting" data-code-language="python"><code class="n">val</code> <code class="o">=</code> <code class="n">yy_to_yyyy</code> <code class="p">(</code><code class="mi">60</code><code class="p">,</code> <code class="mi">50</code><code class="p">)</code>     <code class="c1"># returns 1960</code>
+<code class="n">val</code> <code class="o">=</code> <code class="n">yy_to_yyyy</code> <code class="p">(</code><code class="mi">1960</code><code class="p">,</code> <code class="mi">50</code><code class="p">)</code>   <code class="c1"># returns 1960 (no conversion done)</code></pre><p>The <code>yy_to_yyyy()</code> function is
+      included in the <span class="command"><em>cookbook_utils.py</em></span> library file of the <code>recipes</code> distribution.</p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="14.14 Performing Validity Checking on Date or Time Subparts"><div class="sect1" id="nch-format-format-date-part"><h1>14.14 Performing Validity Checking on Date or <span class="keep-together">Time Subparts</span></h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820348672112"><h2>Problem</h2><p>A string passes a pattern test as a date or time, but you want to perform
+      further validity checking.</p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820348667856"><h2>Solution</h2><p>Break the value into parts and perform the appropriate range
+      checking on each part.</p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820348666800"><h2>Discussion</h2><p>Pattern matching may not be sufficient for date or time checking.
+      For example, a value like <code>1947-15-19</code>
+      might match a date pattern, but it’s not a legal date. To perform more
+      rigorous value testing, combine pattern matching with range checking.
+      Break out the year, month, and day values, then check whether each is
+      within the proper range. Years should be less than 9999 (MySQL
+      represents dates to an upper limit of <code>9999-12-31</code>), month values must be in the range
+      from 1 to 12, and days must be in the range from 1 to the number of days
+      in the month. That last part is the trickiest: it’s month-dependent, and
+      also year-dependent for February because it changes for leap
+      years.</p><p>Suppose that you’re checking input dates in ISO format. In <a data-type="xref" href="#nch-format-format-pat-temporal">Recipe 14.9</a>, we used the <code>is_iso_date()</code> function from the <span class="command"><em>cookbook_utils.py</em></span> library file to perform a
+      pattern match on a date string and break it into component values. <code>is_iso_date()</code> returns <code>None</code> if the value doesn’t satisfy a pattern
+      that matches ISO date format. Otherwise, it returns a reference to an
+      array containing the year, month, and day values. The <span class="command"><em>cookbook_utils.py</em></span> file also contains <code>is_mmddyy_date()</code> and <code>is_ddmmyy_date()</code> routines that match dates in
+      US or British format and return <code>None</code>
+      or a reference to a list of date parts. (The parts returned are always
+      in year, month, day order, not the order in which the parts appear in
+      the input date string.)</p><p>To perform additional checking on the result returned by any of
+      those routines (assuming that the result is not <code>None</code>), pass the date parts to <code>is_valid_date()</code>,
+      another library function:</p><pre data-type="programlisting" data-code-language="python"><code class="n">valid</code> <code class="o">=</code> <code class="n">is_valid_date</code><code class="p">(</code><code class="n">ref</code><code class="p">[</code><code class="mi">0</code><code class="p">],</code> <code class="n">ref</code><code class="p">[</code><code class="mi">1</code><code class="p">],</code> <code class="n">ref</code><code class="p">[</code><code class="mi">2</code><code class="p">])</code></pre><p><code>is_valid_date()</code> returns nonzero
+      if the date is valid, 0 otherwise. It checks the parts of a date like
+      this:</p><pre data-type="programlisting" data-code-language="python"><code class="k">def</code> <code class="nf">is_valid_date</code><code class="p">(</code><code class="n">year</code><code class="p">,</code> <code class="n">month</code><code class="p">,</code> <code class="n">day</code><code class="p">):</code>
+  <code class="k">print</code><code class="p">(</code><code class="n">year</code><code class="p">,</code> <code class="n">month</code><code class="p">,</code> <code class="n">day</code><code class="p">)</code>
+  <code class="k">if</code> <code class="n">year</code> <code class="o">&lt;</code> <code class="mi">0</code><code class="p">:</code> <code class="c1"># or (month &lt; 0) or (day &lt; 1):</code>
+    <code class="k">return</code> <code class="mi">0</code>
+  <code class="k">if</code> <code class="n">year</code> <code class="o">&gt;</code> <code class="mi">9999</code> <code class="ow">or</code> <code class="n">month</code> <code class="o">&gt;</code> <code class="mi">12</code> <code class="ow">or</code> <code class="n">day</code> <code class="o">&gt;</code> <code class="n">days_in_month</code><code class="p">(</code><code class="n">year</code><code class="p">,</code> <code class="n">month</code><code class="p">):</code>
+    <code class="k">return</code> <code class="mi">0</code>
+  <code class="k">return</code> <code class="mi">1</code></pre><p><code>is_valid_date()</code> requires
+      separate year, month, and day values, not a date string. This requires
+      that you break candidate values into components before invoking it, but
+      makes it applicable in more contexts. For example, you can use it to
+      check dates like <code>12</code> <code>February</code> <code>2003</code> by mapping the month to its numeric value
+      before calling <code>is_valid_date()</code>. If
+      <code>is_valid_date()</code> took a string
+      argument assumed to be in a specific date format, it would be much less
+      general.</p><p><code>is_valid_date()</code> uses a
+      subsidiary function <code>days_in_month()</code> to determine the number of
+      days in the month represented by the date. <code>days_in_month()</code> requires both the year and the
+      month as arguments because if the month is 2 (February), the number of
+      days depends on whether the year is a leap year. This means you
+      <em>must</em> pass a four-digit year value, two-digit years are ambiguous
+      with respect to the century, which makes proper leap-year testing
+      impossible. The <code>days_in_month()</code> and
+      <code>is_leap_year()</code> functions are based on
+      techniques taken from that recipe:</p><pre data-type="programlisting" data-code-language="python"><code class="k">def</code> <code class="nf">is_leap_year</code><code class="p">(</code><code class="n">year</code><code class="p">):</code>
+  <code class="k">return</code> <code class="p">((</code><code class="n">year</code> <code class="o">%</code> <code class="mi">4</code> <code class="o">==</code> <code class="mi">0</code><code class="p">)</code> <code class="ow">and</code> <code class="p">((</code><code class="n">year</code> <code class="o">%</code> <code class="mi">100</code> <code class="o">!=</code> <code class="mi">0</code><code class="p">)</code> <code class="ow">or</code> <code class="p">(</code><code class="n">year</code> <code class="o">%</code> <code class="mi">400</code> <code class="o">==</code> <code class="mi">0</code><code class="p">)</code> <code class="p">)</code> <code class="p">)</code> 
+
+<code class="k">def</code> <code class="nf">days_in_month</code><code class="p">(</code><code class="n">year</code><code class="p">,</code> <code class="n">month</code><code class="p">):</code>
+  <code class="n">day_tbl</code> <code class="o">=</code> <code class="p">[</code><code class="mi">31</code><code class="p">,</code> <code class="mi">28</code><code class="p">,</code> <code class="mi">31</code><code class="p">,</code> <code class="mi">30</code><code class="p">,</code> <code class="mi">31</code><code class="p">,</code> <code class="mi">30</code><code class="p">,</code> <code class="mi">31</code><code class="p">,</code> <code class="mi">31</code><code class="p">,</code> <code class="mi">30</code><code class="p">,</code> <code class="mi">31</code><code class="p">,</code> <code class="mi">30</code><code class="p">,</code> <code class="mi">31</code><code class="p">]</code>
+  <code class="n">days</code> <code class="o">=</code> <code class="n">day_tbl</code><code class="p">[</code><code class="n">month</code> <code class="o">-</code> <code class="mi">1</code><code class="p">]</code>
+
+  <code class="k">if</code> <code class="n">month</code> <code class="o">==</code> <code class="mi">2</code> <code class="ow">and</code> <code class="n">is_leap_year</code><code class="p">(</code><code class="n">year</code><code class="p">):</code>
+    <code class="n">days</code> <code class="o">+=</code> <code class="mi">1</code>
+  <code class="k">return</code> <code class="n">days</code></pre><p>To perform validity checking on time values, a similar procedure
+      applies: verify that the value matches a time pattern and break it into
+      components, then perform range-testing on the components. For times, the
+      ranges are 0 to 23 for the hour, and 0 to 59 for the minute and second.
+      Here is a function <code>is_24hr_time()</code>
+      that checks for values in 24-hour format and returns the
+      components:</p><pre data-type="programlisting" data-code-language="python"><code class="k">def</code> <code class="nf">is_24hr_time</code><code class="p">(</code><code class="n">val</code><code class="p">):</code>
+  <code class="n">m</code> <code class="o">=</code> <code class="n">re</code><code class="o">.</code><code class="n">match</code><code class="p">(</code><code class="s1">'^(\d{1,2})\D(\d{2})\D(\d{2})$'</code><code class="p">,</code> <code class="n">val</code><code class="p">)</code>
+  <code class="k">if</code> <code class="n">m</code> <code class="ow">is</code> <code class="bp">None</code><code class="p">:</code>
+    <code class="k">return</code> <code class="bp">None</code>
+  <code class="k">return</code><code class="p">[</code><code class="nb">int</code><code class="p">(</code><code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">1</code><code class="p">)),</code> <code class="nb">int</code><code class="p">(</code><code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">2</code><code class="p">)),</code> <code class="nb">int</code><code class="p">(</code><code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">3</code><code class="p">))]</code></pre><p>The following <code>is_ampm_time()</code> function is similar but looks
+      for times in 12-hour format with an optional AM or PM suffix, converting
+      PM times to 24-hour values:</p><pre data-type="programlisting" data-code-language="python"><code class="k">def</code> <code class="nf">is_ampm_time</code><code class="p">(</code><code class="n">val</code><code class="p">):</code>
+  <code class="n">m</code> <code class="o">=</code> <code class="n">re</code><code class="o">.</code><code class="n">match</code><code class="p">(</code><code class="s1">'^(\d{1,2})\D(\d{2})\D(\d{2})(?:\s*(AM|PM))?$'</code><code class="p">,</code> <code class="n">val</code><code class="p">,</code> <code class="n">flags</code> <code class="o">=</code> <code class="n">re</code><code class="o">.</code><code class="n">I</code><code class="p">)</code>
+  <code class="k">if</code> <code class="n">m</code> <code class="ow">is</code> <code class="bp">None</code><code class="p">:</code>
+    <code class="k">return</code> <code class="bp">None</code>
+  <code class="p">(</code><code class="n">hour</code><code class="p">,</code> <code class="nb">min</code><code class="p">,</code> <code class="n">sec</code><code class="p">)</code> <code class="o">=</code> <code class="p">(</code><code class="nb">int</code><code class="p">(</code><code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">1</code><code class="p">)),</code> <code class="p">(</code><code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">2</code><code class="p">)),</code> <code class="p">(</code><code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">3</code><code class="p">)))</code>
+  <code class="c1"># supply missing seconds</code>
+  <code class="n">sec</code> <code class="o">=</code> <code class="s1">'00'</code> <code class="k">if</code> <code class="n">sec</code> <code class="ow">is</code> <code class="bp">None</code> <code class="k">else</code> <code class="n">sec</code> 
+  <code class="k">if</code> <code class="n">hour</code> <code class="o">==</code> <code class="mi">12</code> <code class="ow">and</code> <code class="p">(</code><code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">4</code><code class="p">)</code> <code class="ow">is</code> <code class="bp">None</code> <code class="ow">or</code> <code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">4</code><code class="p">)</code><code class="o">.</code><code class="n">upper</code><code class="p">()</code> <code class="o">==</code> <code class="s2">"AM"</code><code class="p">):</code>
+    <code class="n">hour</code> <code class="o">=</code> <code class="s1">'00'</code> <code class="c1"># 12:xx:xx AM times are 00:xx:xx</code>
+  <code class="k">elif</code> <code class="nb">int</code><code class="p">(</code><code class="n">hour</code><code class="p">)</code> <code class="o">&lt;</code> <code class="mi">12</code> <code class="ow">and</code> <code class="p">(</code><code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">4</code><code class="p">)</code> <code class="ow">is</code> <code class="ow">not</code> <code class="bp">None</code><code class="p">)</code> <code class="ow">and</code> <code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">4</code><code class="p">)</code><code class="o">.</code><code class="n">upper</code><code class="p">()</code> <code class="o">==</code> <code class="s2">"PM"</code><code class="p">:</code>
+    <code class="n">hour</code> <code class="o">=</code> <code class="n">hour</code> <code class="o">+</code> <code class="mi">12</code> <code class="c1"># PM times other than 12:xx:xx</code>
+  <code class="k">return</code> <code class="p">[</code><code class="n">hour</code><code class="p">,</code> <code class="nb">min</code><code class="p">,</code> <code class="n">sec</code><code class="p">]</code> <code class="c1"># return hour, minute, second</code></pre><p>Both functions return <code>None</code> for
+      values that don’t match the pattern. Otherwise, they return a reference
+      to a three-element array containing the hour, minute, and second
+      values.</p><p>After you obtain the time components, pass them to <code>is_valid_time()</code>, another utility routine, to
+      perform range checks.</p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="14.15 Writing Date-Processing Utilities"><div class="sect1" id="nch-format-format-date-utils"><h1>14.15 Writing Date-Processing Utilities</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820348218784"><h2>Problem</h2><p>There is a date-processing operation that you want to perform frequently.</p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820348217904"><h2>Solution</h2><p>Write a utility that performs the date-processing operation for you.</p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820348074016"><h2>Discussion</h2><p>Due to the idiosyncratic nature of dates, you might occasionally
+      find it necessary to write date converters. This section shows some
+      sample converters that serve various purposes:</p><ul><li><p><span class="command"><em>isoize_date.py</em></span> reads a file
+          looking for dates in US format (<em><code>MM-DD-YY</code></em>)
+          and converts them to ISO format.</p></li><li><p><span class="command"><em>cvt_date.py</em></span> converts dates
+          to and from any of ISO, US, or British formats. It is more general
+          than <span class="command"><em>isoize_date.py</em></span>, but requires
+          that you tell it what kind of input to expect and what kind of
+          output to produce.</p></li><li><p><span class="command"><em>monddyyyy_to_iso.py</em></span> looks
+          for dates like <code>Feb.</code> <code>6</code>, <code>1788</code>
+          and converts them to ISO format. It illustrates how to map dates
+          with nonnumeric parts to a format that MySQL understands.</p></li></ul><p>All three scripts are located in the <em class="filename">transfer</em> directory of the <code>recipes</code> distribution. They assume datafiles
+      are in tab-delimited, linefeed-terminated format. To work with files
+      that have a different format, use <span class="command"><em>cvt_file.pl</em></span>, available in the recipes distribution.</p><p>Our first date-processing utility, <span class="command"><em>isoize_date.py</em></span>, looks for dates in US format
+      and rewrites them into ISO format. You’ll recognize that it’s modeled
+      after the general input-processing loop, with some extra stuff thrown in
+      to perform a specific type of conversion:</p><pre data-type="programlisting" data-code-language="python"><code class="ch">#!/usr/bin/python3</code>
+<code class="c1"># isoize_date.py: Read input data, look for values that match</code>
+<code class="c1"># a date pattern, convert them to ISO format. Also converts</code>
+<code class="c1"># 2-digit years to 4-digit years, using a transition point of 70.</code>
+<code class="c1"># By default, this looks for dates in MM-DD-[CC]YY format.</code>
+<code class="c1"># Does not check whether dates actually are valid (for example,</code>
+<code class="c1"># won't complain about 13-49-1928).</code>
+
+<code class="c1"># Assumes tab-delimited, linefeed-terminated input lines.</code>
+
+<code class="kn">import</code> <code class="nn">sys</code>
+<code class="kn">import</code> <code class="nn">re</code>
+<code class="kn">import</code> <code class="nn">fileinput</code>
+
+<code class="c1"># transition point at which 2-digit XX year values are assumed to be</code>
+<code class="c1"># 19XX (below that, they are treated as 20XX)</code>
+<code class="n">transition</code> <code class="o">=</code> <code class="mi">70</code>
+
+<code class="k">for</code> <code class="n">line</code> <code class="ow">in</code> <code class="n">fileinput</code><code class="o">.</code><code class="n">input</code><code class="p">(</code><code class="n">sys</code><code class="o">.</code><code class="n">argv</code><code class="p">[</code><code class="mi">1</code><code class="p">:]):</code>
+  <code class="n">val</code> <code class="o">=</code> <code class="n">line</code><code class="o">.</code><code class="n">split</code><code class="p">(</code><code class="s2">"</code><code class="se">\t</code><code class="s2">"</code><code class="p">,</code> <code class="mi">10000</code><code class="p">);</code>  <code class="c1"># split, preserving all fields</code>
+  <code class="k">for</code> <code class="n">i</code> <code class="ow">in</code> <code class="nb">range</code><code class="p">(</code><code class="mi">0</code><code class="p">,</code> <code class="nb">len</code><code class="p">(</code><code class="n">val</code><code class="p">)):</code>
+    <code class="c1"># look for strings in MM-DD-[CC]YY format</code>
+    <code class="n">m</code> <code class="o">=</code> <code class="n">re</code><code class="o">.</code><code class="n">match</code><code class="p">(</code><code class="s1">'^(\d{1,2})\D(\d{1,2})\D(\d{2,4})$'</code><code class="p">,</code> <code class="n">val</code><code class="p">[</code><code class="n">i</code><code class="p">])</code>
+    <code class="k">if</code> <code class="ow">not</code> <code class="n">m</code><code class="p">:</code>
+      <code class="k">continue</code>
+
+    <code class="p">(</code><code class="n">month</code><code class="p">,</code> <code class="n">day</code><code class="p">,</code> <code class="n">year</code><code class="p">)</code> <code class="o">=</code> <code class="p">(</code><code class="nb">int</code><code class="p">(</code><code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">1</code><code class="p">)),</code> <code class="nb">int</code><code class="p">(</code><code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">2</code><code class="p">)),</code> <code class="nb">int</code><code class="p">(</code><code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">3</code><code class="p">)))</code>
+    <code class="c1"># to interpret dates as DD-MM-[CC]YY instead, replace preceding</code>
+    <code class="c1"># line with the following one:</code>
+    <code class="c1"># (day, month, year) = (int(m.group(1)), int(m.group(2)), int(m.group(3)))</code>
+
+    <code class="c1"># convert 2-digit years to 4 digits, then update value in array</code>
+    <code class="k">if</code> <code class="n">year</code> <code class="o">&lt;</code> <code class="mi">100</code><code class="p">:</code>
+      <code class="n">year</code> <code class="o">+=</code> <code class="mi">1900</code> <code class="k">if</code> <code class="n">year</code> <code class="o">&gt;=</code> <code class="n">transition</code> <code class="k">else</code> <code class="mi">2000</code>
+    <code class="n">val</code><code class="p">[</code><code class="n">i</code><code class="p">]</code> <code class="o">=</code> <code class="s2">"</code><code class="si">%04d</code><code class="s2">-</code><code class="si">%02d</code><code class="s2">-</code><code class="si">%02d</code><code class="s2">"</code> <code class="o">%</code> <code class="p">(</code><code class="n">year</code><code class="p">,</code> <code class="n">month</code><code class="p">,</code> <code class="n">day</code><code class="p">)</code>
+  <code class="k">print</code><code class="p">(</code><code class="s2">"</code><code class="se">\t</code><code class="s2">"</code><code class="o">.</code><code class="n">join</code> <code class="p">(</code><code class="n">val</code><code class="p">))</code></pre><p>If you feed <span class="command"><em>isoize_date.py</em></span> an
+      input file that looks like this:</p><pre data-type="programlisting">Sybil   04-13-70
+Nancy   09-30-69
+Ralph   11-02-73
+Lothair 07-04-63
+Henry   02-14-65
+Aaron   09-17-68
+Joanna  08-20-52
+Stephen 05-01-60</pre><p>It produces the following output:</p><pre data-type="programlisting">Sybil   1970-04-13
+Nancy   2069-09-30
+Ralph   1973-11-02
+Lothair 2063-07-04
+Henry   2065-02-14
+Aaron   2068-09-17
+Joanna  2052-08-20
+Stephen 2060-05-01</pre><p><span class="command"><em>isoize_date.py</em></span> serves a
+      specific purpose: it converts only from US to ISO format. It does not
+      perform validity checking on date subparts or permit the transition
+      point for adding the century to be specified. A more general tool would
+      be more useful. The next script, <span class="command"><em>cvt_date.py</em></span>, extends the capabilities of
+      <span class="command"><em>isoize_date.py</em></span>; it recognizes input
+      dates in ISO, US, or British formats and converts any of them to any
+      other. It also can convert two-digit years to four digits, enable you to
+      specify the conversion transition point, and warn about bad dates. As
+      such, it can be used to preprocess input for loading into MySQL or
+      postprocess data exported from MySQL for use by other programs.</p><p><span class="command"><em>cvt_date.py</em></span> understands the
+      following options:</p><dl><dt><code class="option">--iformat</code><code>=</code><em><code>format</code></em>,
+          <code class="option">--oformat</code><code>=</code><em><code>format</code></em>,
+          <code class="option">--format</code><code>=</code><em><code>format</code></em></dt><dd><p>Set the date format for input, output, or both. The default
+            <em><code>format</code></em> value is <code>iso</code>; <span class="command"><em>cvt_date.py</em></span> also recognizes any string
+            beginning with <code>us</code> or <code>br</code> as indicating US or British date
+            format.</p></dd><dt><code class="option">--add-century</code></dt><dd><p>Convert two-digit years to four digits.</p></dd><dt><code class="option">--columns</code><code>=</code><em><code>column_list</code></em></dt><dd><p>Convert dates only in the named columns. By default, <span class="command"><em>cvt_date.py</em></span> looks for dates in all
+            columns. If this option is given,
+            <em><code>column_list</code></em> should be a list of one or
+            more column positions or ranges separated by commas. (Ranges can
+            be given as <em><code>m-n</code></em> to specify columns
+            <em><code>m</code></em> through
+            <em><code>n</code></em>.) Positions begin at 1.</p></dd><dt><code class="option">--transition</code><code>=</code><em><code>n</code></em></dt><dd><p>Specify the transition point for two-digit to four-digit year conversions.
+            The default transition point is 70. This option turns on
+            <code class="option">--add-century</code>.</p></dd><dt><code class="option">--warn</code></dt><dd><p>Warn about bad dates. (This option can produce spurious
+            warnings if the dates have two-digit years and you don’t specify
+            <code class="option">--add-century</code>, because leap-year testing won’t
+            always be accurate in that case.)</p></dd></dl><p>We won’t show the code for <span class="command"><em>cvt_date.py</em></span> here (most of it is taken up with
+      processing command-line options), but you can examine the source for
+      yourself if you like. As an example of how <span class="command"><em>cvt_date.py</em></span> works, suppose that you have a
+      file <em class="filename">newdata.txt</em> with the following
+      contents:</p><pre data-type="programlisting">name1   01/01/99    38
+name2   12/31/00    40
+name3   02/28/13    42
+name4   01/02/18    44</pre><p>Running the file through <span class="command"><em>cvt_date.py</em></span> with options indicating that the
+      dates are in US format and that the century should be added produces
+      this result:</p><pre data-type="programlisting">$ <strong><code>cvt_date.pl --iformat=us --add-century newdata.txt</code></strong>
+name1   1999-01-01  38
+name2   2000-12-31  40
+name3   2013-02-28  42
+name4   2018-01-02  44</pre><p>To produce dates in British format instead with no year
+      conversion, do this:</p><pre data-type="programlisting">$ <strong><code>cvt_date.pl --iformat=us --oformat=br newdata.txt</code></strong>
+name1   01-01-99    38
+name2   31-12-00    40
+name3   28-02-13    42
+name4   02-01-18    44</pre><p><span class="command"><em>cvt_date.py</em></span> has no knowledge of
+      the meaning of each data column, of course. If you have a nondate column
+      with values that match the pattern, it rewrites that column, too. To
+      deal with that, specify a <code class="option">--columns</code> option to limit the
+      columns that <span class="command"><em>cvt_date.py</em></span>
+      converts.</p><p><span class="command"><em>isoize_date.py</em></span> and <span class="command"><em>cvt_date.py</em></span> both operate on dates written in
+      all-numeric formats. But dates in datafiles often are written
+      differently, and it may be necessary to write a special-purpose script
+      to process them. Suppose an input file contains dates in the following
+      format (these represent the dates on which US states were admitted to
+      the Union):</p><pre data-type="programlisting">Delaware        Dec. 7, 1787
+Pennsylvania    Dec 12, 1787
+New Jersey      Dec. 18, 1787
+Georgia         Jan. 2, 1788
+Connecticut     Jan. 9, 1788
+Massachusetts   Feb. 6, 1788
+…</pre><p>The dates consist of a three-character month abbreviation
+      (possibly followed by a period), a numeric day of the month, a comma,
+      and a numeric year. To import this file into MySQL, you must convert the
+      dates to ISO format, resulting in a file that looks like this:</p><pre data-type="programlisting">Delaware        1787-12-07
+Pennsylvania    1787-12-12
+New Jersey      1787-12-18
+Georgia         1788-01-02
+Connecticut     1788-01-09
+Massachusetts   1788-02-06
+…</pre><p>That’s a somewhat specialized kind of transformation, although
+      this general type of problem (converting a particular date format to ISO
+      format) is hardly uncommon. To perform the conversion, identify the
+      dates as those values matching an appropriate pattern, map month names
+      to the corresponding numeric values, and reformat the result. The
+      following script, <span class="command"><em>monddyyyy_to_iso.py</em></span>, illustrates how:</p><pre data-type="programlisting" data-code-language="python"><code class="ch">#!/usr/bin/python3</code>
+<code class="c1"># monddyyyy_to_iso.py: Convert dates from mon[.] dd, yyyy to ISO format.</code>
+
+<code class="c1"># Assumes tab-delimited, linefeed-terminated input</code>
+
+<code class="kn">import</code> <code class="nn">re</code>
+<code class="kn">import</code> <code class="nn">sys</code>
+<code class="kn">import</code> <code class="nn">fileinput</code>
+<code class="kn">import</code> <code class="nn">warnings</code>
+
+<code class="nb">map</code> <code class="o">=</code> <code class="p">{</code><code class="s2">"jan"</code><code class="p">:</code> <code class="mi">1</code><code class="p">,</code> <code class="s2">"feb"</code><code class="p">:</code> <code class="mi">2</code><code class="p">,</code> <code class="s2">"mar"</code><code class="p">:</code> <code class="mi">3</code><code class="p">,</code> <code class="s2">"apr"</code><code class="p">:</code> <code class="mi">4</code><code class="p">,</code> <code class="s2">"may"</code><code class="p">:</code> <code class="mi">5</code><code class="p">,</code> <code class="s2">"jun"</code><code class="p">:</code> <code class="mi">6</code><code class="p">,</code>
+       <code class="s2">"jul"</code><code class="p">:</code> <code class="mi">7</code><code class="p">,</code> <code class="s2">"aug"</code><code class="p">:</code> <code class="mi">8</code><code class="p">,</code> <code class="s2">"sep"</code><code class="p">:</code> <code class="mi">9</code><code class="p">,</code> <code class="s2">"oct"</code><code class="p">:</code> <code class="mi">10</code><code class="p">,</code> <code class="s2">"nov"</code><code class="p">:</code> <code class="mi">11</code><code class="p">,</code> <code class="s2">"dec"</code><code class="p">:</code> <code class="mi">12</code>
+      <code class="p">}</code> <code class="c1"># map 3-char month abbreviations to numeric month</code>
+
+<code class="k">for</code> <code class="n">line</code> <code class="ow">in</code> <code class="n">fileinput</code><code class="o">.</code><code class="n">input</code><code class="p">(</code><code class="n">sys</code><code class="o">.</code><code class="n">argv</code><code class="p">[</code><code class="mi">1</code><code class="p">:]):</code>
+  <code class="n">values</code> <code class="o">=</code> <code class="n">line</code><code class="o">.</code><code class="n">rstrip</code><code class="p">()</code><code class="o">.</code><code class="n">split</code><code class="p">(</code><code class="s2">"</code><code class="se">\t</code><code class="s2">"</code><code class="p">,</code> <code class="mi">10000</code><code class="p">)</code>    <code class="c1"># split, preserving all fields</code>
+  <code class="k">for</code> <code class="n">i</code> <code class="ow">in</code> <code class="nb">range</code><code class="p">(</code><code class="mi">0</code><code class="p">,</code> <code class="nb">len</code><code class="p">(</code><code class="n">values</code><code class="p">)):</code>
+    <code class="c1"># reformat the value if it matches the pattern, otherwise assume</code>
+    <code class="c1"># that it's not a date in the required format and leave it alone</code>
+    <code class="n">m</code> <code class="o">=</code> <code class="n">re</code><code class="o">.</code><code class="n">match</code><code class="p">(</code><code class="s1">'^([^.]+)\.? (\d+), (\d+)$'</code><code class="p">,</code> <code class="n">values</code><code class="p">[</code><code class="n">i</code><code class="p">])</code>
+    <code class="k">if</code> <code class="n">m</code><code class="p">:</code>
+      <code class="c1"># use lowercase month name</code>
+      <code class="p">(</code><code class="n">month</code><code class="p">,</code> <code class="n">day</code><code class="p">,</code> <code class="n">year</code><code class="p">)</code> <code class="o">=</code> <code class="p">(</code><code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">1</code><code class="p">)</code><code class="o">.</code><code class="n">lower</code><code class="p">(),</code> <code class="nb">int</code><code class="p">(</code><code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">2</code><code class="p">)),</code> <code class="nb">int</code><code class="p">(</code><code class="n">m</code><code class="o">.</code><code class="n">group</code><code class="p">(</code><code class="mi">3</code><code class="p">)))</code>
+<code class="c1">#@ _CHECK_VALIDITY_</code>
+      <code class="k">if</code> <code class="n">month</code> <code class="ow">in</code> <code class="nb">map</code><code class="p">:</code>
+<code class="c1">#@ _CHECK_VALIDITY_</code>
+        <code class="n">values</code><code class="p">[</code><code class="n">i</code><code class="p">]</code> <code class="o">=</code> <code class="s2">"</code><code class="si">%04d</code><code class="s2">-</code><code class="si">%02d</code><code class="s2">-</code><code class="si">%02d</code><code class="s2">"</code> <code class="o">%</code> <code class="p">(</code><code class="n">year</code><code class="p">,</code> <code class="nb">map</code><code class="p">[</code><code class="n">month</code><code class="p">],</code> <code class="n">day</code><code class="p">)</code>
+      <code class="k">else</code><code class="p">:</code>
+        <code class="c1"># warn, but don't reformat</code>
+        <code class="n">warnings</code><code class="o">.</code><code class="n">warn</code><code class="p">(</code><code class="s2">"</code><code class="si">%s</code><code class="s2"> bad date?"</code> <code class="o">%</code> <code class="p">(</code><code class="n">values</code><code class="p">[</code><code class="n">i</code><code class="p">]))</code>
+  <code class="k">print</code><code class="p">(</code><code class="s2">"</code><code class="se">\t</code><code class="s2">"</code><code class="o">.</code><code class="n">join</code><code class="p">(</code><code class="n">values</code><code class="p">))</code></pre><p>The script only does reformatting, it doesn’t validate the dates.
+      To do that, modify the script to use the <span class="command"><em>cookbook_utils.py</em></span> module by adding this
+      statement in the beginning of the script:</p><pre data-type="programlisting" data-code-language="python"><code class="kn">from</code> <code class="nn">cookbook_utils</code> <code class="kn">import</code> <code class="o">*</code></pre><p>That gives the script access to the module’s <code>is_valid_date()</code> routine. To use it, change
+      this line:</p><pre data-type="programlisting" data-code-language="python"><code class="k">if</code> <code class="n">month</code> <code class="ow">in</code> <code class="nb">map</code><code class="p">:</code></pre><p>To this:</p><pre data-type="programlisting" data-code-language="python"><code class="k">if</code> <code class="n">month</code> <code class="ow">in</code> <code class="nb">map</code> <code class="ow">and</code> <code class="n">is_valid_date</code><code class="p">(</code><code class="n">year</code><code class="p">,</code> <code class="nb">map</code><code class="p">[</code><code class="n">month</code><code class="p">],</code> <code class="n">day</code><code class="p">)):</code></pre></div></section></div></section><section data-type="sect1" data-pdf-bookmark="14.16 Importing Non-ISO Date Values"><div class="sect1" id="nch-format-format-date-import"><h1>14.16 Importing Non-ISO Date Values</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820347490592"><h2>Problem</h2><p>You want to import date values, but they are not in the ISO (<em><code>YYYY-MM-DD</code></em>) format that
+      MySQL expects.</p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820347437040"><h2>Solution</h2><p>Use an external utility to convert the dates to ISO format before
+      importing the data into MySQL (<span class="command"><em>cvt_date.py</em></span> is useful here). Or use <code>LOAD</code> <code>DATA</code>’s
+      capability for preprocessing input data prior to loading it into the
+      database.</p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820347434256"><h2>Discussion</h2><p>Suppose that a table contains three columns, <code>name</code>, <code>date</code>,
+      and <code>value</code>, where <code>date</code> is a <code>DATE</code> column requiring values in ISO format
+      (<em><code>YYYY-MM-DD</code></em>). Suppose also that you’re given
+      a datafile <em class="filename">newdata.txt</em> to be
+      imported into the table, but its contents look like this:</p><pre data-type="programlisting">name1   01/01/99    38
+name2   12/31/00    40
+name3   02/28/13    42
+name4   01/02/18    44</pre><p>The dates are in <em><code>MM/DD/YY</code></em> format and
+      must be converted to ISO format to be stored as <code>DATE</code> values in MySQL. One way to do this is to
+      run the file through the <span class="command"><em>cvt_date.py</em></span>
+      script from <a data-type="xref" href="#nch-format-format-date-utils">Recipe 14.15</a>:</p><pre data-type="programlisting">$ <strong><code>cvt_date.py --iformat=us --add-century newdata.txt &gt; tmp.txt</code></strong></pre><p>Then load the <em class="filename">tmp.txt</em> file
+      into the table. This task also can be accomplished entirely in MySQL
+      with no external utilities by using SQL to perform the reformatting
+      operation. As discussed in <a data-type="xref" href="ch13.xhtml#nch-xfer-xfer-load-data">Recipe 13.1</a>,
+      <code>LOAD</code> <code>DATA</code> can preprocess input values before
+      inserting them. Applying that capability to the present problem, the
+      date-rewriting <code>LOAD</code> <code>DATA</code> statement looks like this, using the <code>STR_TO_DATE()</code>
+      function (see <a data-type="xref" href="ch08.xhtml#nch-dates-dates-format">Recipe 8.3</a>) to interpret
+      the input dates:</p><pre data-type="programlisting">mysql&gt; <strong><code>LOAD DATA LOCAL INFILE 'newdata.txt'</code></strong>
+    -&gt; <strong><code>INTO TABLE t (name,@date,value)</code></strong>
+    -&gt; <strong><code>SET date = STR_TO_DATE(@date,'%m/%d/%y');</code></strong></pre><p>With the <code>%y</code> format specifier in
+      <code>STR_TO_DATE()</code>, MySQL converts the
+      two-digit years to four-digit years automatically, so the original
+      <em><code>MM/DD/YY</code></em> values end up as ISO values in
+      <em><code>YYYY-MM-DD</code></em> format. The resulting data after
+      import looks like this:</p><pre data-type="programlisting">+-------+------------+-------+
+| name  | date       | value |
++-------+------------+-------+
+| name1 | 1999-01-01 |    38 |
+| name2 | 2000-12-31 |    40 |
+| name3 | 2013-02-28 |    42 |
+| name4 | 2018-01-02 |    44 |
++-------+------------+-------+</pre><p>This procedure assumes that MySQL’s automatic conversion of
+      two-digit years to four digits produces the correct century values. This
+      means that the year part of the values must correspond to years in the
+      range from 1970 to 2069. If that’s not true, you must convert the year
+      values some other way. (For some ideas on how to do this, see <a data-type="xref" href="#nch-format-format-date-part">Recipe 14.14</a>.)</p><p>If the dates are not in a format that <code>STR_TO_DATE()</code> can interpret, perhaps you can
+      write a stored function to handle them and return ISO date values. In
+      that case, the <code>LOAD</code> <code>DATA</code> statement looks like this, where <code>my_date_interp()</code> is your stored function
+      name:</p><pre data-type="programlisting">mysql&gt; <strong><code>LOAD DATA LOCAL INFILE 'newdata.txt'</code></strong>
+    -&gt; <strong><code>INTO TABLE t (name,@date,value)</code></strong>
+    -&gt; <strong><code>SET date = my_date_interp(@date);</code></strong></pre></div></section></div></section><section data-type="sect1" data-pdf-bookmark="14.17 Exporting Dates Using Non-ISO Formats"><div class="sect1" id="nch-format-format-date-export"><h1>14.17 Exporting Dates Using Non-ISO Formats</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820347389248"><h2>Problem</h2><p>You want to export date values using a format other than MySQL’s
+      default ISO (<em><code>YYYY-MM-DD</code></em>) format. This might
+      be a requirement when exporting dates from MySQL to applications that
+      don’t use ISO format.</p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820347387664"><h2>Solution</h2><p>Use an external utility to rewrite the dates to non-ISO format
+      after exporting the data from MySQL (<span class="command"><em>cvt_date.py</em></span> is useful here). Or use the <code>DATE_FORMAT()</code>
+      function to rewrite the values during the export operation.</p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820347385344"><h2>Discussion</h2><p>Suppose that you want to export data from MySQL into an
+      application that doesn’t understand ISO-format dates. One way to do this
+      is to export the data into a file, leaving the dates in ISO format. Then
+      run the file through a utility such as <span class="command"><em>cvt_date.py</em></span> that rewrites the dates into the
+      required format (see <a data-type="xref" href="#nch-format-format-date-utils">Recipe 14.15</a>).</p><p>Another approach is to export the dates directly in the required
+      format by rewriting them with <code>DATE_FORMAT()</code>. Suppose that you have the
+      following table:</p><pre data-type="programlisting" data-code-language="sql"><code class="k">CREATE</code> <code class="k">TABLE</code> <code class="n">datetbl</code>
+<code class="p">(</code>
+  <code class="n">i</code>   <code class="nb">INT</code><code class="p">,</code>
+  <code class="k">c</code>   <code class="nb">CHAR</code><code class="p">(</code><code class="mi">10</code><code class="p">),</code>
+  <code class="n">d</code>   <code class="nb">DATE</code><code class="p">,</code>
+  <code class="n">dt</code>  <code class="n">DATETIME</code><code class="p">,</code>
+  <code class="n">ts</code>  <code class="k">TIMESTAMP</code><code class="p">,</code>
+  <code class="k">PRIMARY</code> <code class="k">KEY</code><code class="p">(</code><code class="n">i</code><code class="p">)</code>
+<code class="p">);</code></pre><p>Suppose also that you need to export data from this table, but
+      with the dates in any <code>DATE</code>, <code>DATETIME</code>, or <code>TIMESTAMP</code> columns rewritten in US format
+      (<em><code>MM-DD-YYYY</code></em>). A <code>SELECT</code> statement that uses the <code>DATE_FORMAT()</code> function to rewrite the dates as
+      required looks like this:</p><pre data-type="programlisting" data-code-language="sql"><code class="k">SELECT</code>
+  <code class="n">i</code><code class="p">,</code>
+  <code class="k">c</code><code class="p">,</code>
+  <code class="n">DATE_FORMAT</code><code class="p">(</code><code class="n">d</code><code class="p">,</code> <code class="s1">'%m-%d-%Y'</code><code class="p">)</code> <code class="k">AS</code> <code class="n">d</code><code class="p">,</code>
+  <code class="n">DATE_FORMAT</code><code class="p">(</code><code class="n">dt</code><code class="p">,</code> <code class="s1">'%m-%d-%Y %T'</code><code class="p">)</code> <code class="k">AS</code> <code class="n">dt</code><code class="p">,</code>
+  <code class="n">DATE_FORMAT</code><code class="p">(</code><code class="n">ts</code><code class="p">,</code> <code class="s1">'%m-%d-%Y %T'</code><code class="p">)</code> <code class="k">AS</code> <code class="n">ts</code>
+<code class="k">FROM</code> <code class="n">datetbl</code><code class="p">;</code></pre><p>If <code>datetbl</code> contains the
+      following rows:</p><pre data-type="programlisting">3       abc     2005-12-31      2005-12-31 12:05:03     2005-12-31 12:05:03
+4       xyz     2006-01-31      2006-01-31 12:05:03     2006-01-31 12:05:03</pre><p>The statement generates output that looks like this:</p><pre data-type="programlisting">3       abc     12-31-2005      12-31-2005 12:05:03     12-31-2005 12:05:03
+4       xyz     01-31-2006      01-31-2006 12:05:03     01-31-2006 12:05:03</pre></div></section></div></section><section data-type="sect1" data-pdf-bookmark="14.18 Pre-processing and Importing a File"><div class="sect1" id="nch-format-format-epilog"><h1>14.18 Pre-processing and Importing a File</h1><section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm45820347350672"><h2>Problem</h2><p>Recall the scenario presented at the beginning of <a data-type="xref" href="ch13.xhtml#nch-xfer">Chapter 13</a>:</p><p>Suppose that a file named <em class="filename">somedata.csv</em> contains 12 data columns in
+    comma-separated values (CSV) format. From this file you want to extract
+    only columns 2, 11, 5, and 9, and use them to create database rows in a
+    MySQL table that contains <q>name</q>,
+    <q>birth</q>, <q>height</q>, and <q>weight</q> columns. You must make sure that the
+    height and weight are positive integers, and convert the birth dates from
+    <em><code>MM/DD/YY</code></em> format to
+    <em><code>YYYY-MM-DD</code></em> format.</p></div></section><section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm45820347253616"><h2>Solution</h2><p>
+        Combine techniques that we discussed in <a data-type="xref" href="ch13.xhtml#nch-xfer">Chapter 13</a> and this chapter.
+      </p></div></section><section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm45820347248160"><h2>Discussion</h2><p>Much of the work can be done using the utility programs developed
+    in this chapter. Convert the file to tab-delimited format with <span class="command"><em>cvt_file.pl</em></span>, extract the columns in the desired
+    order with <span class="command"><em>yank_col.pl</em></span>, and rewrite the date column to ISO
+    format with <span class="command"><em>cvt_date.py</em></span> (see <a data-type="xref" href="#nch-format-format-date-utils">Recipe 14.15</a>):</p><pre data-type="programlisting">$ <strong><code>cvt_file.pl --iformat=csv somedata.csv \</code></strong>
+    <strong><code>| yank_col.pl --columns=2,11,5,9 \</code></strong>
+    <strong><code>| cvt_date.py --columns=2 --iformat=us --add-century &gt; tmp</code></strong></pre><p>The resulting file, <em class="filename">tmp</em>, has
+    four columns representing the <code>name</code>,
+    <code>birth</code>, <code>height</code>, and <code>weight</code> values, in that order. It needs only to
+    have its height and weight columns checked to make sure they contain
+    positive integers. Using the <code>is_positive_integer()</code>
+    library function from the <span class="command"><em>cookbook_utils.py</em></span> module file, that task can be
+    achieved using a short special-purpose script that is little more than an
+    input loop:</p><pre data-type="programlisting" data-code-language="python"><code class="ch">#!/usr/bin/python3</code>
+<code class="c1"># validate_htwt.py: Height/weight validation example.</code>
+
+<code class="c1"># Assumes tab-delimited, linefeed-terminated input lines.</code>
+
+<code class="c1"># Input columns and the actions to perform on them are as follows:</code>
+<code class="c1"># 1: name; echo as given</code>
+<code class="c1"># 2: birth; echo as given</code>
+<code class="c1"># 3: height; validate as positive integer</code>
+<code class="c1"># 4: weight; validate as positive integer</code>
+
+<code class="kn">import</code> <code class="nn">sys</code>
+<code class="kn">import</code> <code class="nn">fileinput</code>
+<code class="kn">import</code> <code class="nn">warnings</code>
+<code class="kn">from</code> <code class="nn">cookbook_utils</code> <code class="kn">import</code> <code class="o">*</code>
+
+<code class="n">line_num</code> <code class="o">=</code> <code class="mi">0</code>
+<code class="k">for</code> <code class="n">line</code> <code class="ow">in</code> <code class="n">fileinput</code><code class="o">.</code><code class="n">input</code><code class="p">(</code><code class="n">sys</code><code class="o">.</code><code class="n">argv</code><code class="p">[</code><code class="mi">1</code><code class="p">:]):</code>
+  <code class="n">line_num</code> <code class="o">+=</code> <code class="mi">1</code>
+  <code class="p">(</code><code class="n">name</code><code class="p">,</code> <code class="n">birth</code><code class="p">,</code> <code class="n">height</code><code class="p">,</code> <code class="n">weight</code><code class="p">)</code> <code class="o">=</code> <code class="n">line</code><code class="o">.</code><code class="n">rstrip</code><code class="p">()</code><code class="o">.</code><code class="n">split</code> <code class="p">(</code><code class="s2">"</code><code class="se">\t</code><code class="s2">"</code><code class="p">,</code> <code class="mi">4</code><code class="p">)</code>
+  <code class="k">if</code> <code class="ow">not</code> <code class="n">is_positive_integer</code><code class="p">(</code><code class="n">height</code><code class="p">):</code>
+    <code class="n">warnings</code><code class="o">.</code><code class="n">warn</code><code class="p">(</code><code class="n">f</code><code class="s2">"line {line_num}:height {height} is not a positive integer"</code><code class="p">)</code>
+  <code class="k">if</code> <code class="ow">not</code> <code class="n">is_positive_integer</code><code class="p">(</code><code class="n">weight</code><code class="p">):</code>
+    <code class="n">warnings</code><code class="o">.</code><code class="n">warn</code><code class="p">(</code><code class="n">f</code><code class="s2">"line {line_num}:weight {weight} is not a positive integer"</code><code class="p">)</code></pre><p>The <span class="command"><em>validate_htwt.py</em></span> script
+    produces no output (except for warning messages) because it need not
+    reformat any of the input values. If <em class="filename">tmp</em> passes validation with no errors, it can be
+    loaded into MySQL with a simple <code>LOAD</code>
+    <code>DATA</code> statement:</p><pre data-type="programlisting">mysql&gt; <strong><code>LOAD DATA LOCAL INFILE 'tmp' INTO TABLE </code></strong><em><code>tbl_name</code></em><strong><code>;</code></strong></pre></div></section></div></section></div></section></div></body></html>
