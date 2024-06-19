@@ -1,0 +1,610 @@
+- en: Chapter 7\. Worldwide Application Distribution and Staging
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: To this point in the book, we have seen a number of different practices for
+    building, developing, and deploying applications, but a whole different set of
+    concerns arises when deploying and managing an application with a global footprint.
+  prefs: []
+  type: TYPE_NORMAL
+- en: There are many different reasons why an application might need to scale to a
+    global deployment. The first and most obvious one is simply scale. It might be
+    that your application is so successful or mission critical that it simply needs
+    to be deployed around the world to provide the capacity necessary for its users.
+    Examples of such applications include a worldwide API gateway for a public cloud
+    provider, a large-scale IoT product with a worldwide footprint, a highly successful
+    social network, and more.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Although relatively few of us will build out systems that require worldwide
+    scale, many more applications require a worldwide footprint for latency. Even
+    with containers and Kubernetes there is no getting around the speed of light.
+    To minimize latency between clients and our applications, it is sometimes necessary
+    to distribute our applications around the world to minimize the physical distance
+    between the application and its users.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Finally, an even more common reason for global distribution is locality. Either
+    for reasons of bandwidth (e.g., a remote sensing platform) or data privacy (e.g.,
+    geographic restrictions), it is sometimes necessary to deploy an application in
+    specific locations for the application to be possible or successful. As more and
+    more countries and regions implement data privacy and sovereignty laws and regulations,
+    it is becoming a common business necessity to deploy your application in specific
+    locations to serve users who reside in that location.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In all these cases, your application is no longer simply present in a small
+    handful of production clusters. Instead it is distributed across tens to hundreds
+    of different geographic locations. The management of these locations, as well
+    as the demands of rolling out a globally reliable service, is a significant challenge.
+    This chapter covers approaches and practices for doing this successfully.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Distributing Your Image
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Before you can even consider running your application around the world, you
+    need to have that image available to clusters located around the globe. The first
+    thing to consider is whether your image registry has automatic geo-replication.
+    Many image registries supplied by cloud providers will automatically distribute
+    your image around the world and resolve a request for that image to the storage
+    location nearest to the cluster from which you are pulling the image. Many clouds
+    enable you to decide where you want to replicate the image; for example, you might
+    know of locations where you are not going to be present. An example of such a
+    registry is the [Microsoft Azure container registry](https://oreil.ly/4jWNh),
+    but others provide similar services. If you use a cloud-provided registry that
+    supports geo-replication, distributing your image around the world is simple.
+    You push the image into the registry, select the regions for geo-distribution,
+    and the registry takes care of the rest.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you are not using a cloud registry, or your provider does not support automatic
+    geo-distribution of images, you will need to solve that problem yourself. One
+    option is to use a registry situated in a specific location. There are several
+    concerns about such an approach. Image pull latency often dictates the speed with
+    which you can launch a container in a cluster. This in turn can determine how
+    quickly you can respond to a machine failure, given that generally in the case
+    of a machine failure, you will need to pull the container image down to a new
+    machine.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Another concern about a single registry is that it can be a single point of
+    failure. If the registry is located in a single region or a single datacenter,
+    it’s possible that the registry could go offline due to a large-scale incident
+    in that datacenter. If your registry goes offline, your CI/CD pipeline will stop
+    working, and you’ll be unable to deploy new code. This obviously has a significant
+    impact on both developer productivity and application operations. Additionally,
+    a single registry can be much more expensive because you will be using significant
+    bandwidth each time you launch a new container, and even though container images
+    are generally fairly small, the bandwidth can add up. Despite these negatives,
+    a single registry solution can be the appropriate answer for small-scale applications
+    running in only a few global regions. It certainly is simpler to set up than full-scale
+    image replication.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you cannot use cloud-provided geo-replication and you need to replicate your
+    image, you are on your own to craft a solution for image replication. To implement
+    such a service, you have two options. The first is to use geographic names for
+    each image registry (e.g., `us.my-registry.io`, `eu.my-registry.io`, etc.). The
+    advantage of this approach is that it is simple to set up and manage. Each registry
+    is entirely independent, and you can simply push to all registries at the end
+    of your CI/CD pipeline. The downside is that each cluster will require a slightly
+    different configuration to pull the image from the nearest geographic location.
+    However, given that you likely will have geographic differences in your application
+    configurations anyway, this downside is relatively easy to manage and likely already
+    present in your environment.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The second option is to use a networking configuration to connect your image
+    pulls to a specific repository. In this approach you still push your image to
+    multiple registries, but instead of giving them each a unique name, you give them
+    all a single DNS endpoint (e.g., `my-registry.io`). You can use geography-aware
+    DNS (GeoDNS), which will respond to DNS requests from different geographic regions
+    with different IP addresses, or if you have the right networking infrastructure,
+    you can use multicast IP addresses. In multicast, all your registries share the
+    same IP address, but it is advertised to the internet in multiple physical locations,
+    and shortest-path network routing is relied on to take traffic to the server that
+    provides the nearest image registry. Both of these network configurations are
+    tricky to implement correctly. The best answer is definitely to use a cloud-based
+    registry, even if you are pulling to on-premises servers. If you really want to
+    run your own registry (and take on the operational burden that implies), we strongly
+    suggest you use the regional server approach discussed in the previous paragraph
+    unless you have prior network experience with replicated services. The next section
+    describes how you can parameterize your deployment to, for example, use different
+    registries in different regions.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Parameterizing Your Deployment
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: When you have replicated your image everywhere, you need to parameterize your
+    deployments for different global locations. Whenever you are deploying to a variety
+    of different regions, there are bound to be differences in the configuration of
+    your application in those regions. For example, if you don’t have a geo-replicated
+    registry, you might need to tweak the image name for different regions. However,
+    even if you have a geo-replicated image, it’s likely that different geographic
+    locations will present different load on your application, and thus the size (e.g.,
+    the number of replicas) as well as other configuration can be different between
+    regions. Managing this complexity in a manner that doesn’t incur undue toil is
+    key to successfully managing a worldwide application.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The first thing to consider is how to organize your different configurations
+    on disk. A common way to achieve this is by using a different directory for each
+    global region. Given these directories, it might be tempting to simply copy the
+    same configurations into each directory, but doing this is guaranteed to lead
+    to drift and changes between configurations in which some regions are modified
+    and other regions are forgotten. Instead, use a template-based approach so that
+    most of the configuration is retained in a single template that is shared by all
+    regions, and then parameters are applied to that template to produce the region-specific
+    templates. [Helm](https://helm.sh) is a commonly used tool for this sort of templating
+    (for details, see [Chapter 1](ch01.html#setting_up_a_basic_service)).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Load-Balancing Traffic Around the World
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Now that your application is running around the world, the next step is to determine
+    how to direct traffic to the application. In general, you want to take advantage
+    of geographic proximity to ensure low-latency access to your service. But you
+    also want to failover across geographic regions in case of an outage or any other
+    source of service failure. Correctly setting up the balancing of traffic to your
+    various regional deployments is key to establishing both a performant and reliable
+    system.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Let’s begin with the assumption that you have a single hostname that you want
+    to use for your service, for example, *myapp.myco.com*. One initial decision that
+    you need to make is whether you want to use the Domain Name System (DNS) protocol
+    to implement load balancing across your regional endpoints. If you use DNS for
+    load balancing, the IP address that is returned when a user makes a DNS query
+    to *myapp.myco.com* is based on both the location of the user accessing your service
+    as well as the current availability of your service. The other alternative is
+    multicast IP addresses, where the same IP address is advertised from multiple
+    locations on the internet. When a user looks up *myapp.myco.com*, the DNS always
+    returns this fixed IP address, but the actual routing of packets varies depending
+    on where the connection is in the network.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Reliably Rolling Out Software Around the World
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: After you have templatized your application so that you have proper configurations
+    for each region, the next important problem is how to deploy these configurations
+    around the world. It might be tempting to simultaneously deploy your application
+    worldwide so that you can efficiently and quickly iterate your application, but
+    this, although Agile, is an approach that can easily leave you with a global outage.
+    Any errors that you accidentally roll out to the world are immediately present
+    for all users in all regions. Instead, for most production applications, a more
+    carefully staged approach to rolling out your software around the world is more
+    appropriate. When combined with things like global load balancing, these approaches
+    can maintain high availability even in the face of major application failures.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Overall, when approaching the problem of a global rollout, the goal is to roll
+    out software as quickly as possible, while simultaneously detecting issues quickly—ideally
+    before they affect many users.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Let’s assume that by the time you are performing a global rollout, your application
+    has already passed basic functional and load testing. Before a particular image
+    (or images) is certified for a global rollout, it should have gone through enough
+    testing that you believe the application is operating correctly. It is important
+    to note that this *does not* mean that your application *is* operating correctly.
+    Though testing catches many problems, in the real world, application problems
+    are often first noticed when they are rolled out to production traffic. This is
+    because the true nature of production traffic is often difficult to simulate with
+    perfect fidelity. For example, you might test with only English-language inputs,
+    whereas in the real world, you see input from a variety of languages. Or your
+    set of test inputs may not be comprehensive for the real-world data your application
+    ingests. Of course, any time that you do see a failure in production that wasn’t
+    caught by testing, it is a strong indicator that you need to extend and expand
+    your testing. Nonetheless, it is still true that many problems are caught during
+    a production rollout.
+  prefs: []
+  type: TYPE_NORMAL
+- en: With this in mind, each region that you roll out to is an opportunity to discover
+    a new problem. And because the region is a production region, it is also a potential
+    outage to which you will need to react. These factors combine to set the stage
+    for how you should approach regional rollouts.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Throughout this discussion we talk about rolling out software to a geographic
+    region, but this sort of progressive rollout is only one form of progressive exposure
+    control. An alternative way to roll out a feature is to use feature flags to do
+    progressive exposure. With feature flags, a new feature is first rolled out via
+    a release that follows a geographic rollout as described next; however, the feature
+    is flagged “off” by default. Once the release is in all regions, the flag is gradually
+    turned on by (for example) activating the feature for 10% of all users, followed
+    by 20%, and so on until the feature is fully rolled out. There are numerous configuration
+    systems for doing flag-based experiments and progressive rollouts. And combining
+    flags with geographic releases is a very stable way to release new features while
+    being able to quickly respond to failures.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Pre-Rollout Validation
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Before you even consider rolling out a particular version of your software around
+    the world, it’s critically important to validate that software in some sort of
+    synthetic testing environment. If you have your CD pipeline set up correctly,
+    all code prior to a particular release build will have undergone some form of
+    unit testing, and possibly limited integration testing. However, even with this
+    testing in place, it’s important to consider two other sorts of tests for a release
+    before it begins its journey through the release pipeline. The first is complete
+    integration testing. This means that you assemble the entirety of your stack into
+    a full-scale deployment of your application but without any real-world traffic.
+    This complete stack generally will include either a copy of your production data
+    or simulated data on the same size and scale as your true production data. If
+    in the real world, the data in your application is 500 GB, it’s critical that
+    in preproduction testing your dataset is roughly the same size (and possibly even
+    literally the same dataset).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Generally speaking, setting up a complete integration testing environment is
+    a significant challenge. Often, production data is present only in production,
+    and generating a synthetic dataset of the same size and scale is quite difficult.
+    Because of this complexity, setting up a realistic integration testing dataset
+    is a great example of a task that it pays to do early on in the development of
+    an application. If you set up a synthetic copy of your dataset early, when the
+    dataset itself is quite small, your integration test data grows gradually at the
+    same pace as your production data. This is generally significantly more manageable
+    than if you attempt to duplicate your production data when you are already at
+    scale.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Sadly, many people don’t realize that they need a copy of their data until they
+    are already at a large scale and the task is difficult. In such cases it might
+    be possible to deploy a read/write-deflecting layer in front of your production
+    data store. Obviously, you don’t want your integration tests writing to production
+    data, but it is often possible to set up a proxy in front of your production data
+    store that reads from production but stores writes in a side table that is also
+    consulted on subsequent reads.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Of course, it is also extremely important that if you use your production data
+    for testing and development you are very careful with the security of that data.
+    Numerous data leaks have been associated with developers accidentally placing
+    their production user data in insecure locations.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Regardless of how you manage to set up your integration testing environment,
+    the goal is the same: to validate that your application behaves as expected when
+    given a series of test inputs and interactions. There are a variety of ways to
+    define and execute these tests—from the most manual, a worksheet of tests and
+    human effort (not recommended because it is fairly error prone), through tests
+    that simulate browsers and user interactions, like clicks and so forth. In the
+    middle are tests that probe RESTful APIs but don’t necessarily test the web UI
+    built on top of those APIs. Regardless of how you define your integration tests,
+    the goal should be the same: an automated test suite that validates the correct
+    behavior of your application in response to a complete set of real-world inputs.
+    For simple applications it may be possible to perform this validation in premerge
+    testing, but for most large-scale real-world applications, a complete integration
+    environment is required.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Integration testing will validate the correct operation of your application,
+    but you should also load-test the application. It is one thing to demonstrate
+    that the application behaves correctly; it is quite another to demonstrate that
+    it stands up to real-world load. In any reasonably high-scale system, a significant
+    regression in performance—for example, a 20% increase in request latency—has a
+    significant impact on the UX of the application and, in addition to frustrating
+    users, can cause an application to completely fail. Thus, it is critical to ensure
+    that such performance regressions do not happen in production.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Like integration testing, identifying the correct way to load-test an application
+    can be a complex proposition; after all, it requires that you generate a load
+    similar to production traffic but in a synthetic and reproducible way. One of
+    the easiest ways to do this is to simply replay the logs of traffic from a real-world
+    production system. Doing this can be a great way to perform a load test whose
+    characteristics match what your application will experience when deployed. However,
+    using replay isn’t always foolproof. For example, if your logs are old, and your
+    application or dataset has changed, it’s possible that the performance on old,
+    replayed logs will be different than the performance on fresh traffic. Additionally,
+    if you have real-world dependencies that you haven’t mocked, it’s possible that
+    the old traffic will be invalid when sent over to the dependencies (e.g., the
+    data might no longer exist).
+  prefs: []
+  type: TYPE_NORMAL
+- en: As with production data it is critical to safeguard the security of any recorded
+    real-world requests. Just like the production databases, production requests often
+    contain private information or secure credentials (or both!), and it is critical
+    that the security of any recordings be treated the same as the actual user requests.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Because of the challenges associated with saving, securing, and managing this
+    test data, many systems, even critical systems, are developed for a long time
+    without a load test. Like modeling your production data, this is a clear example
+    of something that is easier to maintain if you start earlier. If you build a load
+    test when your application has only a handful of dependencies, and improve and
+    iterate the load test as you adapt your application, you will have a far easier
+    time than if you attempt to retrofit load testing onto an existing large-scale
+    application.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Assuming that you have crafted a load test, the next question is the metrics
+    to watch when load-testing your application. The obvious ones are requests per
+    second and request latency because those are clearly the user-facing metrics.
+  prefs: []
+  type: TYPE_NORMAL
+- en: When measuring latency, it’s important to realize that this is actually a distribution,
+    and you need to measure both the mean latency as well as the outlier percentiles
+    (like the 90th and 99th percentiles) since they represent the “worst” UX of your
+    application. Problems with very long latencies can be hidden if you just look
+    at the averages, but if 10% of your users are having a bad time, it can have a
+    significant impact on the success of your product.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In addition, it’s worth looking at the resource usage (CPU, memory, network,
+    disk) of the application under load test. Though these metrics do not directly
+    contribute to the UX, large changes in resource usage for your application should
+    be identified and understood in preproduction testing. If your application is
+    suddenly consuming twice as much memory, it’s something you will want to investigate,
+    even if you pass your load test, because eventually such significant resource
+    growth will affect the quality and availability of your application. Depending
+    on the circumstances, you might continue bringing a release to production, but
+    at the same time, you need to understand why the resource footprint of your application
+    is changing.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Canary Region
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: When your application appears to be operating correctly, the first step should
+    be a *canary region*. A canary region is a deployment that receives real-world
+    traffic from people and teams who want to validate your release. These can be
+    internal teams that depend on your service, or they might be external customers
+    who are using your service. Canaries exist to give a team some early warning about
+    changes that you are about to roll out that might break them. No matter how good
+    your integration and load testing, it’s always possible that a bug will slip through
+    that isn’t covered by your tests but is critical to some user or customer. In
+    such cases, it is much better to catch these issues in a space where everyone
+    using or deploying against the service understands that there is a higher probability
+    of failure. This is the canary region.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Canary is also a great place for your team or company to *dogfood* or self-test
+    the early release before it goes further in production. A great best practice
+    is to set up an HTTP redirector so that requests from within your company are
+    redirected to an instance of your product that is running in canary. That way
+    every person on your team becomes an end-to-end tester before the release proceeds
+    to external users.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Canaries must be treated as a production region in terms of monitoring, scale,
+    features, and so on. However, because it is the first stop on the release process,
+    it is also the location most likely to see a broken release. This is OK; in fact
+    it is precisely the point. Your customers will knowingly use a canary for lower-risk
+    use cases (e.g., development or internal users) so that they can get an early
+    indication of any breaking changes that you might be rolling out as part of a
+    release.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Because the goal of a canary is to get early feedback on a release, it is a
+    good idea to leave the release in the canary region for a few days. This enables
+    a broad collection of customers to access it before you move on to additional
+    regions. This length of time is needed because sometimes a bug is probabilistic
+    (e.g., affects 1% of requests), or it manifests only in an edge case that takes
+    some time to present itself. It might not even be severe enough to trigger automated
+    alerts, but there might be a problem in business logic that is visible only via
+    customer interactions.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Identifying Region Types
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: When you begin thinking about rolling out your software across the world, it’s
+    important to think about the different characteristics of your different regions.
+    After you begin rolling out software to production regions, you need to run it
+    through integration testing as well as initial canary testing. This means that
+    any subsequent issues you find will be issues that did not manifest in either
+    of these settings. Think about your different regions. Do some get more traffic
+    than others? Are some accessed in a different way? An example of a difference
+    might be that in the developing world, traffic is more likely to come from mobile
+    web browsers. Thus, a region that is geographically close to more developing countries
+    might have significantly more mobile traffic than your test or canary regions.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Another example might be input language. Regions in non-English-speaking areas
+    of the world might send more Unicode characters that could manifest bugs in string
+    or character handling. If you are building an API-driven service, some APIs might
+    be more popular in some regions versus others. All these things are examples of
+    differences that might be present in your application and might be different than
+    your canary traffic. Each of these differences is a possible source of a production
+    incident. Build a table of different characteristics that you think are important.
+    Identifying these characteristics will help you plan your global rollout.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Constructing a Global Rollout
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Having identified the characteristics of your regions, you want to identify
+    a plan for rolling out to all regions. Obviously, you want to minimize the impact
+    of a production outage, so a great first region to start with is a region that
+    looks mostly like your canary and has light user traffic. Such a region is very
+    unlikely to have problems, but if they do occur, the impact is also smaller because
+    the region receives less traffic.
+  prefs: []
+  type: TYPE_NORMAL
+- en: With a successful rollout to the first production region, you need to decide
+    how long to wait before moving on to the next region. The reason for waiting is
+    not to artificially delay your release; rather, it’s to wait long enough for a
+    fire to send up smoke. This time-to-smoke period is a measure of how long it generally
+    takes between a rollout completing and your monitoring seeing some sign of a problem.
+    Clearly if a rollout contains a problem, the minute the rollout completes, the
+    problem is present in your infrastructure. But even though it is present, it can
+    take some time to manifest. For example, a memory leak might take an hour or more
+    before the impact of the leaked memory is clearly discernible in monitoring or
+    is affecting users. The time-to-smoke is the probability distribution that indicates
+    how long you should wait to have a strong probability that your release is operating
+    correctly. Generally speaking, a decent rule of thumb is doubling the average
+    time it took for a problem to manifest in the past.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If, over the past six months, each outage took an average of an hour to show
+    up, waiting two hours between regional rollouts gives you a decent probability
+    that your release is successful. If you want to derive richer (and more meaningful)
+    statistics based on the history of your application, you can estimate this time-to-smoke
+    even more closely.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Having successfully rolled out to a canary-like, low-traffic region, it’s time
+    to roll out to a canary-like, high-traffic region. This is a region where the
+    input data looks like that in your canary, but it receives a large volume of traffic.
+    Because you successfully rolled out to a similar-looking region with lower traffic,
+    at this point the only thing you are testing is your application’s ability to
+    scale. If you safely perform this rollout, you can have strong confidence in the
+    quality of your release.
+  prefs: []
+  type: TYPE_NORMAL
+- en: After you have rolled out to a high-traffic region receiving canary-like data,
+    you should follow the same pattern for other potential differences in traffic.
+    For example, you might roll out to a low-traffic region in Asia or Europe next.
+    At this point, it might be tempting to accelerate your rollout, but it is critically
+    important to roll out only to a single region that represents any significant
+    change in either input or load to your release. After you are confident that you
+    have tested all the potential variability in the production input to your application,
+    then you can start parallelizing the release to speed it up with strong confidence
+    that it is operating correctly and your rollout can complete successfully.
+  prefs: []
+  type: TYPE_NORMAL
+- en: When Something Goes Wrong
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: So far, we have seen the pieces that go into setting up a worldwide rollout
+    for your software system, and we have seen the ways that you can structure this
+    rollout to minimize the chances that something goes wrong. But what do you do
+    when something actually does go wrong? All emergency responders know that in the
+    heat and panic of a crisis, your brain is significantly stressed and it is much
+    more difficult to remember even the simplest processes. Add to this pressure the
+    knowledge that when an outage happens, everyone in the company from the CEO down
+    is going to be feverishly waiting for the “all clear” signal, and you can see
+    how easy it is to make a mistake. Additionally, in such circumstances, a simple
+    mistake, like forgetting a particular step in a recovery process, or rolling out
+    a “fixed” build that actually has more problems, can make a bad situation an order
+    of magnitude worse.
+  prefs: []
+  type: TYPE_NORMAL
+- en: For all these reasons, it is critical that you are capable of responding quickly,
+    calmly, and correctly when a problem happens with a rollout. To ensure that everything
+    necessary is done, and done in the correct order, it pays to have a clear checklist
+    of tasks organized in the order in which they are to be executed as well as the
+    expected output for each step. Write down every step, no matter how obvious it
+    might seem. In the heat of the moment, even the most obvious and easy steps can
+    be the ones that are forgotten and accidentally skipped.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The way that first responders ensure a correct response in a high-stress situation
+    is to practice that response without the stress of the emergency. The same practice
+    applies to all the activities that you might take in response to a problem with
+    your rollout. You begin by identifying all the steps needed to respond to an issue
+    and perform a rollback. Ideally, the first response is to “stop the bleeding,”
+    to move user traffic away from the impacted region(s) and into a region where
+    the rollout hasn’t happened and your system is operating correctly. This is the
+    first thing you should practice. Can you successfully direct traffic away from
+    a region? How long does it take?
+  prefs: []
+  type: TYPE_NORMAL
+- en: The first time you attempt to move traffic using a DNS-based traffic load balancer,
+    you will realize just how long and in how many ways our computers cache DNS entries.
+    It can take nearly a day to fully drain traffic away from a region using a DNS-based
+    traffic shaper. Regardless of how your first attempt to drain traffic goes, take
+    notes. What worked well? What went poorly? Given this data, set a goal for how
+    long a traffic drain should take in terms of time to drain a percentage of traffic,
+    for example, being able to drain 99% of traffic in less than 10 minutes. Keep
+    practicing until you can achieve that goal. You might need to make architectural
+    changes to make this possible. You might need to add automation so that humans
+    aren’t cutting and pasting commands. Regardless of necessary changes, practice
+    will ensure that you are more capable when responding to an incident and that
+    you will learn where your system design needs to be improved.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The same sort of practice applies to every action that you might take on your
+    system. Practice a full-scale data recovery. Practice a global rollback of your
+    system to a previous version. Set goals for the length of time it should take.
+    Note any places where you made mistakes, and add validation and automation to
+    eliminate the possibility of mistakes. Achieving your incident reaction goals
+    in practice gives you confidence that you will be able to respond correctly in
+    a real incident. But just like every emergency responder continues to train and
+    learn, you too need to set up a regular cadence of practice to ensure that everyone
+    on a team stays well versed in the proper responses and (perhaps more important)
+    that your responses stay up to date as your system changes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Worldwide Rollout Best Practices
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'Rolling out your software around the world, especially if you have never done
+    it before, can be a significant challenge. Here are some best practices based
+    on our years of production experience for how to manage the global deployment
+    of mission critical software:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Distribute each image around the world. A successful rollout depends on the
+    release bits (binaries, images, etc.) being nearby to where they will be used.
+    This also ensures reliability of the rollout in the presence of networking slowdowns
+    or irregularities. Geographic distribution should be a part of your automated
+    release pipeline for guaranteed consistency.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Shift as much of your testing as possible to the left by having as much extensive
+    integration and replay testing of your application as possible. You want to start
+    a rollout only with a release that you strongly believe to be correct.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Begin a release in a canary region, which is a preproduction environment in
+    which other teams or large customers can validate *their* use of your service
+    before you begin a larger-scale rollout.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Identify different characteristics of the regions where you are rolling out.
+    Each difference can be one that causes a failure and a full or partial outage.
+    Try to roll out to low-risk regions first.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Document and practice your response to any problem or process (e.g., a rollback)
+    that you might encounter. Trying to remember what to do in the heat of the moment
+    is a recipe for forgetting something and making a bad problem worse.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Summary
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: It might seem unlikely today, but most of us will end up running a worldwide
+    scale system sometime during our careers. This chapter described how you can gradually
+    build and iterate your system to be a truly global design. It also discussed how
+    you can set up your rollout to ensure minimal downtime of the system while it
+    is being updated. Finally, we covered setting up and practicing the processes
+    and procedures necessary to react when (note that we didn’t say “if”) something
+    goes wrong.
+  prefs: []
+  type: TYPE_NORMAL

@@ -1,0 +1,1284 @@
+- en: Chapter 2\. Managing Data Storage on Kubernetes
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: There is no such thing as a stateless architecture. All applications store state
+    somewhere.
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: ''
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: Alex Chircop, CEO, StorageOS
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: 'In the previous chapter, we painted a picture of a possible near future with
+    powerful, stateful, data-intensive applications running on Kubernetes. To get
+    there, we’re going to need data infrastructure for persistence, streaming, and
+    analytics. To build out this infrastructure, we’ll need to leverage the primitives
+    that Kubernetes provides to help manage the three commodities of cloud computing:
+    compute, network, and storage. In the next several chapters, we’ll begin to look
+    at these primitives, starting with storage, in order to see how they can be combined
+    to create the data infrastructure we need.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: To echo the point raised by Alex Chircop, all applications must store their
+    state somewhere, which is why we’ll focus in this chapter on the basic abstractions
+    Kubernetes provides for interacting with storage. We’ll also look at the emerging
+    innovations being offered by storage vendors and open source projects creating
+    storage infrastructure for Kubernetes that itself embodies cloud native principles.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Let’s start our exploration with a look at managing persistence in containerized
+    applications in general and use that as a jumping-off point for our investigation
+    into data storage on Kubernetes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Docker, Containers, and State
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The problem of managing state in distributed, cloud native applications is not
+    unique to Kubernetes. A quick search will show that stateful workloads have been
+    an area of concern on other container orchestration platforms such as Mesos and
+    Docker Swarm. Part of this has to do with the nature of container orchestration,
+    and part is driven by the nature of containers themselves.
+  prefs: []
+  type: TYPE_NORMAL
+- en: First, let’s consider containers. One of the key value propositions of containers
+    is their ephemeral nature. Containers are designed to be disposable and replaceable,
+    so they need to start quickly and use as few resources for overhead processing
+    as possible. For this reason, most container images are built from base images
+    containing streamlined, Linux-based, open source operating systems such as Ubuntu,
+    that boot quickly and incorporate only essential libraries for the contained application
+    or microservice. As the name implies, containers are designed to be self-contained,
+    incorporating all their dependencies in immutable images, while their configuration
+    and data are externalized. These properties make containers portable so that we
+    can run them anywhere a compatible container runtime is available.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As shown in [Figure 2-1](#comparing_containerization_to_virtualiz), containers
+    require less overhead than traditional VMs, which run a guest operating system
+    per VM, with a [hypervisor layer](https://oreil.ly/5gE1u) to implement system
+    calls onto the underlying host operating system.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Comparing containerization to virtualization](assets/mcdk_0201.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 2-1\. Comparing containerization to virtualization
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Although containers have made applications more portable, it’s proven a bigger
+    challenge to make their data portable. Since a container itself is ephemeral,
+    any data that is to survive beyond the life of the container must by definition
+    reside externally. The key feature for a container technology is to provide mechanisms
+    to link to persistent storage, and the key feature for a container orchestration
+    technology is the ability to schedule containers in such a way that they can access
+    persistent storage efficiently.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Managing State in Docker
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Let’s take a look at the most popular container technology, Docker, to see how
+    containers can store data. The key storage concept in Docker is the volume. From
+    the perspective of a Docker container, a *volume* is a directory that can support
+    read-only or read/write access. Docker supports the mounting of multiple data
+    stores as volumes. We’ll introduce several options so we can later note their
+    equivalents in Kubernetes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Bind Mounts
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The simplest approach for creating a volume is to bind a directory in the container
+    to a directory on the host system. This is called a *bind mount*, as shown in
+    [Figure 2-2](#using_docker_bind_mounts_to_access_the).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Using Docker bind mounts to access the host filesystem](assets/mcdk_0202.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 2-2\. Using Docker bind mounts to access the host filesystem
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'When starting a container within Docker, you specify a bind mount with the
+    `--volume` or `-v` option and the local filesystem path and container path to
+    use. For example, you could start an instance of the Nginx web server and map
+    a local project folder from your development machine into the container. This
+    is a command you can test out in your own environment if you have Docker installed:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: This exposes the web server on port 8080 on your local host. If the local path
+    directory does not already exist, the Docker runtime will create it. Docker allows
+    you to create bind mounts with read-only or read/write permissions. Because the
+    volume is represented as a directory, the application running in the container
+    can put anything that can be represented as a file into the volume—even a database.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Bind mounts are quite useful for development work. However, using bind mounts
+    is not suitable for a production environment since this leads to a container being
+    dependent on a file being present in a specific host. This might be fine for a
+    single-machine deployment, but production deployments tend to be spread across
+    multiple hosts. Another concern is the potential security hole that is presented
+    by opening up access from the container to the host filesystem. For these reasons,
+    we need another approach for production deployments.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Volumes
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'The preferred option within Docker is to use volumes. Docker volumes are created
+    and managed by Docker under a specific directory on the host filesystem. The Docker
+    `volume create` command is used to create a volume. For example, you might create
+    a volume called `site-content` to store files for a website:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'If no name is specified, Docker assigns a random name. After creation, the
+    resulting volume is available to mount in a container using the form `-v VOLUME-NAME:CONTAINER-PATH`.
+    For example, you might use a volume like the one just created to allow an Nginx
+    container to read the content, while allowing another container to edit the content,
+    using the `ro` option:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: Docker Volume Mount Syntax
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Docker also supports a `--mount` syntax that allows you to specify the source
+    and target folders more explicitly. This notation is considered more modern, but
+    it is also more verbose. The syntax shown in the preceding example is still valid
+    and is the more commonly used syntax.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As we’ve implied, a Docker volume can be mounted in more than one container
+    at once, as shown in [Figure 2-3](#creating_docker_volumes_to_share_data_b).
+  prefs: []
+  type: TYPE_NORMAL
+- en: The advantage of using Docker volumes is that Docker manages the filesystem
+    access for containers, which makes it much simpler to enforce capacity and security
+    restrictions on containers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Creating Docker volumes to share data between containers on the host](assets/mcdk_0203.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 2-3\. Creating Docker volumes to share data between containers on the
+    host
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Tmpfs Mounts
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Docker supports two types of mounts that are specific to the operating system
+    used by the host system: *tmpfs* (or *temporary filesystem*) and *named pipes*.
+    Named pipes are available on Docker for Windows, but since they are typically
+    not used in Kubernetes, we won’t give much consideration to them here.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tmpfs mounts are available when running Docker on Linux. A tmpfs mount exists
+    only in memory for the lifespan of the container, so the contents are never present
+    on disk, as shown in [Figure 2-4](#creating_a_temporary_volume_using_docke). Tmpfs
+    mounts are useful for applications that are written to persist a relatively small
+    amount of data, especially sensitive data that you don’t want written to the host
+    filesystem. Because the data is stored in memory, faster access is a side benefit.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Creating a temporary volume using Docker tmpfs](assets/mcdk_0204.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 2-4\. Creating a temporary volume using Docker tmpfs
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'To create a tmpfs mount, use the `docker run --tmpfs` option. For example,
+    you could use a command like this to specify a tmpfs volume to store Nginx logs
+    for a web server processing sensitive data:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: The `--mount` option may also be used for more control over configurable options.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Volume Drivers
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Docker Engine has an extensible architecture that allows you to add customized
+    behavior via plug-ins for capabilities including networking, storage, and authorization.
+    Third-party [storage plug-ins](https://oreil.ly/b9P9X) are available for multiple
+    open source and commercial providers, including the public clouds and various
+    networked filesystems. Taking advantage of these involves installing the plug-in
+    with Docker Engine and then specifying the associated volume driver when starting
+    Docker containers using that storage, as shown in [Figure 2-5](#using_docker_volume_drivers_to_access_n).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Using Docker volume drivers to access networked storage](assets/mcdk_0205.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 2-5\. Using Docker volume drivers to access networked storage
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: For more information on working with the various types of volumes supported
+    in Docker, see the [Docker storage documentation](https://oreil.ly/vVPb4), as
+    well as the documentation for the [`docker run` command](https://oreil.ly/Tj3NT).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Kubernetes Resources for Data Storage
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Now that you understand basic concepts of container and cloud storage, let’s
+    see what Kubernetes brings to the table. In this section, we’ll introduce some
+    of the key Kubernetes concepts, or *resources* in the API for attaching storage
+    to containerized applications. Even if you are already somewhat familiar with
+    these resources, you’ll want to stay tuned, as we’ll focus particularly on how
+    each one relates to stateful data.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Pods and Volumes
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: One of the first Kubernetes resources new users encounter is the *Pod*. This
+    is the basic unit of deployment of a Kubernetes workload. A Pod provides an environment
+    for running containers, and the Kubernetes control plane is responsible for deploying
+    Pods to Kubernetes Worker Nodes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The *Kubelet* is a component of the [Kubernetes control plane](https://oreil.ly/1ITFv)
+    that runs on each Worker Node. It is responsible for running Pods on a node, as
+    well as monitoring the health of these Pods and the containers inside them. These
+    elements are summarized in [Figure 2-6](#using_volumes_in_kubernetes_pods).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Using volumes in Kubernetes Pods](assets/mcdk_0206.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 2-6\. Using volumes in Kubernetes Pods
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: While a Pod can contain multiple containers, the best practice is for a Pod
+    to contain a single application container, along with optional additional helper
+    containers, as shown in [Figure 2-6](#using_volumes_in_kubernetes_pods). These
+    helper containers might include *init containers* that run prior to the main application
+    container in order to perform configuration tasks, or *sidecar containers* that
+    run alongside the main application container to provide helper services such as
+    observability or management. In later chapters, you’ll see how data infrastructure
+    deployments can take advantage of these architectural patterns.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Now let’s see how persistence is supported within this Pod architecture. As
+    with Docker, the “on disk” data in a container is lost when a container crashes.
+    The Kubelet is responsible for restarting the container, but this new container
+    is a *replacement* for the original container—it will have a distinct identity
+    and start with a completely new state.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In Kubernetes, the term *volume* is used to represent access to storage within
+    a Pod. By using a volume, the container has the ability to persist data that will
+    outlive the container (and potentially the Pod as well, as we’ll see shortly).
+    A volume may be accessed by multiple containers in a Pod. Each container has its
+    own *volumeMount* within the Pod that specifies the directory to which it should
+    be mounted, allowing the mount point to differ among containers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In multiple cases, you might want to share data between containers in a Pod:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: An init container creates a custom configuration file for the particular environment
+    that the application container mounts to obtain configuration values.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The application Pod writes logs, and a sidecar Pod reads those logs to identify
+    alert conditions that are reported to an external monitoring tool.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: However, you’ll likely want to avoid situations in which multiple containers
+    are writing to the same volume, because you’ll have to ensure that the multiple
+    writers don’t conflict—Kubernetes does not do that for you.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Preparing to Run Sample Code
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The examples in this book assume you have access to a running Kubernetes cluster.
+    For the examples in this chapter, a development cluster on your local machine
+    such as kind, K3s, or Docker Desktop should be sufficient. The source code used
+    in this section is located at [the book’s repository](https://oreil.ly/VjIq1).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Using a volume in a Pod requires two steps: defining the volume and mounting
+    the volume in each container that needs access. Let’s look at a sample YAML configuration
+    that defines a Pod with a single application container, the Nginx web server,
+    and a single volume. The [source code](https://oreil.ly/nlBJA) is in this book’s
+    repository:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Notice the two parts of the configuration: the volume is defined under `spec.volumes`,
+    and the usage of the volumes is defined under `spec.containers.volumeMounts`.
+    First, the `name` of the volume is referenced under `volumeMounts`, and the directory
+    where it is to be mounted is specified by `mountPath`. When declaring a Pod specification,
+    volumes and volume mounts go together. For your configuration to be valid, a volume
+    must be declared before being referenced, and a volume must be used by at least
+    one container in the Pod.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You may have also noticed that the volume has only a `name`. You haven’t specified
+    any additional information. What do you think this will do? You could try this
+    out for yourself by using the example source code file *nginx-pod.yaml* or cutting
+    and pasting the preceding configuration to a file with that name, and executing
+    the `kubectl` command against a configured Kubernetes cluster:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You can get more information about the Pod that was created by using the `kubectl
+    get pod` command, for example:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'And the results might look something like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: As you can see, Kubernetes supplied additional information when creating the
+    requested volume, defaulting it to a type of `emptyDir`. Other default attributes
+    may differ depending on what Kubernetes engine you are using, but we won’t discuss
+    them further here.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Several types of volumes can be mounted in a container; let’s have a look.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Ephemeral volumes
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: You’ll remember tmpfs volumes from our previous discussion of Docker volumes,
+    which provide temporary storage for the lifespan of a single container. Kubernetes
+    provides the concept of an [*ephemeral volume*](https://oreil.ly/zaiKG), which
+    is similar, but at the scope of a Pod. The `emptyDir` introduced in the preceding
+    example is a type of ephemeral volume.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Ephemeral volumes can be useful for data infrastructure or other applications
+    that want to create a cache for fast access. Although they do not persist beyond
+    the lifespan of a Pod, they can still exhibit some of the typical properties of
+    other volumes for longer-term persistence, such as the ability to snapshot. Ephemeral
+    volumes are slightly easier to set up than PersistentVolumes because they are
+    declared entirely inline in the Pod definition without reference to other Kubernetes
+    resources. As you will see next, creating and using PersistentVolumes is a bit
+    more involved.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Other Ephemeral Storage Providers
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Some of the in-tree and CSI storage drivers we’ll discuss next that provide
+    PersistentVolumes also provide an ephemeral volume option. You’ll want to check
+    the documentation of the specific provider to see what options are available.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Configuration volumes
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: Kubernetes provides several constructs for injecting configuration data into
+    a Pod as a volume. These volume types are also considered ephemeral in the sense
+    that they do not provide a mechanism for allowing applications to persist their
+    own data.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The following volume types are relevant to our exploration in this book since
+    they provide a useful means of configuring applications and data infrastructure
+    running on Kubernetes. We’ll describe each of them briefly:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: ConfigMap volumes
+  prefs: []
+  type: TYPE_NORMAL
+- en: A ConfigMap is a Kubernetes resource that is used to store configuration values
+    external to an application as a set of name-value pairs. For example, an application
+    might require connection details for an underlying database such as an IP address
+    and port number. Defining these in a ConfigMap is a good way to externalize this
+    information from the application. The resulting configuration data can be mounted
+    into the application as a volume, where it will appear as a directory. Each configuration
+    value is represented as a file wherein the filename is the key and the contents
+    of the file contain the value. See the Kubernetes documentation for more information
+    on [mounting ConfigMaps as volumes](https://oreil.ly/zaiKG).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Secret volumes
+  prefs: []
+  type: TYPE_NORMAL
+- en: A Secret is similar to a ConfigMap, only it is intended for securing access
+    to sensitive data that requires protection. For example, you might want to create
+    a Secret containing database access credentials such as a username and password.
+    Configuring and accessing Secrets is similar to using ConfigMap, with the additional
+    benefit that Kubernetes helps decrypt the Secret upon access within the Pod. See
+    the Kubernetes documentation for more information on [mounting Secrets as volumes](https://oreil.ly/mPkMB).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Downward API volumes
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Kubernetes downward API exposes metadata about Pods and containers either
+    as environment variables or as volumes. This is the same metadata that is used
+    by `kubectl` and other clients.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The available Pod metadata includes the Pod’s name, ID, Namespace, labels, and
+    annotations. The containerized application might aim to use the Pod information
+    for logging and metrics reporting, or to determine database or table names.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The available container metadata includes the requested and maximum amounts
+    of resources such as CPU, memory, and ephemeral storage. The containerized application
+    might seek to use this information in order to throttle its own resource usage.
+    See the Kubernetes documentation for an example of [injecting Pod information
+    as a volume](https://oreil.ly/LrOn2).
+  prefs: []
+  type: TYPE_NORMAL
+- en: hostPath volumes
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'A [`hostPath`](https://oreil.ly/kjr8P) volume mounts a file or directory into
+    a Pod from the Kubernetes Worker Node where it is running. This is analogous to
+    the bind mount concept in Docker, discussed in [“Bind Mounts”](#bind_mounts).
+    Using a `hostPath` volume has one advantage over an `emptyDir` volume: the data
+    will survive the restart of a Pod.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: However, using `hostPath` volumes has some disadvantages. First, in order for
+    a replacement Pod to access the data of the original Pod, it will need to be restarted
+    on the same Worker Node. While Kubernetes does give you the ability to control
+    which node a Pod is placed on using affinity, this tends to constrain the Kubernetes
+    scheduler from optimal placement of Pods, and if the node goes down for some reason,
+    the data in the `hostPath` volume is lost. Second, as with Docker bind mounts,
+    there is a security concern with `hostPath` volumes in terms of allowing access
+    to the local filesystem. For these reasons, `hostPath` volumes are recommended
+    only for development deployments.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Cloud volumes
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: It is possible to create Kubernetes volumes that reference storage locations
+    beyond just the Worker Node where a Pod is running, as shown in [Figure 2-7](#kubernetes_pods_directly_mounting_cloud).
+    These can be grouped into volume types that are provided by named cloud providers,
+    and those that attempt to provide a more generic interface.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'These include the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The [`awsElasticBlockStore`](https://oreil.ly/CmTCt) volume type is used to
+    mount volumes on Amazon Web Services (AWS) Elastic Block Store (EBS). Many databases
+    use block storage as their underlying storage layer.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The [`gcePersistentDisk`](https://oreil.ly/01JEm) volume type is used to mount
+    Google Compute Engine (GCE) persistent disks (PD), another example of block storage.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Two types of volumes are supported for Microsoft Azure: [`azureDisk`](https://oreil.ly/pIann)
+    for Azure Data Disk volumes, and [`azureFile`](https://oreil.ly/kInGC) for Azure
+    File volumes.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The [`cinder`](https://oreil.ly/VVLrx) volume type can be used to access OpenStack
+    Cinder volumes for OpenStack deployments.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '![Kubernetes pods directly mounting cloud provider storage](assets/mcdk_0207.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 2-7\. Kubernetes Pods directly mounting cloud provider storage
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Usage of these types typically requires configuration on the cloud provider,
+    and access from Kubernetes clusters is typically confined to storage in the same
+    cloud region and account. Check your cloud provider’s documentation for more details.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Additional volume providers
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'Numerous additional volume providers vary in the types of storage provided.
+    Here are a few examples:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `fibreChannel` volume type can be used for SAN solutions implementing the
+    Fibre Channel protocol.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The `gluster` volume type is used to access file storage using the [Gluster](https://www.gluster.org)
+    distributed filesystem referenced previously.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: An `iscsi` volume mounts an existing Internet Small Computer Systems Interface
+    (iSCSI) volume into your Pod.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: An `nfs` volume allows an existing NFS share to be mounted into a Pod.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: We’ll examine more volume providers that implement the Container Attached Storage
+    pattern in [“Container Attached Storage”](#container_attached_storage). [Table 2-1](#comparing_docker_and_kubernetes_storage)
+    compares Docker and Kubernetes storage concepts we’ve covered so far.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 2-1\. Comparing Docker and Kubernetes storage options
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Type of storage | Docker | Kubernetes |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Access to persistent storage from various providers | Volume (accessed via
+    volume drivers) | Volume (accessed via in-tree or CSI drivers) |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Access to host filesystem (not recommended for production) | Bind mount |
+    `hostPath` volume |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Temporary storage available while container (or Pod) is running | Tmpfs |
+    `emptyDir` and other ephemeral volumes |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Configuration and environment data (read-only) | (No direct equivalent) |
+    ConfigMap, Secret, downward API |'
+  prefs: []
+  type: TYPE_TB
+- en: In this section, we’ve discussed how to use volumes to provide storage that
+    can be shared by multiple containers within the same Pod. While using volumes
+    is sufficient for some use cases, it doesn’t address all needs. A volume doesn’t
+    provide the ability to share storage resources among Pods. The definition of a
+    particular storage location is tied to the definition of the Pod. Managing storage
+    for individual Pods doesn’t scale well as the number of Pods deployed in your
+    Kubernetes cluster increases.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Thankfully, Kubernetes provides additional primitives that help simplify the
+    process of provisioning and mounting storage volumes for both individual Pods
+    and groups of related Pods. We’ll investigate these concepts in the next several
+    sections.
+  prefs: []
+  type: TYPE_NORMAL
+- en: PersistentVolumes
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'The key innovation the Kubernetes developers introduced for managing storage
+    is the [PersistentVolume subsystem](https://oreil.ly/ec8BB). This subsystem consists
+    of three additional Kubernetes resources that work together: PersistentVolumes,
+    PersistentVolumeClaims, and StorageClasses. These allow you to separate the definition
+    and lifecycle of storage from the way it is used by Pods, as shown in [Figure 2-8](#persistentvolumescomma_persistentvolume):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Cluster administrators define PersistentVolumes, either explicitly or by creating
+    a StorageClass that can dynamically provision new PersistentVolumes.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Application developers create PersistentVolumeClaims that describe the storage
+    resource needs of their applications, and these PersistentVolumeClaims can be
+    referenced as part of volume definitions in Pods.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The Kubernetes control plane manages the binding of PersistentVolumeClaims to
+    PersistentVolumes.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '![PersistentVolumes, PersistentVolumeClaims, and StorageClasses](assets/mcdk_0208.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 2-8\. PersistentVolumes, PersistentVolumeClaims, and StorageClasses
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Let’s look first at the *PersistentVolume* resource (often abbreviated *PV*),
+    which defines access to storage at a specific location. PersistentVolumes are
+    typically defined by cluster administrators for use by application developers.
+    Each PV can represent storage of the same types discussed in the previous section,
+    such as storage offered by cloud providers, networked storage, or storage directly
+    on the Worker Node, as shown in [Figure 2-9](#types_of_kubernetes_persistentvolumes).
+    Since they are tied to specific storage locations, PersistentVolumes are not portable
+    between Kubernetes clusters.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Types of Kubernetes PersistentVolumes](assets/mcdk_0209.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 2-9\. Types of Kubernetes PersistentVolumes
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Local PersistentVolumes
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: '[Figure 2-9](#types_of_kubernetes_persistentvolumes) also introduces a PersistentVolume
+    type called `local`, which represents storage mounted directly on a Kubernetes
+    Worker Node such as a disk or partition. Like `hostPath` volumes, a `local` volume
+    may also represent a directory. A key difference between `local` and `hostPath`
+    volumes is that when a Pod using a `local` volume is restarted, the Kubernetes
+    scheduler ensures that the Pod is rescheduled on the same node so it can be attached
+    to the same persistent state. For this reason, `local` volumes are frequently
+    used as the backing store for data infrastructure that manages its own replication,
+    as we’ll see in [Chapter 4](ch04.html#automating_database_deployment_on_kuber).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The syntax for defining a PersistentVolume will look familiar, as it is similar
+    to defining a volume within a Pod. For example, here is a YAML configuration file
+    that defines a local PersistentVolume. The [source code](https://oreil.ly/b1zHe)
+    is in this book’s repository:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'As you can see, this code defines a `local` volume named `my-volume` on the
+    Worker Node `node1`, 3 GB in size, with an access mode of `ReadWriteOnce`. The
+    following [access modes](https://oreil.ly/mm5HT) are supported for PersistentVolumes:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`ReadWriteOnce`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The volume can be mounted for both reading and writing by a single node at a
+    time, although multiple Pods running on that node may access the volume.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`ReadOnlyMany`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The volume can be mounted by multiple nodes simultaneously, for reading only.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`ReadWriteMany`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The volume can be mounted for both reading and writing by many nodes at the
+    same time.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Choosing a Volume Access Mode
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The right access mode for a given volume will be driven by the type of workload.
+    For example, many distributed databases will be configured with dedicated storage
+    per Pod, making `ReadWriteOnce` a good choice.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Besides [capacity](https://oreil.ly/TSKOD) and access mode, other attributes
+    for PersistentVolumes include the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `volumeMode`, which defaults to `Filesystem` but may be overridden to `Block`.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The `reclaimPolicy` defines what happens when a Pod releases its claim on this
+    PersistentVolume. The legal values are `Retain`, `Recycle`, and `Delete`.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: A PersistentVolume can have a `nodeAffinity` that designates which Worker Node
+    or nodes can access this volume. This is optional for most types but required
+    for the `local` volume type.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The `class` attribute binds this PV to a particular StorageClass, which is a
+    concept we’ll introduce later in this chapter.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Some PersistentVolume types expose `mountOptions` that are specific to that
+    type.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Differences in Volume Options
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Options differ among volume types. For example, not every access mode or reclaim
+    policy is accessible for every PersistentVolume type, so consult the documentation
+    on your chosen type for more details.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You use the `kubectl describe persistentvolume` command (or `kubectl describe
+    pv` for short) to see the status of the PersistentVolume:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The PersistentVolume has a status of `Available` when first created. A PersistentVolume
+    can have multiple status values:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`Available`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The PersistentVolume is free and not yet bound to a claim.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`Bound`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The PersistentVolume is bound to a PersistentVolumeClaim, which is listed elsewhere
+    in the `describe` output.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`Released`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: An existing claim on the PersistentVolume has been deleted, but the resource
+    has not yet been reclaimed, so the resource is not yet `Available`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`Failed`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The volume has failed its automatic reclamation.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Now that you’ve learned how storage resources are defined in Kubernetes, the
+    next step is to learn how to use that storage in your applications.
+  prefs: []
+  type: TYPE_NORMAL
+- en: PersistentVolumeClaims
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'As we’ve discussed, Kubernetes separates the definition of storage from its
+    usage. Often these tasks are performed by different roles: cluster administrators
+    define the storage, while application developers use the storage. PersistentVolumes
+    are typically defined by the administrators and reference storage locations that
+    are specific to that cluster. Developers can then specify the storage needs of
+    their applications using *PersistentVolumeClaims (PVCs)*, which Kubernetes uses
+    to associate Pods with a PersistentVolume meeting the specified criteria. As shown
+    in [Figure 2-10](#accessing_persistentvolumes_using_persi), a PersistentVolumeClaim
+    is used to reference the various volume types we introduced previously, including
+    local PersistentVolumes, or external storage provided by cloud or networked storage
+    vendors.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Accessing PersistentVolumes using PersistentVolumeClaims](assets/mcdk_0210.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 2-10\. Accessing PersistentVolumes using PersistentVolumeClaims
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Here’s what the process looks like from an application developer perspective.
+    First, you’ll create a PVC representing your desired storage criteria. For example,
+    here’s a claim that requests 1 GB of storage with exclusive read/write access.
+    The [source code](https://oreil.ly/njKPH) is in this book’s repository:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'One interesting thing you may have noticed about this claim is that the `storageClassName`
+    is set to an empty string. We’ll explain the significance of this when we discuss
+    StorageClasses in the next section. You can reference the claim in the definition
+    of a Pod like this. The [source code](https://oreil.ly/VnJN4) is in this book’s
+    repository:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: As you can see, the PersistentVolume is represented within the Pod as a volume.
+    The volume is given a name and a reference to the claim. This is considered to
+    be a volume of the `persistentVolumeClaim` type. As with other volumes, the volume
+    is mounted into a container at a specific mount point—in this case, into the main
+    application Nginx container at the path */app/data*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'A PVC also has a state, which you can see if you retrieve the status:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'A PVC has one of two status values: `Bound`, meaning it is bound to a volume
+    (as in this example), or `Pending`, meaning that it has not yet been bound to
+    a volume. Typically, a status of `Pending` means that no PV matching the claim
+    exists.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Here’s what’s happening behind the scenes. Kubernetes uses the PVCs referenced
+    as volumes in a Pod and takes those into account when scheduling the Pod. Kubernetes
+    identifies PersistentVolumes that match properties associated with the claim and
+    binds the smallest available module to the claim. The properties might include
+    a label, or node affinity, as we saw previously for `local` volumes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: When starting up a Pod, the Kubernetes control plane makes sure the PersistentVolumes
+    are mounted to the Worker Node. Then, each requested storage volume is mounted
+    into the Pod at the specified mount point.
+  prefs: []
+  type: TYPE_NORMAL
+- en: StorageClasses
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The previous example demonstrates how Kubernetes can bind PVCs to PersistentVolumes
+    that already exist. This model in which PersistentVolumes are explicitly created
+    in the Kubernetes cluster is known as *static provisioning*. The Kubernetes PersistentVolume
+    subsystem also supports *dynamic provisioning* of volumes using *StorageClasses*
+    (often abbreviated *SC*). The StorageClass is responsible for provisioning (and
+    deprovisioning) PersistentVolumes according to the needs of applications running
+    in the cluster, as shown in [Figure 2-11](#storageclasses_support_dynamic_provisio).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![StorageClasses support dynamic provisioning of volumes](assets/mcdk_0211.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 2-11\. StorageClasses support dynamic provisioning of volumes
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Depending on the Kubernetes cluster you are using, at least one StorageClass
+    is likely already available. You can verify this using the command `kubectl get
+    sc`. If you’re running a simple Kubernetes distribution on your local machine
+    and don’t see any StorageClasses, you can install an open source local storage
+    provider from Rancher with the following command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This storage provider comes preinstalled in K3s, a desktop distribution also
+    provided by Rancher. If you take a look at the YAML configuration referenced in
+    that statement, you’ll see the following definition of a StorageClass. The [source
+    code](https://oreil.ly/nTocI) is in this book’s repository:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE14]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'As you can see from the definition, a StorageClass is defined by a few key
+    attributes:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `provisioner` interfaces with an underlying storage provider such as a public
+    cloud or storage system in order to allocate the actual storage. The provisioner
+    can be either one of the Kubernetes built-in provisioners (referred to as *in-tree*
+    because they are part of the Kubernetes source code), or a provisioner that conforms
+    to the Container Storage Interface (CSI), which we’ll examine later in this chapter.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The `reclaimPolicy` describes whether storage is reclaimed when the PersistentVolume
+    is deleted. The default, `Delete`, can be overridden to `Retain`, in which case
+    the storage administrator would be responsible for managing the future state of
+    that storage with the storage provider.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The [`volumeBindingMode`](https://oreil.ly/iFvrm) controls when the storage
+    is provisioned and bound. If the value is `Immediate`, a PersistentVolume is immediately
+    provisioned as soon as a PersistentVolumeClaim referencing the StorageClass is
+    created, and the claim is bound to the PersistentVolume, regardless of whether
+    the claim is referenced in a Pod. Many storage plug-ins also support a second
+    mode known as `WaitForFirstConsumer`, in which case no PersistentVolume is provisioned
+    until a Pod is created that references the claim. This behavior is considered
+    preferable since it gives the Kubernetes scheduler more flexibility.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Although not shown in this example, there is also an optional `allowVolumeExpansion`
+    flag. This indicates whether the StorageClass supports the ability for volumes
+    to be expanded. If `true`, the volume can be expanded by increasing the size of
+    the `storage.request` field of the PersistentVolumeClaim. This value defaults
+    to `false`.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Some StorageClasses also define `parameters`, specific configuration options
+    for the storage provider that are passed to the provisioner. Common options include
+    filesystem type, encryption settings, and throughput in terms of I/O operations
+    per second (IOPS). Check the documentation for the storage provider for more details.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Limits on Dynamic Provisioning
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Local PVs cannot be dynamically provisioned by a StorageClass, so you must create
+    them manually yourself.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Application developers can reference a specific StorageClass when creating
+    a PVC by adding a `storageClass` property to the definition. For example, here
+    is a YAML configuration for a PVC referencing the `local-path` StorageClass. The
+    [source code](https://oreil.ly/Ixwv7) is in this book’s repository:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE15]'
+  prefs: []
+  type: TYPE_PRE
+- en: If no `storageClass` is specified in the claim, the default StorageClass is
+    used. The default StorageClass can be set by the cluster administrator. As we
+    showed in [“PersistentVolumes”](#persistentvolumes), you can opt out of using
+    StorageClasses by using the empty string, which indicates that you are using statically
+    provisioned storage.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'StorageClasses provide a useful abstraction that cluster administrators and
+    application developers can use as a contract: administrators define the StorageClasses,
+    and developers reference the StorageClasses by name. The details of the underlying
+    StorageClass implementation can differ across Kubernetes platform providers, promoting
+    portability of applications.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This flexibility allows administrators to create StorageClasses representing
+    a variety of storage options—for example, to distinguish between different quality-of-service
+    guarantees in terms of throughput or latency. This concept is known as *profiles*
+    in other storage systems. See [“How Developers Are Driving the Future of Kubernetes
+    Storage”](#how_developers_are_driving_the_future_o) for more ideas on how StorageClasses
+    can be leveraged in innovative ways.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Kubernetes Storage Architecture
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: In the preceding sections, we discussed the various storage resources that Kubernetes
+    supports via its [API](https://oreil.ly/k1Ttm). In the remainder of the chapter,
+    we’ll look at how these solutions are constructed, as they can give us valuable
+    insights into constructing cloud native data solutions.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Defining Cloud Native Storage
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Most of the storage technologies we discuss in this chapter are captured as
+    part of the “cloud native storage” solutions listed in the [CNCF landscape](https://oreil.ly/vY3wF).
+    The [CNCF Storage Whitepaper](https://oreil.ly/bKRi9) is a helpful resource that
+    defines key terms and concepts for cloud native storage. Both of these resources
+    are updated regularly.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Flexvolume
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Originally, the Kubernetes codebase contained multiple in-tree storage plug-ins
+    (that is, included in the same GitHub repo as the rest of the Kubernetes code).
+    This helped standardize the code for connecting to different storage platforms,
+    but there were a couple of disadvantages. First, many Kubernetes developers had
+    limited expertise across the broad set of included storage providers. More significantly,
+    the ability to upgrade storage plug-ins was tied to the Kubernetes release cycle,
+    meaning that if you needed a fix or enhancement for a storage plug-in, you’d have
+    to wait until it was accepted into a Kubernetes release. This slowed the maturation
+    of storage technology for Kubernetes and as a result, adoption slowed as well.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Kubernetes community created the *Flexvolume specification* to allow development
+    of plug-ins independently—that is, out of the Kubernetes source code tree and
+    thus not tied to the Kubernetes release cycle. Around the same time, storage plug-in
+    standards were emerging for other container orchestration systems, and developers
+    from these communities began to question the wisdom of developing multiple standards
+    to solve the same basic problem.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Future Flexvolume Support
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The Flexvolume feature has been deprecated in Kubernetes 1.23 in favor of the
+    Container Storage Interface.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Container Storage Interface
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The *Container Storage Interface (CSI)* initiative was established as an industry
+    standard for storage for containerized applications. CSI is an open standard used
+    to define plug-ins that will work across container orchestration systems including
+    Kubernetes, Mesos, and Cloud Foundry. As Saad Ali, Google engineer and chair of
+    the Kubernetes [Storage Special Interest Group (SIG)](https://oreil.ly/JDsVv),
+    noted in [“The State of State in Kubernetes”](https://oreil.ly/sUzfM) in *The
+    New Stack*, “The Container Storage Interface allows Kubernetes to interact directly
+    with an arbitrary storage system.”
+  prefs: []
+  type: TYPE_NORMAL
+- en: The CSI specification is available on [GitHub](https://oreil.ly/kCOhg). Support
+    for the CSI in Kubernetes began with the 1.*x* release, and it [went general availability
+    (GA)](https://oreil.ly/AbUpe) in the 1.13 release. Kubernetes continues to track
+    updates to the CSI specification.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Additional CSI Resources
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The [CSI documentation site](https://oreil.ly/KFIXI) provides guidance for developers
+    and storage providers who are interested in developing CSI-compliant drivers.
+    The site also provides a very useful [list of CSI-compliant drivers](https://oreil.ly/wHkva).
+    This list is generally more up-to-date than one provided on the Kubernetes documentation
+    site.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Once a CSI implementation is deployed on a Kubernetes cluster, its capabilities
+    are accessed through the standard Kubernetes storage resources such as PVCs, PVs,
+    and SCs. On the backend, each CSI implementation must provide two plug-ins: a
+    node plug-in and a controller plug-in, as depicted in [Figure 2-12](#csi_mapped_to_kubernetes).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The CSI specification defines required interfaces for these plug-ins using
+    gRPC but does not specify exactly how the plug-ins are to be deployed. Let’s briefly
+    look at the role of each of these services:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The controller plug-in
+  prefs: []
+  type: TYPE_NORMAL
+- en: This plug-in supports operations on volumes such as create, delete, listing,
+    publishing/unpublishing, tracking, and expanding volume capacity. It also tracks
+    volume status including what nodes each volume is attached to. The controller
+    plug-in is also responsible for taking and managing snapshots, and using snapshots
+    to clone a volume. The controller plug-in can run on any node—it is a standard
+    Kubernetes controller.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The node plug-in
+  prefs: []
+  type: TYPE_NORMAL
+- en: This plug-in runs on each Kubernetes Worker Node where provisioned volumes will
+    be attached. The node plug-in is responsible for local storage, as well as mounting
+    and unmounting volumes onto the node. The Kubernetes control plane directs the
+    plug-in to mount a volume prior to any Pods being scheduled on the node that require
+    the volume.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![CSI mapped to Kubernetes](assets/mcdk_0212.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 2-12\. CSI mapped to Kubernetes
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Container Attached Storage
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: While the CSI is an important step forward in standardizing storage management
+    across container orchestrators, it does not provide implementation guidance on
+    how or where the storage software runs. Some CSI implementations are basically
+    thin wrappers around legacy storage management software running outside of the
+    Kubernetes cluster. While this reuse of existing storage assets certainly has
+    its benefits, many developers have expressed a desire for storage management solutions
+    that run entirely in Kubernetes alongside their applications.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*Container Attached Storage* is a design pattern that provides a more cloud
+    native approach to managing storage. The logic to manage storage operations such
+    as attaching volumes to applications is itself composed of microservices running
+    in containers. This allows the storage layer to have the same properties as other
+    applications deployed on Kubernetes and reduces the number of different management
+    interfaces administrators have to keep track of. The storage layer becomes just
+    another Kubernetes application.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'As Evan Powell noted in [“Container Attached Storage: A Primer”](https://oreil.ly/zplhD)
+    on the *CNCF Blog*:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Container Attached Storage reflects a broader trend of solutions that reinvent
+    particular categories or create new ones—by being built on Kubernetes and microservices
+    and that deliver capabilities to Kubernetes-based microservice environments. For
+    example, new projects for security, DNS, networking, network policy management,
+    messaging, tracing, logging and more have emerged in the cloud-native ecosystem.
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: Several examples of projects and products embody the CAS approach to storage.
+    Let’s examine a few of the open source options.
+  prefs: []
+  type: TYPE_NORMAL
+- en: OpenEBS
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: '*OpenEBS* is a project created by MayaData and donated to the CNCF, where it
+    became a Sandbox project in 2019\. The name is a play on Amazon’s Elastic Block
+    Store, and OpenEBS is an attempt to provide an open source equivalent to this
+    popular managed service. OpenEBS provides storage engines for managing both local
+    and NVMe PersistentVolumes.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: OpenEBS provides a great example of a CSI-compliant implementation deployed
+    onto Kubernetes, as shown in [Figure 2-13](#openebs_architecture). The control
+    plane includes the OpenEBS provisioner, which implements the CSI controller interface,
+    and the OpenEBS API server, which provides a configuration interface for clients
+    and interacts with the rest of the Kubernetes control plane.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The OpenEBS data plane consists of the Node Disk Manager (NDM) as well as dedicated
+    pods for each PersistentVolume. The NDM runs on each Kubernetes worker where storage
+    will be accessed. It implements the CSI node interface and provides the helpful
+    functionality of automatically detecting block storage devices attached to a Worker
+    Node.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![OpenEBS architecture](assets/mcdk_0213.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 2-13\. OpenEBS architecture
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: OpenEBS creates multiple Pods for each volume. A controller Pod is created as
+    the primary replica, and additional replica Pods are created on other Kubernetes
+    Worker Nodes for high availability. Each Pod includes sidecars that expose interfaces
+    for metrics collection and management, which allows the control plane to monitor
+    and manage the data plane.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Longhorn
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: '[Longhorn](https://longhorn.io) is an open source, distributed block storage
+    system for Kubernetes. It was originally developed by Rancher and became a CNCF
+    Sandbox project in 2019\. Longhorn focuses on providing an alternative to cloud-vendor
+    storage and expensive external storage arrays. Longhorn supports providing incremental
+    backups to NFS or S3-compatible storage, and live replication to a separate Kubernetes
+    cluster for disaster recovery.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Longhorn uses a similar architecture to that shown for OpenEBS; according to
+    the [documentation](https://oreil.ly/TXTjG), “Longhorn creates a dedicated storage
+    controller for each block device volume and synchronously replicates the volume
+    across multiple replicas stored on multiple nodes. The storage controller and
+    replicas are themselves orchestrated using Kubernetes.” Longhorn also provides
+    an integrated user interface to simplify operations.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Rook and Ceph
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: According to its website, “Rook is an open source cloud-native storage orchestrator,
+    providing the platform, framework, and support for a diverse set of storage solutions
+    to natively integrate with cloud-native environments.” Rook was originally created
+    as a containerized version of Ceph that could be deployed in Kubernetes. [Ceph](https://ceph.io/en)
+    is an open source distributed storage framework that provides block, file, and
+    object storage. Rook was the first storage project accepted by the CNCF and is
+    now considered a [CNCF graduated project](https://oreil.ly/xmc1i).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Rook is a truly Kubernetes native implementation in the sense that it makes
+    use of Kubernetes custom resources (CRDs) and custom controllers called operators.
+    Rook provides operators for Ceph, Cassandra, and NFS. We’ll learn more about custom
+    resources and operators in [Chapter 4](ch04.html#automating_database_deployment_on_kuber).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Some commercial solutions for Kubernetes also embody the CAS pattern. These
+    include [MayaData](https://mayadata.io) (creators of OpenEBS), [Portworx](https://portworx.com)
+    by [Pure Storage](https://oreil.ly/3rJuQ), [Robin.io](https://robin.io), and [StorageOS](https://storageos.com).
+    These companies provide both raw storage in block and file formats, as well as
+    integrations for simplified deployments of additional data infrastructure such
+    as databases and streaming solutions.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Container Object Storage Interface
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'The CSI provides support for file and block storage, but object storage APIs
+    require different semantics and don’t quite fit the CSI paradigm of mounting volumes.
+    In Fall 2020, a group of companies led by [MinIO](https://min.io) began work on
+    a new API for object storage in container orchestration platforms: the *Container
+    Object Storage Interface (COSI)*. COSI provides a Kubernetes [API](https://oreil.ly/BwcKA)
+    more suited to provisioning and accessing object storage, defining a `bucket`
+    custom resource, and including operations to create buckets and manage access
+    to buckets. The design of the COSI control plane and data plane is modeled after
+    the CSI. COSI is an emerging standard with a great start and potential for wide
+    adoption in the Kubernetes community and potentially beyond.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*As you can see, storage on Kubernetes is an area comprising a lot of innovation,
+    including multiple open source projects and commercial vendors competing to provide
+    the most usable, cost-effective, and performant solutions. The [cloud native storage
+    section](https://oreil.ly/cm4Ms) of the CNCF landscape provides a helpful listing
+    of storage providers and related tools, including the technologies referenced
+    in this chapter and many more.*  *# Summary'
+  prefs: []
+  type: TYPE_NORMAL
+- en: In this chapter, we’ve explored how persistence is managed in container systems
+    like Docker, and container orchestration systems like Kubernetes. You’ve learned
+    about the various Kubernetes resources that can be used to manage stateful workloads,
+    including Volumes, PersistentVolumes, PersistentVolumeClaims, and StorageClasses.
+    We’ve seen how the Container Storage Interface and Container Attached Storage
+    pattern point the way toward more cloud native approaches to managing storage.
+    Now you’re ready to learn how to use these building blocks and design principles
+    to manage stateful workloads including databases, streaming data, and more.*
+  prefs: []
+  type: TYPE_NORMAL

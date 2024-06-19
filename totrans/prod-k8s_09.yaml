@@ -1,0 +1,1115 @@
+- en: Chapter 8\. Admission Control
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'We have written many times in this book about the flexible, modular design
+    of Kubernetes being one of its great strengths. Sensible defaults can be replaced,
+    augmented, or built upon to provide alternative or more fully featured experiences
+    for platform consumers. Admission control is one area that particularly benefits
+    from this flexible design goal. Admission control is concerned with validating
+    and mutating requests to the Kubernetes API server *before* they are persisted
+    in etcd. This ability to intercept objects with fine granularity and control opens
+    up a number of interesting use cases. For example:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Ensuring that new objects cannot be created in a Namespace that is currently
+    being deleted (in terminating state)
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Enforcing that new Pods are not going to run as the root user
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Making sure that the total sum of memory used by all the Pods in a Namespace
+    does not exceed a user-defined limit
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Ensuring that Ingress rules cannot be overwritten accidentally
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Adding a sidecar container to every Pod (e.g., Istio)
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: First we’ll take a high-level look at the admission chain, which is the process
+    all requests to the API server go through. Then we’ll move on to cover the in-tree
+    controllers. These are built-in admission controllers that can be enabled and
+    disabled via flags to the API server and enable some of the preceding use cases.
+    Other use cases require more custom implementation and are integrated via a flexible
+    webhook model. We’ll dedicate a lot of time to diving into the webhook model as
+    it provides the most powerful and flexible options for integrating admission control
+    into a cluster. Lastly, we’ll finish by covering Gatekeeper, which is an opinionated
+    open source project that implements the webhook model and provides additional
+    user-friendly functionality.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Further into this chapter we’ll dive into some code written in the Go programming
+    language. Kubernetes and many other cloud native tools are implemented in Go due
+    to its rapid speed of development, strong concurrency primitives, and clean design.
+    It’s not necessary to know Go to understand most of this chapter (but we’d advise
+    you to look into it if you’re interested in Kubernetes tooling), and we will discuss
+    the trade-off of needing development skills when weighing custom versus off-the-shelf
+    tooling choices.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Kubernetes Admission Chain
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Before we look closer at the functionality and mechanics of individual controllers,
+    let’s first understand the flow of requests to and from the Kubernetes API server
+    as shown in [Figure 8-1](#admission_chain).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![prku 0801](assets/prku_0801.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 8-1\. Admission chain.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Initially when requests arrive at the API server they are authenticated and
+    authorized to ensure that the client is valid and able to perform the requested
+    action (e.g., create a Pod in a specific Namespace) according to any configured
+    RBAC rules.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the next stage, requests pass through mutating admission controllers represented
+    by the leftmost blue box in [Figure 8-1](#admission_chain). These can be built-in
+    controllers or calls to external (out-of-tree) mutating webhooks (we’ll discuss
+    these later in the chapter). These controllers are able to modify the resource
+    attributes before they pass onto future phases. As an example of why this might
+    be useful, let’s consider the Service Account controller (which is built in and
+    enabled by default). When a Pod is submitted, the Service Account controller inspects
+    the Pod’s spec to ensure that it has the `serviceAccount` (SA) field set. If not,
+    then it adds the field and sets it to the `default` SA for the Namespace. It also
+    adds `ImagePullSecrets` and a Volume to allow the Pod to [access its Service Account
+    token](https://oreil.ly/K6e5E).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Requests then undergo schema validation to ensure that the object being submmitted
+    is valid according to the defined schema. Here it ensures things like mandatory
+    fields are set. This ordering is important as it means we can set fields in mutating
+    admission controllers before the object is validated.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The final stage before the object is persisted to etcd is for it to pass through
+    validating admission controllers, represented by the rightmost blue box in [Figure 8-1](#admission_chain).
+    These can be built-in controllers or calls to external (out-of-tree) validating
+    webhooks (we’ll briefly cover these later in the chapter). These validating controllers
+    differ from mutating controllers in the sense that they are only able to admit
+    or reject the request, *not* modify the payload. They differ from the prior *schema
+    validation* step in that they are concerned with validating against operational
+    logic, not a standardized schema.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'An example validating admission controller is the `NamespaceLifecycle` controller.
+    It has several jobs related to Namespaces, but the one we’ll take a look at is
+    its responsibility to reject requests for new objects to be created in a Namespace
+    that is currently being deleted. We can see the behavior in this code snippet:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](assets/1.png)](#co_admission_control_CO1-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: If the operation is a Create but the Namespace is currently *not* terminating,
+    return no error. The request would pass this controller.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](assets/2.png)](#co_admission_control_CO1-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Else, return an API error stating that the Namespace is being terminated. If
+    an error is returned, the request is denied.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: For a request to pass and the object to be persisted into etcd it must be admitted
+    by *all* validating admission controllers. For it to be denied, only *one* controller
+    needs to reject it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In-Tree Admission Controllers
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: When Kubernetes was first released there was only a minimal number of interfaces
+    for users to *plug in* or extend external functionality, such as the Container
+    Network Interface (CNI). Other integrations with cloud providers, storage providers,
+    and the implementation of admission controllers were all baked into the core Kubernetes
+    code base and often described as being *in-tree*. Over time the project has sought
+    to increase the number of pluggable interfaces, and we have seen the creation
+    of the Container Storage Interface (CSI) and the movement toward external cloud
+    providers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Admission controllers are one area where many core features are still in-tree.
+    Kubernetes ships with many different admission controllers that can be enabled
+    or disabled by configuring API server flags. This model has proved problematic
+    for those users of cloud-managed Kubernetes platforms who historically did not
+    have access to configure those flags. PodSecurityPolicy (PSP) is an example of
+    a controller that enables advanced and robust security capabilities across the
+    cluster but is *not* enabled by default, therefore excluding users from benefitting
+    from it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: However, admission control is slowly following the trend of shifting code out
+    of the API server and moving toward increased pluggability. The start of this
+    process came with the addition of mutating and validating webhooks. These are
+    two flexible admission controllers that allow us to specify that the API server
+    should forward requests (that match specific criteria) and delegate admission
+    decisions to external webhooks. We will discuss these in greater detail in the
+    next section.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Another step in this process is the [announced deprecation](https://github.com/kubernetes/enhancements/issues/5)
+    of the current PodSecurityPolicy built-in controller. Although there are multiple
+    approaches to replace it, we think the implementation of PSPs will be delegated
+    to an external admission controller, as the community continues to move code out
+    of tree. In fact, we believe that more of the built-in admission controllers will
+    be eventually moved out of tree. These would be replaced either by recommendations
+    to utilize third-party tooling or standardized components that live in the Kubernetes
+    upstream organization but not the core code base, thereby allowing users a sane
+    default choice with the ability to replace if necessary.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: A subset of the built-in admission controllers is enabled by default. These
+    are intended as a set of *sane defaults* that should work well for most clusters.
+    We won’t replicate the list here, but you should take care to ensure the controllers
+    you need are enabled. Also note that the UX for this feature can be a little confusing.
+    To enable additional (nondefault) controllers you must use the `--enable-admission-plugins`
+    flag to the API server, and to *disable* default controllers you must specify
+    the `--disable-admission-plugins` list parameter.
+  prefs: []
+  type: TYPE_NORMAL
+- en: There is a lot of good information on the in-tree controllers available in the
+    official Kubernetes documentation, so we’re not going to cover much more on them
+    here. The real power of admission controllers is enabled by the two special validating
+    and mutating webhooks, which is where we’re headed next!
+  prefs: []
+  type: TYPE_NORMAL
+- en: Webhooks
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Caution
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: All admission controllers sit in the *critical path* for requests going to the
+    Kubernetes API server. They have varying scopes, so not all requests may be intercepted,
+    but you should definitely be aware of this when enabling and/or injecting them.
+    This is especially relevant when discussing webhook admission controllers for
+    two reasons. First, they have added latency as they reside out of tree and must
+    be called via HTTPS. Second, they have a broad potential scope of functionality,
+    maybe even calling out to third-party systems. Great care should be taken to make
+    admission controllers perform as efficiently as possible, returning at the earliest
+    opportunity.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Webhooks are a special type of admission controller. We can configure the Kubernetes
+    API server to send an API request to external webhook endpoints and receive a
+    decision (whether the original request should be allowed, denied, or altered/mutated)
+    response. This is incredibly powerful for a number of reasons:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The receiving web server can be written in any language that can expose an HTTPS
+    listener. We can take advantage of web frameworks, libraries, and expertise that
+    may be available to us to implement any logic we need to make admission decisions.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: They can be run in or out of cluster. We can take advantage of the discovery
+    and operator primitives that are available to us if we want to run them in-cluster,
+    or we can implement reusable functionality in a serverless function, for example.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: We are able to make callouts to systems and datastores external to Kubernetes
+    to make policy decisions. For instance, we could query a centralized security
+    system to check if specific images were approved for use in Kubernetes manifests.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The API server will call webhooks over TLS, so webhooks must present certificates
+    trusted by the Kubernetes API. This is often achieved by deploying Cert Manager
+    into the cluster and automatically generating certificates. If running out of
+    cluster, you will need to provision certificates that are trusted by the Kubernetes
+    API server, either from a public root CA or some internal CA that Kubernetes is
+    aware of.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'For the webhook model to work, there must be a defined schema for the request
+    and response messages exchanged between the API server and the webhook server.
+    In Kubernetes this is defined as an AdmissionReview object and is a JSON payload
+    that contains information about the request, including:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: API version, group, and kind
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Metadata such as the name and Namespace, and a unique ID to correlate it with
+    the response decision
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The operation attempted (e.g., CREATE)
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Information about the user initiating the request including their group membership
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Whether this is a *dry run* request (this is important as we’ll see later when
+    we discuss design considerations)
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The actual resource
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'All of this information can be used by the receiving webhook to calculate an
+    admission decision. Once decided, the server needs to respond with an AdmissionReview
+    message of its own (this time with a `response` field). It will contain:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The unique ID from the request (for correlation)
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Whether the request should be allowed to proceed
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: An optional customized error status and message
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Validating webhooks are not able to modify the requests sent to them and can
+    admit or reject only the original object. This restriction makes them fairly limited;
+    however, they are a good fit when ensuring that objects applied to the cluster
+    conform to security standards (specific user IDs, no host mounts, etc.) or contain
+    all required metadata (internal team labels, annotations, etc.).
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the case of a *mutating* webhook the response structure can also include
+    a patch set (if desired). This is a base64-encoded string containing a valid JSONPatch
+    structure encapsulating the changes that should be made to the request before
+    it is admitted to the API server. If you want a more detailed explanation of all
+    the fields and structure for AdmissionReview objects, then the [official documentation](https://oreil.ly/NWagy)
+    does a great job here.
+  prefs: []
+  type: TYPE_NORMAL
+- en: A simple example of a mutating controller might be one that adds a set of labels
+    containing team- or workload-specific metadata to Pods or Deployments. Another
+    more complex but common use of mutating controllers you may come across is the
+    injection of a sidecar proxy in many service mesh implementations. The way this
+    works is that the service mesh (Istio in this case) runs an admission controller
+    that mutates Pod specs to add a sidecar container that will participate in the
+    data plane of the mesh. This injection occurs by default but can be overridden
+    by annotations at the Namespace or Pod level to provide additional control.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This model is an effective way of enriching Deployments with additional functionality
+    but hiding that complexity to improve the end-user experience. However, as with
+    many decisions this can be a double-edged sword. One downside of mutating controllers
+    is that visibility is removed from the end user, with objects being applied to
+    the cluster that are not consistent with those that they originally created, potentially
+    causing confusion if the user is unaware that mutating controllers are in operation
+    on the cluster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Configuring Webhook Admission Controllers
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Cluster administrators can use the MutatingWebhookConfiguration and ValidatingWebhookConfiguration
+    kinds to specify the configuration of dynamic webhooks. Following is an annotated
+    example briefly describing the relevant sections. We’ll dig into some of the more
+    advanced considerations for some of these fields in the following section:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](assets/1.png)](#co_admission_control_CO2-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Matching rules. What API/kind/version/operations this webhook should be sent.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](assets/2.png)](#co_admission_control_CO2-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The operations that should trigger a call to the webhook.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![3](assets/3.png)](#co_admission_control_CO2-3)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Which kind to target.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![4](assets/4.png)](#co_admission_control_CO2-4)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Whether Namespace-scoped or cluster-scoped resources should be targeted.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![5](assets/5.png)](#co_admission_control_CO2-5)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Describes how the API server should connect to the webhook. In this case it’s
+    in cluster at *test-service.test-ns.svc*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![6](assets/6.png)](#co_admission_control_CO2-6)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: A PEM encoded CA bundle that will be used to validate the webhook’s server certificate.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![7](assets/7.png)](#co_admission_control_CO2-7)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Declare the `admissionReviewVersions` that the webhook supports.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![8](assets/8.png)](#co_admission_control_CO2-8)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Describes whether the webhook has external side effects (calls/dependencies
+    to external systems).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![9](assets/9.png)](#co_admission_control_CO2-9)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: How long to wait until triggering the `failurePolicy`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![10](assets/10.png)](#co_admission_control_CO2-10)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Whether this webhook can be re-invoked (this may happen after other webhooks
+    have been called).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![11](assets/11.png)](#co_admission_control_CO2-11)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Whether the webhook should fail *open* or *closed*. This has security implications.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'As you can see in the preceding configuration, we can be very granular about
+    selecting which requests we want to intercept with our admission webhooks. For
+    example, if we wanted to target only requests that are creating Secrets, we could
+    use the following rule:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'We can additionally combine this with Namespace or object selectors, which
+    enable further granularity. These allow us to specify any number of Namespaces
+    to target and/or objects with specific labels; for instance, in the following
+    snippet we are choosing only Secrets that are in Namespaces that have label of
+    `webhook: enabled`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: Webhook Design Considerations
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'There are several factors to be mindful of when writing and implementing admission
+    webhooks. We’ll talk more in detail about how these impact some real-world scenarios
+    in the next section, but at a high level you should be aware of the following
+    concerns:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Failure modes
+  prefs: []
+  type: TYPE_NORMAL
+- en: If a webhook is unreachable or sends an unknown response back to the API server,
+    it is treated as failing. Administrators must choose whether to fail *open* or
+    *closed* in this situation by setting the `failurePolicy` field to `Ignore` (allow
+    the request) or `Fail` (reject the request).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: For security-related (or critical functionality) webhooks, `Fail` is the safest
+    option. For noncritical hooks `Ignore` may be safe (potentially in conjunction
+    with a reconciling controller as a backup). Combine these recommendations with
+    those discussed under the performance item in this list.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Ordering
+  prefs: []
+  type: TYPE_NORMAL
+- en: The first thing to note with regards to API server request flow is that mutating
+    webhooks will all be called (potentially more than once) *before* validating webhooks
+    are called. This is important because it enables validating webhooks (which may
+    reject a request based on security requirements) always to see the *final* version
+    of a resource before it is applied.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Mutating webhooks are not guaranteed to be called in a specific order and may
+    be called multiple times if subsequent hooks modify a request. This can be modified
+    by specifying the `reinvocationPolicy`, but ideally webhooks should be designed
+    for idempotency to ensure ordering does not affect their functionality.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Performance
+  prefs: []
+  type: TYPE_NORMAL
+- en: Webhooks are called as part of the critical path of requests flowing to the
+    API server. If a webhook is critical (security-related) and fails closed (if a
+    timeout occurs, the request is denied), then it should be designed with high availability
+    in mind. As one of our [esteemed former colleagues](https://twitter.com/mauilion)
+    often comments, admission control can become *bottleneck-as-a-service* if users
+    are not careful in its application.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If a webhook is resource-intensive and/or has external dependencies, consideration
+    should be taken for how often the hook will be called, and the performance impact
+    of adding the functionality into the critical path. In these situations a controller
+    that reconciles objects once in-cluster may be preferable. When writing webhook
+    configurations you should try to scope them down as tightly as possible to ensure
+    they are not called unnecessarily or on irrelevant resources.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Side effects
+  prefs: []
+  type: TYPE_NORMAL
+- en: Some webhooks may be responsible for modifying external resources (e.g., some
+    resource in a cloud provider) based on a request to the Kubernetes API. These
+    webhooks should be aware of and respect the `dryRun` option and skip external
+    state modification when it is enabled. Webhooks are responsible for declaring
+    that they either have no side effects or respect this option by setting the `sideEffects`
+    field. More information on the valid options for this field and the behavior of
+    each option is detailed in the [official documentation](https://oreil.ly/8FGic).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Writing a Mutating Webhook
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: In this section we’ll take a look at two approaches for writing a mutating admission
+    webhook. First we’ll talk briefly about implementing one with a plain HTTPS handler
+    that is language agnostic. Then we’ll take a deeper dive into a real use case
+    while covering the controller-runtime upstream project, which is designed to help
+    teams develop Kubernetes controller components.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Both of the solutions in this section require expertise in either Go (for controller-runtime)
+    or another programming language. There are cases where this requirement is an
+    impediment to creating and implementing admission controllers. If your teams don’t
+    have the experience or need to write bespoke webhooks, the final section in this
+    chapter offers a solution for configurable admission policies that don’t require
+    programming knowledge.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Plain HTTPS Handler
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: One of the advantages of the webhook model for admission controllers is that
+    we’re able to implement them from scratch in any language. The examples we’re
+    using here are written in Go, but any language capable of TLS-enabled HTTP handling
+    and JSON parsing is acceptable.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This way of writing a webhook provides the most flexibility to integrate with
+    the current stacks in use but comes at the cost of many high-level abstractions
+    (although languages with mature Kubernetes client libraries can alleviate this).
+  prefs: []
+  type: TYPE_NORMAL
+- en: As described in the introduction to this section, admission control webhooks
+    receive and return requests from and to the API server. The schema of these messages
+    is well known, so it’s possible to receive the request and modify the object (via
+    patches) manually.
+  prefs: []
+  type: TYPE_NORMAL
+- en: For a concrete example of this approach let’s take an in-depth look at the [AWS
+    IAM Roles for Service Accounts mutating webhook](https://oreil.ly/rW3ym). This
+    webhook is used to inject a Projected Volume into Pods with a Service Account
+    token that can be used for authentication to AWS services. (See [Chapter 10](ch10.html#chapter10)
+    for more detail on the security aspect of this use case.)
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](assets/1.png)](#co_admission_control_CO3-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Define a `patchOperation` struct that will be marshaled to JSON for the response
+    back to the Kubernetes API server.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](assets/2.png)](#co_admission_control_CO3-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Construct the `Volume` struct with the relevant ServiceAccountToken content.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![3](assets/3.png)](#co_admission_control_CO3-3)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Create an instance of the `patchOperation` with the Volume content previously
+    constructed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![4](assets/4.png)](#co_admission_control_CO3-4)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: If there are currently no Volumes, create that key and add the Volume content
+    previously constructed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![5](assets/5.png)](#co_admission_control_CO3-9)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Create the JSON object containing the patch contents.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Note that the actual implementation for this admission webhook includes some
+    additional functionality that also adds to the patch set (e.g., adding environment
+    variables), but we’re going to ignore that for the purposes of this example. After
+    the patch set is complete we need to return an AdmissionResponse object that contains
+    our patch set (the `Patch` field in the following snippet):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: We can see in this example that there is a lot of manual work to be done generating
+    patch sets and constructing the appropriate response for the API server. This
+    is even present when utilizing some of the Kubernetes libraries available in the
+    Go language. However, there is a large amount of supporting code we’ve omitted
+    that’s required to handle errors, graceful shutdown, HTTP header handling, and
+    so on.
+  prefs: []
+  type: TYPE_NORMAL
+- en: While this approach affords us maximum flexibility, it requires more domain
+    knowledge and is more complex to implement and maintain. This trade-off will be
+    all-too-familiar for most readers. and care needs to be taken when evaluating
+    your specific use cases and internal expertise.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the next section we’ll see an approach that removes a lot of the boilerplate
+    and bespoke work in favor of implementing an upstream helper framework, controller-runtime.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Controller Runtime
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: In this section we’re going to dive into the upstream project [controller-runtime](https://github.com/kubernetes-sigs/controller-runtime)
+    and see what abstractions it provides on top of the native Kubernetes client libraries
+    to make writing admission controllers more streamlined. To provide more color
+    we’ll use an open source controller we built to satisfy a community requirement
+    as a way of illustrating some of the advantages of controller-runtime and cover
+    some of the techniques and pitfalls previously discussed. While we have simplified
+    the functionality and code of the controller somewhat for brevity, the core underlying
+    ideas remain.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The controller we’ll be walking through is a webhook designed to perform the
+    following actions:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Watch for Cluster API VSphereMachine objects.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Based on a configurable field, allocate an IP address in an external IPAM system
+    (in this case, Infoblox).
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Insert the allocated IP into the static IP field in the VSphereMachine.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Allow the mutated requested through to the Kubernetes API server to be actioned
+    (by the Cluster API controller) and persisted into etcd.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'This use case is a good candidate for a custom-built (using controller-runtime)
+    mutating webhook for a couple of reasons:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: We need to mutate the request to add an IP address *before* the request hits
+    the API server (otherwise it would error).
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: We’re calling out to an external system (Infoblox) and can therefore leverage
+    its Go library for interactions.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Small amount of boilerplate allows newer community and/or client developers
+    to understand and extend the functionality.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Although out-of-scope for *this* chapter, we did accompany this webhook with
+    a controller that runs in the cluster. This is important when your webhooks interact
+    with and modify or depend on *external* state (Infoblox in this case) because
+    you should be constantly reconciling that state, rather than relying on the state
+    just seen at admission time. This is something to consider when building a mutating
+    admission webhook and may increase the complexity of your solutions if the extra
+    component is required.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Controller-runtime webhooks must implement a `Handle` method whose signature
+    is:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The `admission.Request` object is an abstraction over the raw JSON that webhooks
+    receive and provides easy access to the raw applied object, the operation being
+    executed (e.g., `CREATE`), and many other useful pieces of metadata:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](assets/1.png)](#co_admission_control_CO4-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Create a new VSphereMachine object.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](assets/2.png)](#co_admission_control_CO4-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Use the built-in decoder to decode the raw object from the request into the
+    Go VSphereMachine object.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![3](assets/3.png)](#co_admission_control_CO4-3)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Use the convenience method `Errored` to construct and return an error response
+    if the decoding step returns an error.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The `vm` object from the request can be modified or validated in any way before
+    the response is returned. In the following example we are checking to see if the
+    `infoblox` annotation (denoting that our webhook should take action) is present
+    on the VSphereMachine object. This is an important step to perform early on in
+    the webhook because we can short-circuit out of any further logic if no action
+    should be taken. If the annotation is not present, we utilize the convenience
+    `Allowed` method to return the unmodified object through to the API server as
+    quickly as possible. As we discussed earlier in [“Webhook Design Considerations”](#webhook_design),
+    webhooks are on the critical path for API requests, and any actions we perform
+    inside them should be as fast as possible:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Assuming we *should* handle this request and the preceding logic does not trigger,
+    we retrieve an IP address from Infoblox (not shown) and write it directly into
+    the `vm` object:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](assets/1.png)](#co_admission_control_CO5-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Set the IP field on the `vm` object, thereby *mutating* it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](assets/2.png)](#co_admission_control_CO5-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Marshal the `vm` object to JSON ready to send back to the API server.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![3](assets/3.png)](#co_admission_control_CO5-3)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: If the marshaling fails we’ll use the convenience error method we saw earlier.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![4](assets/4.png)](#co_admission_control_CO5-4)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Another convenience method, `PatchReponseFromRaw`, sends back the response.
+    We’ll discuss this in more detail later.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: There are use cases where you may want and/or need to intercept `DELETE` requests
+    to the API server. An example of this might be to clean up some external state
+    that might be tied to resources in the cluster. While this *can* be done in a
+    webhook, you should consider whether you’re failing open or closed and the risks
+    of having misaligned state in the former case. Ideally, deletion logic should
+    be implemented with a [finalizer](https://oreil.ly/Y1iGD) and a custom controller
+    running in the cluster to guarantee cleanup.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the preceding snippet we see another of controller-runtime’s convenience
+    methods, `PatchResponseFromRaw`. This method will automatically calculate the
+    JSONPatch diffs required between the original raw object and the one we have been
+    modifying before sending the correctly serialized response. Compared to the more
+    manual approach covered in the previous section, this is a great way to remove
+    some boilerplate and make our controller code leaner.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the case of a simple validating hook, we can also leverage convenience functions
+    like `admission.Allowed()` and `admission.Denied()` that can be used after processing
+    the required logic.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Caution
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: If we’re manipulating external state as part of an admission controller we need
+    to be aware of and check for the `req.DryRun` condition. If this is set, the user
+    is only executing a dry run, no-op request and we should ensure that our controller
+    *does not* mutate external state in this case.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Controller-runtime provides a very strong foundation with which to build admission
+    controllers, allowing us to focus on the logic we want to implement with minimal
+    boilerplate. However, it does require programming expertise, and the admission
+    logic is obfuscated inside the controller code, potentially leading to more confusing
+    or unexpected results for end users.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the next section of this chapter, we’ll take a look at an emerging model
+    that centralizes policy logic and introduces a standard language to author decision
+    rules. The tools appearing in this area strive to combine the flexibility of a
+    custom controller with greater usability features for less technical operators
+    and/or end users.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Centralized Policy Systems
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'So far we’ve looked at a number of different methods for implementing and configuring
+    admission controllers. Each has its own specific trade-offs that have to be considered
+    when choosing to adopt them. In this final section, we’re going to cover an emerging
+    model of centralizing policy logic into one place and using standardized languages
+    to express the allow/deny rules. This model has two main advantages:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Programming knowledge is not required to create admission controllers, as we
+    can express rules in a specific policy language (as opposed to a general-purpose
+    programming language). This also means that changes to logic do not require rebuilding
+    and redeploying the controller each time.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Policies and rules are stored in a single location (in most cases, the cluster
+    itself) for viewing, editing, and auditing.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'This model is being built out and implemented by several open source tools
+    and usually comprises two components:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: A policy/query language that can express conditions on whether an object should
+    be admitted or rejected.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: A controller that sits in the cluster serving as an admission controller. The
+    controller’s job is to evaluate the policies/rules against objects coming into
+    the API server and make admit or reject decisions.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: For the rest of this chapter we’re going to focus on the most popular implementation
+    of this centralized policy model called [Gatekeeper](https://github.com/open-policy-agent/gatekeeper),
+    although other tools such as [Kyverno](https://kyverno.io) are also gaining traction.
+    Gatekeeper is built on a lower-level tool called Open Policy Agent (OPA). OPA
+    is an open source policy engine that applies policies written in the Rego language
+    to ingested JSON documents and returns a result.
+  prefs: []
+  type: TYPE_NORMAL
+- en: A calling application can utilize OPA by receiving the result and deciding how
+    to proceed (making a policy decision). We know from this chapter that Kubernetes
+    has a standard schema for sending requests and receiving admission decision responses,
+    so it immediately seems like this is a promising fit. However, OPA itself is platform/context
+    agnostic and is simply a policy engine that operates on JSON. We need a controller
+    that will act as an interface between the OPA engine and Kubernetes. Gatekeeper
+    is the tool that fulfills that interface role and provides some additional Kubernetes-native
+    functionality around templates and extensibility to make it easier for platform
+    operators to author and apply policies. Gatekeeper is deployed to the cluster
+    as an admission controller that allows users to write rules in Rego to make admission
+    policy decisions about Kubernetes resources being applied to the cluster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Gatekeeper enables a model whereby cluster operators can create and expose preset
+    policy templates as `ConstraintTemplate` CRDs. These templates create new CRDs
+    for the specific constraints that can accept custom input parameters (much like
+    a function). This approach is powerful because end users can then create an instance
+    of the constraint with their own values, which will be used by Gatekeeper as part
+    of admission control to the cluster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Caution
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: For some of the reasons detailed in the latter part of this section, you should
+    be aware that Gatekeeper currently fails *open* by default. This can have serious
+    security implications, and you should carefully understand the trade-offs (detailed
+    in this chapter and in much of the official documentation) involved in each approach
+    before implementing these solutions in production.
+  prefs: []
+  type: TYPE_NORMAL
+- en: One common rule we’ve implemented in the field is ensuring that teams cannot
+    overwrite existing Ingress resources. This is a requirement in most Kubernetes
+    clusters, and some Ingress controllers (e.g., Contour) provide mechanisms to protect
+    against this out of the box. However, if this is not the case with your tooling,
+    you can use Gatekeeper to enforce this rule. This scenario is one of several maintained
+    as a library of common policies in the [official Gatekeeper documentation](https://oreil.ly/LINGy).
+  prefs: []
+  type: TYPE_NORMAL
+- en: In this situation it’s necessary to make a policy decision based on data that
+    *exists externally to the object* that’s being applied to the cluster. We need
+    to query Kubernetes directly to know what Ingress resources already exist and
+    to be able to inspect metadata around them to compare against the one being applied.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s take an even more complex example that builds on these ideas, and we’ll
+    walk through the implementation of each resource. In this case, we’re going to
+    annotate a Namespace with a regex pattern and ensure any Ingress applied in that
+    Namespace conforms to the regex. We mentioned earlier that we need information
+    about the cluster to be available to Gatekeeper to make policy decisions. This
+    is achieved by defining a sync config to specify which resources in Kubernetes
+    should be synchronized to Gatekeeper’s cache (in order to provide that queryable
+    data source):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](assets/1.png)](#co_admission_control_CO6-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `sync` section specifies all the Kubernetes resources that Gatekeeper should
+    cache to assist with policy decisions.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Caution
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The cache exists to remove the need for Gatekeeper to keep querying the Kubernetes
+    API server for the required resources. However, there is potential for Gatekeeper
+    to make decisions based on *stale* data. To mitigate this, there is an audit capability
+    that intermittently runs policies against existing resources and records violations
+    in the `status` field of each constraint. These should be monitored to ensure
+    that violations that pass through (maybe as a result of a stale cache read) are
+    not left unchecked.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Once the config is applied, then an administrator can create the `ConstraintTemplate`.
+    This resource defines the main content of the policy and any input parameters
+    that are available for administrators or other operators to provide/override:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](assets/1.png)](#co_admission_control_CO7-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `properties` section defines the input parameters that will be available
+    to inject into the Rego policy for each instantiation of the rule.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](assets/2.png)](#co_admission_control_CO7-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `targets` section contains the Rego code for our policy rules. We won’t
+    dig into Rego syntax here, but notice that the input parameter is being referenced
+    via `input.parameters.<parameter_name>` (in this case, `annotation`).
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `annotation` in the custom input parameters allows the user to specify the
+    specific annotation name that Gatekeeper should pull the regex pattern from. Rego
+    won’t trigger a violation if any statement returns `False`. In this case, we’re
+    checking that the hosts *do* match the regex, so to ensure that doesn’t trigger
+    a violation we need to invert the `re_match()` with `not` to ensure that a positive
+    match doesn’t trigger a violation and instead *allows* the request through admission
+    control.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Lastly, we create an instance of the preceding policy to configure Gatekeeper
+    to apply it against specific resources as part of admission control. The `LimitNamespaceIngress`
+    object specifies that the rule should apply to Ingress objects for both `apiGroups`
+    and designates `allowed-ingress-pattern` as the annotation that should be inspected
+    for the regex pattern (this was the customizable input parameter):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Finally, the Namespace object itself is applied with the custom annotation
+    and pattern. Here we are specifying the regex `\w\.my-namespace\.com` in the `allowed-ingress-pattern`
+    field:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The setup steps are all now complete. We can begin adding Ingress objects,
+    and the rules we have configured will evaluate against them and either allow or
+    deny the persistence/creation of the Ingress:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE14]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The second Ingress will succeed as the `spec.rules.host` matches the regex
+    pattern specified in the `allowed-ingress-pattern` annotation on the `ingress-test`
+    Namespace. However, the first Ingress does not match and results in an error:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE15]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Gatekeeper has a number of strengths:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The extensible `ConstraintTemplate` model allows admins to define common policies
+    and share/reuse them as libraries across the organization.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: While it does require Rego knowledge, there is no additional programming language
+    experience required, lowering the barrier to entry for policy design and creation.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The underlying technology (OPA) is fairly mature and well-supported in the community.
+    Gatekeeper is a newer layer but has experienced strong early support.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Consolidating all policy enforcement into one admission controller allows us
+    to access a centralized audit log, which is often important in regulated environments.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The main weakness of Gatekeeper is that it is currently unable to *mutate* requests.
+    And while it does support external data sources (through a variety of methods),
+    they can be cumbersome to implement. These issues will inevitably be addressed
+    in the future, but should you have strong requirements in those areas, it’s likely
+    you will need to implement one of the custom admission control solutions described
+    in previous sections.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'One last consideration when utilizing Gatekeeper (and any general-purpose admission
+    controller) is that the scope of requests captured by these tools is likely to
+    be very broad. This is required for them to be useful because rules covering many
+    different objects can be written and the controller itself needs to contain a
+    superset of permissions to be able to capture them. However, this has several
+    ramifications:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: As mentioned previously, these tools are in the critical path. If there is a
+    bug or other issue with the controller and/or your configuration, there is the
+    potential for widespread outage.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: As a continuation of the previous point, because the controllers intercept requests
+    *to the control plane*, it’s possible that you as administrators may also be temporarily
+    *locked out* from performing remediation steps. This is pertinent especially in
+    the case of resources that are important and/or integral to the *operation* of
+    the cluster (e.g., networking resources and so on).
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The broad scope necessarily requires that a broad RBAC policy is attached to
+    the admission controller/policy server. If there is a vulnerability in this software,
+    then the potential for destructive actions is significant.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Caution
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: You should avoid configuring admission webhooks to intercept resources targeting
+    the `kube-system` Namespace. Objects in this Namespace are often integral to the
+    operation of the cluster and accidental mutations or rejections of these objects
+    could cause serious issues in the cluster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Summary
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: In this chapter we covered the many ways that we can control which objects are
+    admitted to a Kubernetes cluster. Much like many of the concerns that we cover
+    in this book, each way has its own specific trade-offs and decisions to make with
+    regards to your individual requirements. Admission control is an area where even
+    more careful examination and deeper knowledge is essential, given its heavy application
+    in the area of cluster and workload security.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Built-in controllers expose a solid set of functionality but are unlikely to
+    be all that you need. We expect more and more of these actions to move to external
+    (out-of-tree) controllers that leverage the mutating and validating webhook capabilities.
+    In the near term you may find that building your own webhooks is required (either
+    from scratch or using a framework) for more complex functionality. However, as
+    we see broad admission policy tools like Gatekeeper become more mature, we think
+    this is where a lot of value can be added.
+  prefs: []
+  type: TYPE_NORMAL

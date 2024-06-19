@@ -1,0 +1,1673 @@
+- en: Chapter 3\. Data
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'This chapter begins the second part of the journey: *indirect query optimization*.
+    As mentioned in [“Improving Query Response Time”](ch01.html#query-optimization),
+    direct query optimization solves a lot of problems, but not all. Even when you
+    surpass the knowledge and skills in [Chapter 2](ch02.html#ch02), which focuses
+    on direct query optimization, you will encounter queries that are simple and properly
+    indexed but still slow. That’s when you begin to optimize *around* the query,
+    starting with the data that it accesses. To understand why, let’s think about
+    rocks.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Imagine that your job is to move rocks, and you have three piles of different
+    sized rocks. The first pile contains pebbles: very light, no larger than your
+    thumbnail. The second pile contains cobbles: heavy but light enough to pick up,
+    no larger than your head. The third pile contains boulders: too large and heavy
+    to pick up; you need leverage or a machine to move them. Your job is to move one
+    pile from the bottom of a hill to the top (no matter why; but if it helps, imagine
+    that you’re Sisyphus). Which pile do you choose?'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'I presume that you choose the pebbles because they’re light and easy to move.
+    But there’s a critical detail that might change your decision: weight. The pile
+    of pebbles weighs two metric tons (the weight of a mid-size SUV). The pile of
+    cobbles weighs one metric ton (the weight of a very small car). And there’s only
+    one boulder that weighs half a metric ton (the weight of ten adult humans). Now
+    which pile do you choose?'
+  prefs: []
+  type: TYPE_NORMAL
+- en: On the one hand, the pebbles are still a lot easier to move. You can shovel
+    them into a wheelbarrow and roll it up the hill. There’s just a lot of them (pebbles,
+    not wheelbarrows). The boulder is a fraction of the weight, but its singular size
+    makes it unwieldy. Special equipment is need to move it up the hill, but it’s
+    a one-time task. Tough decision. [Chapter 5](ch05.html#ch05) provides an answer
+    and an explanation, but we have much more to cover before that chapter.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Data is analogous to a pile of rocks, and executing queries is analogous to
+    moving the rocks uphill. When data size is small, direct query optimization is
+    usually sufficient because the data is trivial to handle—like walking (or running)
+    up a hill with a handful of pebbles. But as data size increases, indirect query
+    optimization becomes increasingly important—like lugging a heavy cobble up a hill
+    and stopping midway to ask, “Can we do something about these rocks?”
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Chapter 1](ch01.html#ch01) provided a “proof” that data size affects performance:
+    `TRUNCATE TABLE` dramatically increases performance—but don’t use this “optimization.”
+    That’s a joke, but it also proves a point that is not frequently followed through
+    to its logical consequence: *less data is more performance*. That’s the tagline;
+    the full statement is: you can improve performance by reducing data because less
+    data requires fewer system resources (CPU, memory, storage, and so on).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: You can tell by now that this chapter is going to argue for *less* data. But
+    isn’t *more* data the reality and reason that drives engineers to learn about
+    performance optimization? Yes, and [Chapter 5](ch05.html#ch05) addresses MySQL
+    at scale, but first it’s imperative to learn to reduce and optimize data when
+    it’s relatively small and problems are tractable. The most stressful time to learn
+    is when you’ve ignored data size until it’s crushing the application.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This chapter examines data with respect to performance and argues that reducing
+    data access and storage is a technique—an indirect query optimization—for improving
+    performance. There are three major sections. The first reveals three secrets about
+    MySQL performance. The second introduces what I call the *principle of least data*
+    and its numerous implications. The third covers how to quickly *and safely* delete
+    or archive data.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Three Secrets
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: To keep a secret is to conceal a truth. The following truths are not always
+    revealed in books about MySQL performance for two reasons. First, they complicate
+    matters. It’s a lot easier to write about and explain performance without mentioning
+    the caveats and gotchas. Second, they’re counterintuitive. That doesn’t make them
+    false, but it does make them difficult to clarify. Nevertheless, the following
+    truths are important for MySQL performance, so let’s dig into the details with
+    an open mind.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Indexes May Not Help
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Ironically, you can expect the majority of slow queries to use an index lookup.
+    That’s ironic for two reasons. First, indexes are the key to performance, but
+    a query can be slow even with a good index. Second, after learning about indexes
+    and indexing (as discussed in [Chapter 2](ch02.html#ch02)), engineers become so
+    good at avoiding index scans and table scans that only index lookups remain, which
+    is a good problem but ironic nonetheless.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Performance cannot be achieved without indexes, but that doesn’t mean that indexes
+    provide infinite leverage for infinite data size. Don’t lose faith in indexes,
+    but be aware of the following cases in which indexes may not help. For each case,
+    presuming the query and its indexes cannot be optimized any further, the next
+    step is indirect query optimization.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Index scan
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'An index scan provides diminishing leverage as a table grows because the index
+    also grows: more table rows, more index values.^([1](ch03.html#idm45829112705168))
+    (By contrast, the leverage that an index lookup provides almost never diminishes
+    as long as the index fits in memory.) Even an index-only scan tends not to scale
+    because it almost certainly reads a large number of values—a safe presumption
+    because MySQL would have done an index lookup to read fewer rows if possible.
+    An index scan only delays the inevitable: as the number of rows in the table increases,
+    response time for queries that use an index scan also increases.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Finding rows
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: When I optimize a slow query that uses an index lookup, the first query metric
+    I check is rows examined (see [“Rows examined”](ch01.html#Rows-examined)). Finding
+    matching rows is the fundamental purpose of a query, but even with a good index,
+    a query can examine too many rows. *Too many* is the point at which response time
+    becomes unacceptable (and the root cause is not something else, like insufficient
+    memory or disk IOPS). This happens because several index lookup access types can
+    match many rows. Only the access types listed in [Table 3-1](#one-row-idx) match
+    *at most* one row.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 3-1\. Index lookup access types that match at most one row
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| ☐ | `system` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| ☐ | `const` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| ☐ | `eq_ref` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| ☐ | `unique_subquery` |'
+  prefs: []
+  type: TYPE_TB
+- en: If the `type` field in an EXPLAIN plan is not one of the access types listed
+    in [Table 3-1](#one-row-idx), then pay close attention to the `rows` field and
+    the query metric rows examined (see [“Rows examined”](ch01.html#Rows-examined)).
+    Examining a very large number of rows is slow regardless of the index lookup.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '[“EXPLAIN Output Format”](https://oreil.ly/8dkRy) in the MySQL manual enumerates
+    access types, which it calls *join types* because MySQL treats every query as
+    a join. In this book, for precision and consistency I use only two terms: *access
+    method* and *access type*, as written throughout [Chapter 2](ch02.html#ch02).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Very low index selectivity is a likely accomplice. Recall [“Extreme Selectivity”](ch02.html#extreme-selectivity):
+    index selectivity is cardinality divided by the number of rows in the table. MySQL
+    is unlikely to chose an index with very low selectivity because it can match too
+    many rows. Since secondary indexes require a second lookup in the primary key
+    to read rows, it can be faster to eschew an index with extremely low selectivity
+    and do a full table scan instead—presuming there’s no better index. You can detect
+    this in an EXPLAIN plan when the access method is a table scan (`type: ALL`) but
+    there are indexes that MySQL could use (`possible_keys`). To see the execution
+    plan that MySQL is not choosing, `EXPLAIN` the query with [`FORCE INDEX`](https://oreil.ly/nv1uy)
+    to use an index listed in the `possible_keys` field. Most likely, the resulting
+    execution plan will be an index scan (`type: index`) with a large number of `rows`,
+    which is why MySQL chooses a table scan instead.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Recall [“It’s a Trap! (When MySQL Chooses Another Index)”](ch02.html#its-a-trap):
+    in very rare cases, MySQL chooses the wrong index. If a query examines too many
+    rows but you’re certain there’s a better index that MySQL should use, there’s
+    a small chance that the index statistics are wrong, which causes MySQL to not
+    choose the better index. Run `ANALYZE TABLE` to update index statistics.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Remember that index selectivity is a function of cardinality and the number
+    of rows in the table. If cardinality remains constant but the number of rows increases,
+    then selectivity decreases. Consequently, an index that helped when the table
+    was small may not help when the table is huge.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Joining tables
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'When joining tables, a few rows in each table quickly obliterate performance.
+    If you recall from [“Table Join Algorithms”](ch02.html#table-join-algos), the
+    nested-loop join (NLJ) algorithm ([Example 2-22](ch02.html#NLJ)) entails that
+    the total number of rows accessed for a join is the product of rows accessed for
+    each table. In other words, multiply the values for `rows` in an EXPLAIN plan.
+    A three-table join with only one hundred rows per table can access one *million*
+    rows: 100 × 100 × 100 = 1,000,000. To avoid this, the index lookup on each table
+    joined should match only one row—one of the access types listed in [Table 3-1](#one-row-idx)
+    is best.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'MySQL can join tables in almost any order. Use this to your advantage: sometimes
+    the solution to a poor join is a better index on another table that allows MySQL
+    to change the join order.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Without an index lookup, a table join is doomed. The result is a full join,
+    as forewarned in [“Select full join”](ch01.html#Select-full-join). But even with
+    an index, a table join will struggle if the index does not match a single row.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Working set size
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: Indexes are only useful when they’re in memory. If the index values that a query
+    looks up are not in memory, then MySQL reads them from disk. (More accurately,
+    the B-tree nodes that constitute the index are stored in 16 KB pages, and MySQL
+    swaps pages between memory and disk as needed.) Reading from disk is orders of
+    magnitude slower than reading from memory, which is one problem, but the main
+    problem is that indexes compete for memory.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If memory is limited but indexes are numerous and frequently used to look up
+    a large percentage of values (relative to the table size), then index usage can
+    increase storage I/O as MySQL attempts to keep frequently used index values in
+    memory. This is possible but rare for two reasons. First, MySQL is exceptionally
+    good at keeping frequently used index values in memory. Second, frequently used
+    index values and the primary key rows to which they refer are called the *working
+    set*, and it’s usually a small percentage of the table size. For example, a database
+    can be 500 GB large, but the application frequently accesses only 1 GB of data.
+    In light of this fact, MySQL DBAs commonly allocate memory for only 10% of total
+    data size, usually rounded to standard memory values (64 GB, 128 GB, and so forth).
+    10% of 500 GB is 50 GB, so a DBA would probably err on the side of caution and
+    round up to 64 GB of memory. This works surpassingly well and is a good starting
+    point.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: As a starting point, allocate memory for 10% of total data size. The working
+    set size is usually a small percentage of total data size.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'When the working set size becomes significantly larger than available memory,
+    indexes may not help. Instead, like a fire that burns so hot that water fuels
+    it rather than extinguishing it, index usage puts pressure on storage I/O and
+    everything slows down. More memory is a quick fix, but remember [“Better, Faster
+    Hardware!”](ch02.html#better-faster-hardware): scaling up is not a sustainable
+    approach. The best solution is to address the data size and access patterns responsible
+    for the large working set. If the application truly needs to store and access
+    so much data that the working set size cannot fit within a reasonable amount of
+    memory on a single MySQL instance, then the solution is sharding, which is covered
+    in [Chapter 5](ch05.html#ch05).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Less Data Is Better
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Experienced engineers don’t celebrate a huge database, they cope with it. They
+    celebrate when data size is dramatically reduced because less data is better.
+    Better for what? Everything: performance, management, cost, and so on. It’s simply
+    a lot faster, easier, and cheaper to deal with 100 GB of data than 100 *TB* on
+    a single MySQL instance. The former is so small that a smartphone can handle it.
+    The latter requires specialized handling: optimizing performance is more challenging,
+    managing the data can be risky (what’s the backup and restore time?), and good
+    luck finding affordable hardware for 100 TB. It’s easier to keep data size reasonable
+    than to cope with a huge database.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Any amount of data that’s legitimately required is worth the time and effort
+    to optimize and manage. The problem is less about data size and more about unbridled
+    data growth. It’s not uncommon for engineers to hoard data: storing any and all
+    data. If you’re thinking, “Not me. I don’t hoard data,” then wonderful. But your
+    colleagues may not share your laudable sense of data asceticism. If not, raise
+    the issue of unbridled data growth before data size becomes a problem.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Don’t let an unwieldy database catch you by surprise. Monitor data size (see
+    [“Data Size”](ch06.html#metrics-data-size)) and, based on the current rate of
+    growth, estimate data size for the next four years. If future data size is not
+    feasible with the current hardware and application design, then address the issue
+    now before it becomes a problem.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Less QPS Is Better
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You may never find another book or engineer that says *less* QPS is better.
+    Cherish the moment.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'I realize that this secret is counterintuitive, perhaps even unpopular. To
+    see its truth and wisdom, consider three less objectionable points about QPS:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*QPS is only a number—a measurement of raw throughput*'
+  prefs: []
+  type: TYPE_NORMAL
+- en: It reveals nothing qualitative about the queries or performance in general.
+    One application can be effectively idle at 10,000 QPS, while another is overloaded
+    and having an outage at half that throughput. Even at the same QPS, there are
+    numerous qualitative differences. Executing `SELECT 1` at 1,000 QPS requires almost
+    zero system resources, but a complex query at the same QPS could be very taxing
+    on all system resources. And high QPS—no matter how high—is only as good as query
+    response time.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*QPS values have no objective meaning*'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'They’re neither good nor bad, high nor low, typical nor atypical. QPS values
+    are only meaningful relative to an application. If one application averages 2,000
+    QPS, then 100 QPS could be a precipitous drop that indicates a outage. But if
+    another application averages 300 QPS, then 100 QPS could be a normal fluctuation.
+    QPS can also be relative to external events: time of day, day of week, seasons,
+    holidays, and so on.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*It is difficult to increase QPS*'
+  prefs: []
+  type: TYPE_NORMAL
+- en: By contrast, data size can increase with relative ease from 1 GB to 100 GB—a
+    100x increase. But it’s incredibly difficult to increase QPS by 100x (except for
+    extremely low values, like 1 QPS to 100 QPS). Even a 2x increase in QPS can be
+    very challenging to achieve. Maximum QPS—relative to an application—is even more
+    challenging to increase because you cannot purchase more QPS, unlike storage and
+    memory.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In summary of these points: QPS is not qualitative, only relative to an application,
+    and difficult to increase. To put a point on it: *QPS does not help you*. It’s
+    more of a liability than an asset. Therefore, less QPS is better.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Experienced engineers celebrate when QPS is reduced (intentionally) because
+    less QPS is more capacity for growth.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Principle of Least Data
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'I define the principle of least data as: *store and access only needed data*.
+    That sounds obvious in theory, but it’s far from the norm in practice. It’s also
+    deceptively simple, which is why the next two sections have many fine details.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Common sense is not so common.
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: ''
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: Voltaire
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: Data Access
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Do not access more data than needed. *Access* refers to all the work that MySQL
+    does to execute a query: find matching rows, process matching rows, and return
+    the result set—for both reads (`SELECT`) and writes. Efficient data access is
+    especially important for writes because it’s more difficult to scale writes.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Table 3-2](#data-access-checklist) is a checklist that you can apply to a
+    query—hopefully every query—to verify its data access efficiency.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 3-2\. Efficient data access checklist
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| ☐ | Return only needed columns |'
+  prefs: []
+  type: TYPE_TB
+- en: '| ☐ | Reduce query complexity |'
+  prefs: []
+  type: TYPE_TB
+- en: '| ☐ | Limit row access |'
+  prefs: []
+  type: TYPE_TB
+- en: '| ☐ | Limit the result set |'
+  prefs: []
+  type: TYPE_TB
+- en: '| ☐ | Avoid sorting rows |'
+  prefs: []
+  type: TYPE_TB
+- en: To be fair and balanced, ignoring a single checklist item is unlikely to affect
+    performance. For example, the fifth item—avoid sorting rows—is commonly ignored
+    without affecting performance. These items are best practices. If you practice
+    them until they become habit, you will have greater success and performance with
+    MySQL than engineers who ignore them completely.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Before I explain each item in [Table 3-2](#data-access-checklist), let’s take
+    one paragraph to revisit an example in [Chapter 1](ch01.html#ch01) that I deferred
+    to this chapter.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Perhaps you recall this example from [“Query profile”](ch01.html#query-profile):
+    “As I write this, I’m looking at a query with load 5,962\. How is that possible?”
+    That query load is possible thanks to *incredibly* efficient data access and an
+    extremely busy application. The query is like `SELECT col1, col2 WHERE pk_col
+    = 5`: a primary key look up that returns only two columns from a single row. When
+    data access is that efficient, MySQL functions *almost* like an in-memory cache,
+    and it executes the query at incredible QPS and query load. *Almost*, but not
+    entirely, because every query is a transaction that entails overhead. ([Chapter 8](ch08.html#ch08)
+    focuses on transactions.) To optimize a query like this, you must change access
+    patterns because the query cannot be optimized any further and the data size cannot
+    be reduced. I revisit this query one more time in [Chapter 4](ch04.html#ch04).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Return only needed columns
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: Queries should return only needed columns.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Do not `SELECT *`. This is especially important if the table has any `BLOB`,
+    `TEXT`, or `JSON` columns.
+  prefs: []
+  type: TYPE_NORMAL
+- en: You’ve probably heard this best practice before because the database industry
+    (not just MySQL) has been harping on it for decades. I can’t recall the last time
+    I saw `SELECT *` in production, but it’s important enough to keep repeating.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Reduce query complexity
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: Queries should be as simple as possible.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*Query complexity* refers to all tables, conditions, and SQL clauses that constitute
+    a query. In this context, complexity is relative only to a query, not to engineers.
+    Query `SELECT col FROM tbl WHERE id = 1` is less complex than a query that joins
+    five tables with many `WHERE` conditions.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Complex queries are a problem for engineers, not MySQL. The more complex a query,
+    the more difficult it is to analyze and optimize. If you’re lucky, a complex query
+    works well and never shows up as a slow query (see [“Query profile”](ch01.html#query-profile)).
+    But luck is not a best practice. Keep queries simple from the start (when first
+    written), and reduce query complexity when possible.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'With respect to data access, simple queries tend to access less data because
+    they have fewer tables, conditions, and SQL clauses—less work for MySQL. But be
+    careful: the wrong simplification can yield a worse EXPLAIN plan. For example,
+    [Figure 2-21](ch02.html#idx-order-by-pk-not) in [Chapter 2](ch02.html#ch02) demonstrates
+    how removing a condition negates an `ORDER BY` optimization, resulting in a (slightly)
+    worse EXPLAIN plan. Always confirm that a simpler query has an equivalent or better
+    EXPLAIN plan—and the same result set.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Limit row access
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: Queries should access as few rows as possible.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Accessing too many rows usually comes as a surprise; it’s not something engineers
+    do intentionally. Data growth over time is a common cause: a fast query starts
+    by accessing a few rows, but years and gigabytes later, it becomes a slow query
+    because it accesses too many rows. Simple mistakes are another cause: an engineer
+    writes a query that they think will access a few rows, but they’re wrong. At the
+    intersection of data growth and simple mistakes is the most important cause: *not
+    limiting ranges and lists*. An open-ended range like `col > 75` can access countless
+    rows if MySQL does a range scan on `col`. Even if this is intended because the
+    table is presumed to be small, be aware that row access is virtually unbounded
+    as the table grows, especially if the index on `col` is nonunique.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'A `LIMIT` clause does not limit row access because `LIMIT` applies to the result
+    set *after* matching rows. The exception is the `ORDER BY`…`LIMIT` optimization:
+    if MySQL can access rows in index order, then it stops reading rows when the `LIMIT`
+    number of matching rows are found. But here’s the fun part: `EXPLAIN` does not
+    report when this optimization is used. You must infer the optimization from what
+    an EXPLAIN does and does not report. Let’s take a moment to see this optimization
+    in action and prove that it limits row access.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Using table `elem` ([Example 2-1](ch02.html#elem)) from [Chapter 2](ch02.html#ch02),
+    let’s first execute a query that does not have a `LIMIT` clause. [Example 3-1](#order-by-limit-all-rows)
+    shows that the query returns eight rows.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 3-1\. Rows for query without `LIMIT`
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Without a `LIMIT` clause, the query accesses (and returns) eight rows. Accordingly,
+    `EXPLAIN` reports `rows: 8` even with a `LIMIT 2` clause—as shown in [Example 3-2](#order-by-limit-explain)—because
+    MySQL cannot know how many rows in the range will *not* match until it executes
+    the query. Worst case: MySQL reads all rows because none match. But for this simple
+    example, we can see that the first two rows (`id` values 8 and 9) will match the
+    only table condition. If we’re right, query metrics will report two rows examined,
+    not eight. But first, let’s see how to infer the optimization from the EXPLAIN
+    plan in [Example 3-2](#order-by-limit-explain).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 3-2\. EXPLAIN plan for `ORDER BY`…`LIMIT` optimization
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You can infer that MySQL uses the `ORDER BY`…`LIMIT` optimization to access
+    only two rows (`LIMIT 2`) because:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The query uses an index (`type: range`)'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'The `ORDER BY` column is a leftmost prefix of that index (`key: a`)'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The `Extra` field does *not* report “Using filesort”
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'The proof is shown in [Example 3-3](#order-by-limit-slowlog): a snippet of
+    the slow query log after MySQL executed the query.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 3-3\. Query metrics for `ORDER BY`…`LIMIT` optimization
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: '`Rows_examined: 2` at the end of the first line in [Example 3-3](#order-by-limit-slowlog)
+    proves that MySQL used the `ORDER BY`…`LIMIT` optimization to access only two
+    rows instead of all eight rows. To learn more about this query optimization, read
+    [“LIMIT Query Optimization”](https://oreil.ly/AnurD) in the MySQL manual.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'With respect to limiting ranges and lists, there’s an important factor to verify:
+    *does the application limit the input used in a query?* Way back in [“Average,
+    Percentile, and Maximum”](ch01.html#avg-p-max-distro), I related a story: “Long
+    story short, the query was used to look up data for fraud detection, and occasionally
+    a big case would look up several thousand rows at once, which caused MySQL to
+    switch query execution plans.” In that case, the solution was simple: limit application
+    input to one thousand values per request. That case also highlights the fact that
+    a human can input a flood of values. Normally, engineers are careful to limit
+    input when the user is another computer, but their caution relaxes when the user
+    is another human because they think a human wouldn’t or couldn’t input too many
+    values. But they’re wrong: with copy-paste and a looming deadline, the average
+    human can overload any computer.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: For writes, limiting row access is critical because, generally speaking, InnoDB
+    locks every row that it accesses before it updates matching rows. Consequently,
+    InnoDB can lock more rows than you might expect. [“Row Locking”](ch08.html#row-locking)
+    goes into detail.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'For table joins, limiting row access is also critical: recall from [“Joining
+    tables”](#less-data-join) that, on join, a few rows in each table quickly obliterates
+    performance. In that section, I was pointing out that a table join is doomed without
+    an index lookup. In this section, I’m pointing out that a table join is double-doomed
+    unless it also accesses *very* few rows. Remember: an index lookup on a nonunique
+    index can access any number of duplicate rows.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Know your access patterns: for each query, what limits row access? Use `EXPLAIN`
+    to see estimated row access (the `rows` field), and monitor rows examined (see
+    [“Rows examined”](ch01.html#Rows-examined)) to avoid the surprise of accessing
+    too many rows.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Limit the result set
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: Queries should return as few rows as possible.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This is more involved than putting a `LIMIT` clause on a query, although that
+    certainly helps. It refers to the application not using the entire *result set*:
+    the rows returned by a query. This problem has three variations.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The first variation occurs when the application uses some rows, but not all.
+    This can be done intentionally or unintentionally. Unintentionally, it indicates
+    that the `WHERE` clause needs better (or more) conditions to match only needed
+    rows. You can spot this in application code that filters rows instead of using
+    `WHERE` conditions. If you spot this, talk with your team to make sure it’s not
+    intentional. Intentionally, an application might select more rows to avoid a complex
+    query by shifting row matching from MySQL to the application. This technique is
+    useful only when it reduces response time—akin to MySQL choosing a table scan
+    in rare cases.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The second variation occurs when a query has an `ORDER BY` clause and the application
+    uses an ordered subset of rows. Row order doesn’t matter for the first variation,
+    but it’s the defining characteristic of the second variation. For example, a query
+    returns 1,000 rows but the application only uses the first 20 rows in order. In
+    this case, the solution might be as simple as adding a `LIMIT 20` clause to the
+    query.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'What does the application do with the remaining 980 rows? If those rows are
+    never used, then definitely the query should not return them—add the `LIMIT 20`
+    clause. But if those rows are used, then the application is most likely paginating:
+    using 20 rows at a time (for example, showing 20 results per page). In that case,
+    it might be faster and more efficient to use `LIMIT 20 OFFSET N` to fetch pages
+    on demand—where N = 20 × (page number – 1)—only if the `ORDER BY`…`LIMIT` optimization
+    can be used (see the previous section, [“Limit row access”](#data-access-check-3)).
+    The optimization is required because, without it, MySQL must find and sort all
+    matching rows before it can apply the `OFFSET` part of the `LIMIT` clause—a lot
+    of wasted work to return only 20 rows. But even without the optimization, there’s
+    another solution: a large but reasonable `LIMIT` clause. If, for example, you
+    measure application usage and find that most requests only use the first five
+    pages, then use a `LIMIT 100` clause to fetch the first five pages and reduce
+    the result set size by 90% for most requests.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The third variation occurs when the application *only* aggregates the result
+    set. If the application aggregates the result set *and* uses the individual rows,
+    that’s acceptable. The antipattern is *only* aggregating the result set instead
+    of using a SQL aggregate function, which limits the result set. [Table 3-3](#result-set-anti-patterns)
+    lists four antipatterns and corresponding SQL solutions.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 3-3\. Four result set antipatterns in an application
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Antipattern in Application | Solution in SQL |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Adding a column value | `SUM(column)` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Counting the number of rows | `COUNT(*)` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Counting the number of values | `COUNT(column)`…`GROUP BY column` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Counting the number of distinct values | `COUNT(DISTINCT column)` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Extracting distinct values | `DISTINCT` |'
+  prefs: []
+  type: TYPE_TB
+- en: 'Adding a column value applies to other statistical functions: `AVG()`, `MAX()`,
+    `MIN()`, and so on. Let MySQL do the calculation rather than returning the rows.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Counting the number of rows is an extreme antipattern, but I’ve seen it, so
+    I’m sure there are other applications quietly wasting network bandwidth on needless
+    rows. Never use the application only to count rows; use `COUNT(*)` in the query.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: As of MySQL 8.0.14, `SELECT COUNT(*) FROM table` (without a `WHERE` clause)
+    uses multiple threads to read the primary key in parallel. This is not parallel
+    query execution; the MySQL manual calls it “parallel clustered index reads.”
+  prefs: []
+  type: TYPE_NORMAL
+- en: Counting the number of values is, perhaps, easier for programmers to express
+    in code than a SQL `GROUP BY` clause, but the latter should be used to limit the
+    result set. Using table `elem` ([Example 2-1](ch02.html#elem)) again, [Example 3-4](#count-distinct-values)
+    demonstrates how to count the number of values for a column using `COUNT(column)`…`GROUP
+    BY column`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 3-4\. Counting the number of values
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'For column `a` in table `elem`, two rows have value “Ag,” three rows have value
+    “Al,” and so forth. The SQL solution returns five rows, whereas the antipattern
+    would return all ten rows. These aren’t dramatic numbers—five versus ten rows—but
+    they make the point: a query can limit its result set by aggregating in SQL, not
+    application code.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Extracting distinct values—deduplicating column values—is trivial in the application
+    with an associative array; but MySQL can do it, too, with `DISTINCT`, which limits
+    the result set. (`DISTINCT` qualifies as an aggregate function because it’s a
+    special case of `GROUP BY`.) `DISTINCT` is especially clear and useful with a
+    single column. For example, `SELECT DISTINCT a FROM elem` returns a list of unique
+    values from column `a`. (If you’re curious, column `a` has five unique values:
+    “Ag,” “Al,” “Ar,” “At,” and “Au.”) The gotcha with `DISTINCT` is that it applies
+    to all columns. `SELECT DISTINCT a, b FROM elem` returns a list of unique *rows*
+    with values from columns `a` and `b`. To learn more, check out [“DISTINCT Optimization”](https://oreil.ly/j3IjK)
+    in the MySQL manual.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Avoid sorting rows
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: Queries should avoid sorting rows.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Sorting rows in the application instead of MySQL reduces query complexity by
+    removing the `ORDER BY` clause, and it scales better by distributing work to application
+    instances, which are much easier to scale out than MySQL.
+  prefs: []
+  type: TYPE_NORMAL
+- en: An `ORDER BY` clause without a `LIMIT` clause is a telltale sign that the `ORDER
+    BY` clause can be dropped and the application can sort the rows. (It might also
+    be the second variation of the problem discussed in the preceding section.) Look
+    for queries with an `ORDER BY` clause but no `LIMIT` clause, then determine whether
+    the application can sort the rows instead of MySQL—the answer should be yes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Data Storage
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Do not store more data than needed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Although data is valuable to you, it’s dead weight to MySQL. [Table 3-4](#data-storage-checklist)
+    is a checklist for efficient data storage.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'I highly encourage you to audit your data storage because surprises are easy
+    to discover. I mentioned one such surprise at the beginning of [Chapter 2](ch02.html#ch02):
+    the application I created that accidentally stored one *billion* rows.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 3-4\. Efficient data storage checklist
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| ☐ | Only needed rows are stored |'
+  prefs: []
+  type: TYPE_TB
+- en: '| ☐ | Every column is used |'
+  prefs: []
+  type: TYPE_TB
+- en: '| ☐ | Every column is compact and practical |'
+  prefs: []
+  type: TYPE_TB
+- en: '| ☐ | Every value is compact and practical |'
+  prefs: []
+  type: TYPE_TB
+- en: '| ☐ | Every secondary index is used and not a duplicate |'
+  prefs: []
+  type: TYPE_TB
+- en: '| ☐ | Only needed rows are kept |'
+  prefs: []
+  type: TYPE_TB
+- en: 'If you can check off all six items, then you will be very well positioned to
+    scale data to any size. But it’s not easy: some items are easier to ignore than
+    to implement, especially when the database is small. But don’t delay: the very
+    best time to find and correct storage inefficiencies is when the database is small.
+    At scale, a byte or two can make a big difference when multiplied by high throughput
+    and all 86,400 seconds in a typical Earth day. Design for scale and plan for success.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Only needed rows are stored
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: As an application changes and grows, engineers can lose track of what it stores.
+    And when data storage is not an issue, engineers have no reason to look at or
+    ask about what it stores. If it’s been a long time since you or anyone else reviewed
+    what the application is storing, or if you’re new to the team or application,
+    then take a look. I have seen, for example, forgotten services writing data (for
+    years, no less) that no one was using.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Every column is used
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: One level deeper than storing only needed rows is having only needed columns.
+    Again, as the application changes and grows, engineers can lose track of columns,
+    especially when using object-relational mapping (ORM).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Unfortunately, there’s no tool or automated way to find unused columns in MySQL.
+    MySQL tracks which databases, tables, and indexes are used, but it does not track
+    column usage. Nothing is more furtive than an unused column. The only solution
+    is a manual review: compare columns used by application queries to columns that
+    exist in the tables.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Every column is compact and practical
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: Two levels deeper than storing only needed rows is having every column be compact
+    and practical. *Compact* means using the smallest data type to store values. *Practical*
+    means not using a data type so small that it’s onerous or error-prone for you
+    or the application. For example, using an unsigned `INT` as a bit field is compact
+    (nothing smaller than a bit) but usually not practical.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Familiarize yourself with all the [MySQL data types](https://oreil.ly/x7fTF).
+  prefs: []
+  type: TYPE_NORMAL
+- en: The classic antipattern is data type `VARCHAR(255)`. This specific data type
+    and size are a common but inefficient default for many programs and engineers,
+    who likely copied the practice from another program or engineer. You will see
+    it used to store anything and everything, which is why it’s inefficient.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'For example, let’s reuse table `elem` ([Example 2-1](ch02.html#elem)). Atomic
+    symbols are one or two characters. Column definition `atomic_symbol VARCHAR(255)`
+    is technically compact—a `VARCHAR` is variable length, so it would use only one
+    or two characters—but it allows *garbage in, garbage out*: invalid values like
+    “Carbon” instead of “C,” which could have unknown consequences for the application.
+    A better column definition is `atomic_symbol CHAR(2)`, which is compact and practical.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Is column definition `atomic_symbol ENUM(`…`)` even better for table `elem`?
+    `ENUM` is more compact than `CHAR(2)`, but is it more practical with over one
+    hundred atomic symbols? That’s a trade-off you could decide; either choice is
+    patently better than `VAR⁠CHAR(255)`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '[`ENUM`](https://oreil.ly/WMXfA) is one of the great unsung heroes of efficient
+    data storage.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Beware the column character set. If not explicitly defined, it defaults to
+    the table character set which, if also not explicitly defined, defaults to the
+    server character set. As of MySQL 8.0, the default server character set is `utf8mb4`.
+    For MySQL 5.7 and older, the default server character set is `latin1`. Depending
+    on the character set, a single character like *é* might be stored as multiple
+    bytes. For example, using the `latin1` character set, MySQL stores *é* as a single
+    byte: 0xE9. But using the `utf8mb4` character set, MySQL stores *é* as two bytes:
+    0xC3A9. (Emoji use four bytes per character.) Character sets are a special and
+    erudite world beyond the scope of most books. For now, all you need to know is
+    this: *one character* can require *several bytes* of storage, depending on the
+    character and character set. Bytes add up quickly in large tables.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Be very conservative with `BLOB`, `TEXT`, and `JSON` data types. Do not use
+    them as a dumping ground, a catch-all, or generic buckets. For example, do not
+    store images in a `BLOB`—you can, it works, but don’t. There are far better solutions,
+    like [Amazon S3](https://aws.amazon.com/s3).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Compact and practical extend all the way down to the bit level. Another surprisingly
+    common yet easily avoidable column storage inefficiency is wasting the high-order
+    bit of [integer data types](https://oreil.ly/6CdwC). For example, using `INT`
+    instead of `INT UNSIGNED`: the maximum value is roughly two billion versus four
+    billion, respectively. If the value cannot be negative, then use an unsigned data
+    type.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: As of MySQL 8.0.17, `UNSIGNED` is deprecated for data types `FLOAT`, `DOUBLE`,
+    and `DECIMAL`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the world of software engineering, details like these might be considered
+    micro-optimizations or premature optimization, which are frowned upon, but in
+    the world of schema design and database performance, they’re best practices.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Every value is compact and practical
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'Three levels deeper than storing only needed rows is having every value be
+    compact and practical. *Practical* has the same meaning as defined in the previous
+    section, but *compact* means the smallest representation of the value. Compact
+    values are highly dependent on how the application uses them. For example, consider
+    a string with one leading and one trailing space: `“ and ”`. [Table 3-5](#compact-string)
+    lists six ways that an application could compact this string.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 3-5\. Six ways to compact the string `“ and ”`
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Compact value | Possible use |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `“and”` | Strip all whitespace. This is common for strings. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `“ and”` | Strip trailing whitespace. In many syntaxes (like YAML and Markdown),
+    leading whitespace is syntactically significant. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `“and ”` | Strip leading whitespace. Perhaps less common but still possible.
+    Sometimes used by programs to join space-separated arguments (like command-line
+    arguments). |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `“”` | Delete the value (empty string). Maybe the value is optional, like
+    *AS* in `FROM table AS table_alias`, which can be written as `FROM table table_alias`.
+    |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `“&”` | Replace string with equivalent symbol. In written language, the ampersand
+    character is semantically equivalent to the word “and”. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `NULL` | No value. Maybe the value is completely superfluous and can be removed,
+    resulting in no value (not even an empty string, which is still technically a
+    value). |'
+  prefs: []
+  type: TYPE_TB
+- en: 'The transformations in [Table 3-5](#compact-string) represent three ways to
+    compact a value: minimize, encode, and deduplicate.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Minimize
+  prefs:
+  - PREF_H4
+  type: TYPE_NORMAL
+- en: 'To minimize a value, remove superfluous and extraneous data: white space, comments,
+    headers, and so on. Let’s consider a more difficult yet familiar value in [Example 3-5](#sample-sql).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 3-5\. Formatted SQL statement (not minimized)
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: If an application stores only the the functional parts of the SQL statement
+    in [Example 3-5](#sample-sql), then it can minimize the value by collapsing white
+    space between keywords (not within values) and removing the last two comments
+    (not the first). [Example 3-6](#sample-sql-mini) is the minimized (compact) value.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 3-6\. Minimized SQL statement
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Examples [3-5](#sample-sql) and [3-6](#sample-sql-mini) are functionally equivalent
+    (same EXPLAIN plan), but the data size of the minimized value is almost *50% smaller*
+    (48.9%): 137 bytes to 70 bytes, respectively. For long-term data growth, a 50%
+    reduction—or even just 25%—is significant and impactful.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Minimizing a SQL statement illustrates an important point: minimizing a value
+    is not always trivial. A SQL statement isn’t a meaningless string: it’s a syntax
+    that requires syntactical awareness to minimize correctly. The first comment cannot
+    be removed because it’s functional. (See [“Comments”](https://oreil.ly/3l8zy)
+    in the MySQL manual.) Likewise, the white space in the quoted value `'' bar ''`
+    is functional: `'' bar ''` is not equal to `''bar''`. And you might have noticed
+    a tiny detail: the trailing semicolon was removed because it’s not functional
+    in this context, but it is functional in other contexts.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: When considering how to minimize a value, begin with its data format. The syntax
+    and semantics of the data format dictate which data is superfluous and extraneous.
+    In YAML, for example, comments `# like this` are pure comments (unlike certain
+    SQL comments) and can be removed if the application doesn’t need them. Even if
+    your data format is custom-built, it must have some syntax and semantics, else
+    the application could not programmatically read and write it. It’s necessary to
+    know the data format to minimize a value correctly.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The most minimal value is no value at all: `NULL`. I know that dealing with
+    `NULL` can be a challenge, but there’s an elegant solution that I highly encourage
+    you to use: [`COALESCE()`](https://oreil.ly/muYZW). For example, if column `middle_name`
+    is nullable (not all people have middle names), then use `COALESCE(middle_name,
+    '''')` to return the value if set, else return an empty string. This way, you
+    get the benefits of `NULL` storage—which requires only one bit—without the hassle
+    of handling null strings (or pointers) in the application. Use `NULL` instead
+    of empty strings, zero values, and magical values when practical. It requires
+    a little extra work, but it’s the best practice.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '`NULL` and `NULL` are unique; that is, two null values are unique. Avoid unique
+    indexes on nullable columns, or be certain that the application properly handles
+    duplicate rows with `NULL` values.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If you really want to avoid using `NULL`, the previous warning is your technical
+    reason. These two sets of values are *unique*: `(1, NULL)` and `(1, NULL)`. That
+    is not a typo. To humans, those values look identical, but to MySQL they are unique
+    because the comparison of `NULL` to `NULL` is undefined. Check out [“Working with
+    NULL Values”](https://oreil.ly/oyTPZ) in the MySQL manual. It begins with a humble
+    admission: “The `NULL` value can be surprising until you get used to it.”'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Encode
+  prefs:
+  - PREF_H4
+  type: TYPE_NORMAL
+- en: To encode a value, convert it from human-readable to machine-encoded. Data can
+    be encoded and stored one way for computers, and decoded and displayed another
+    way for humans. The most efficient way to store data on a computer is to encode
+    it for the computer.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Store for the machine, display for the human.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The quintessential example and antipattern is storing an IP address as a string.
+    For example, storing `127.0.0.1` as a string in a `CHAR(15)` column. IP addresses
+    are four-byte unsigned integers—that’s the true machine encoding. (If you’re curious,
+    `127.0.0.1` is decimal value 2130706433.) To encode and store IP addresses, use
+    data type `INT UNSIGNED` and functions `INET_ATON()` and `INET_NTOA()` to convert
+    to and from a string, respectively. If encoding IP addresses is impractical, then
+    data type `CHAR(15)` is an acceptable alternative.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Another similar example and antipattern is storing a UUID as a string. A UUID
+    is a multibyte integer represented as a string. Since UUID byte lengths vary,
+    you need to use data type `BINARY(N)`, where `N` is the byte length, and functions
+    `HEX()` and `UNHEX()` to convert the value. Or, if you’re using MySQL 8.0 (or
+    newer) and RFC 4122 UUIDs (which MySQL `UUID()` generates), you can use functions
+    `UUID_TO_BIN()` and `BIN_TO_UUID()`. If encoding UUIDs is impractical, at least
+    store the string representation using data type `CHAR(N)`, where `N` is the string
+    length in characters.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'There is a more compact, computer-encoded method to store data: compression.
+    But this is an extreme method that creeps into the gray zone of space-speed trade-offs,
+    which are beyond the scope of this book. I have not seen a case where compression
+    was required for performance or scale. A rigorous application of the efficient
+    data storage checklist ([Table 3-4](#data-storage-checklist)) scales data to sizes
+    so large that other problems become blockers: backup and restore time, online
+    schema changes, and so forth. If you think you need compression to scale performance,
+    consult with an expert to verify.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'While we’re on the topic of encoding, there’s an important best practice that
+    I’ll shoehorn into this section: store and access dates and times only as UTC.
+    Convert dates and times to local time (or whatever time zone is appropriate) only
+    on display (or on print). Also be aware that the MySQL `TIMESTAMP` data type ends
+    on January 19, 2038. If you received this book as a holiday gift in December 2037
+    and your databases have `TIMESTAMP` columns, you might want to go back to work
+    a little earlier.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Deduplicate
+  prefs:
+  - PREF_H4
+  type: TYPE_NORMAL
+- en: 'To deduplicate a value, normalize the column into another table with a one-to-one
+    relationship. This method is entirely application-specific, so let’s consider
+    a concrete example. Imagine an overly simple catalogue of books stored in a table
+    with only two columns: `title` and `genre`. (Let’s focus on the data and ignore
+    the details like data types and indexes.) [Example 3-7](#books-dupe) shows a table
+    with five books and three unique genres.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 3-7\. Book catalogue with duplicate `genre` values
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Column `genre` has duplicate values: three instances of value `computers`.
+    To deduplicate, normalize the column into another table with a one-to-one-relationship.
+    [Example 3-8](#books-dedupe) shows the new table at top and the modified original
+    table at bottom. The two tables have a one-to-one relationship on column `genre_id`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 3-8\. Normalized book catalogue
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The original table (at bottom) still has duplicate values for column `genre_id`,
+    but the reduction in data size at scale is huge. For example, it takes 9 bytes
+    to store the string “computers” but only 2 bytes to store the integer 1 as data
+    type `SMALLINT UNSIGNED`, which allows for 65,536 unique genres (probably enough).
+    That’s a 77.7% reduction in data size: 9 bytes to 2 bytes.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Deduplicating values in this way is accomplished by *database normalization*:
+    separating data into tables based on logical relationships (one to one, one to
+    many, and so forth). However, deduplicating values data is *not* the goal or purpose
+    of database normalization.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Database normalization is beyond the scope of this book, so I won’t explain
+    it further. There are many books on the subject, so you won’t have any trouble
+    finding a great one to learn about database normalization.
+  prefs: []
+  type: TYPE_NORMAL
+- en: From this example, it looks like database normalization *causes* deduplication
+    of values, but that’s not strictly true. The single table in [Example 3-7](#books-dupe)
+    is technically valid first, second, and third normal forms (presuming there’s
+    a primary key)—fully normalized, just poorly designed. It’s more accurate to say
+    that deduplication of values is a common (and desired) side effect of database
+    normalization. And since you should normalize your databases in any case, you’re
+    likely to avoid duplicate values.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'There’s an interesting flip side: *denormalization*. Denormalization is the
+    opposite of normalization: combining related data into one table. The single table
+    in [Example 3-7](#books-dupe) could be a denormalized table, if that was the intention
+    behind its design. Denormalization is a technique to increase performance by eliminating
+    table joins and attendant complexities. But don’t rush to denormalize your schemas
+    because there are details and trade-offs to consider that are beyond the scope
+    of this book. In fact, denormalization is the opposite of *less data* because
+    it intentionally duplicates data to trade space for speed.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The safe bet and best practice is database normalization and less data. Incredible
+    scale and performance are possible with both.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Every secondary index is used and not a duplicate
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'Second to last on the efficient data storage checklist ([Table 3-4](#data-storage-checklist)):
+    every secondary index is used and not a duplicate. Avoiding unused indexes and
+    duplicate indexes is always a great idea, but it’s especially important for data
+    size because indexes are copies of data. Granted, secondary indexes are much smaller
+    than the full table (the primary key) because they only contain index column values
+    and corresponding primary key column values, but these add up as the table grows.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Dropping unused and duplicate secondary indexes is an easy way to reduce data
+    size, but be careful. As mentioned in [“Excessive, Duplicate, and Unused”](ch02.html#idx-too-many),
+    finding unused indexes is tricky because an index might not be used frequently,
+    so be sure to check index usage over a sufficiently long period. By contrast,
+    duplicate indexes are easier to find: use [pt-duplicate-key-checker](https://oreil.ly/qSStI).
+    Again: be careful when dropping indexes.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Dropping an index only recovers a data size equal to the index size. There are
+    three methods to see index sizes. Let’s use the [`employees` sample database](https://oreil.ly/lwWxR)
+    because it has a few megabytes of index data. The first and preferred method to
+    see index sizes is querying table `INFORMATION_SCHEMA.TABLES`, as shown in [Example 3-9](#show-index-size-1).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 3-9\. Index sizes of employees sample database (`INFORMATION_SCHEMA`)
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: '`TABLE_NAME` is the table name in the `employees` sample database—only six
+    tables. (The database has some views that are filtered out by condition `TABLE_TYPE
+    = ''BASE TABLE''`.) `DATA_LENGTH` is the size of the primary key (in bytes). `INDEX_LENGTH`
+    is the size of all secondary indexes (in bytes). The last four tables have no
+    secondary indexes, only a primary key.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The second and historical (but still widely used) method to see index sizes
+    is `SHOW TABLES STATUS`. You can add a `LIKE` clause to show only one table, as
+    demonstrated in [Example 3-10](#show-index-size-2).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 3-10\. Index sizes of table `employees.dept_emp` (`SHOW TABLE STATUS`)
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: The fields `Data_length` and `Index_length` in the `SHOW TABLE STATUS` output
+    are the same columns and values from `INFORMATION_SCHEMA.TABLES`. It’s better
+    to query `INFORMATION_SCHEMA.TABLES` because you can use functions in the `SELECT`
+    clause like `ROUND(DATA_LENGTH / 1024 / 1024)` to convert and round the values
+    from bytes to other units.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The third method to see index sizes is currently the only method to see the
+    size of each index: query table `mysql.innodb_index_stats`, as shown in [Example 3-11](#show-index-size-3)
+    for table `employees.dept_emp`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 3-11\. Size of each index on table `employees.dept_emp` (`mysql.innodb_index_stats`)
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Table `employees.dept_emp` has two indexes: a primary key and a secondary index
+    named `dept_no`. Column `size` contains the size of each index in bytes, which
+    is actually the number of index pages multiplied by the InnoDB page size (16 KB
+    by default).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `employees` sample database is not a spectacular display of secondary index
+    size, but real-world databases can be overflowing with secondary indexes that
+    account for a significant amount of total data size. Regularly check index usage
+    and index sizes, and reduce total data size by carefully dropping unused and duplicate
+    indexes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Only needed rows are kept
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'Last item on the efficient data storage checklist ([Table 3-4](#data-storage-checklist)):
+    only needed rows are kept. This item brings us full circle, closing the loop with
+    the first item: [“Only needed rows are stored”](#data-checklist-1). A row might
+    be needed when stored, but that need changes over time. Delete (or archive) rows
+    that are no longer needed. That sounds obvious, but it’s common to find tables
+    with forgotten or abandoned data. I’ve lost count of how many times I’ve seen
+    teams drop entire tables that were forgotten.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Deleting (or archiving) data is a lot easier said than done, and the next section
+    takes on the challenge.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Delete or Archive Data
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'I hope this chapter instills in you a desire to delete or archive data. Too
+    much data has woken me from too many pleasant dreams: it’s as if MySQL has a mind
+    of its own and waits until 3 a.m. to fill up the disk. I once had an application
+    page me in the middle of the night in three different time zones (my time zone
+    changed due to meetings in different parts of the world). But enough about me;
+    let’s talk about how to delete or archive data without negatively impacting the
+    application.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'For brevity, I refer only to deleting data, not deleting *or archiving* data,
+    because the challenge lies almost entirely in the former: deleting data. Archiving
+    data requires copying the data first, then deleting it. Copying data should use
+    nonlocking `SELECT` statements to avoid impacting the application, then write
+    the copied rows to another table or data store that the application doesn’t access.
+    Even with nonlocking `SELECT` statements, you must rate-limit the copy process
+    to avoid increasing QPS beyond what MySQL and the application can handle. (Recall
+    from [“Less QPS Is Better”](#less-qps-is-better) that QPS is relative to the application
+    and difficult to increase.)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tools
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'You will have to write your own tools to delete or archive data. Sorry to lead
+    with bad news, but it’s the truth. The good news is that deleting and archiving
+    data is not difficult—it’s probably trivial compared to your application. The
+    *critically important* part is throttling the loop that executes SQL statements.
+    Never do this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: The `LIMIT 1000000` clause is probably too large, and the `for` loop has no
+    delay between statements. That pseudocode is likely to cause an application outage.
+    *Batch size* is the key to a safe and effective data archiving tool.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Batch Size
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'First, a shortcut that might allow you to skip reading this section until needed:
+    it’s safe to *manually* delete 1,000 rows or less in a single `DELETE` statement
+    if the rows are small (no `BLOB`, `TEXT`, or `JSON` columns) and MySQL is not
+    heavily loaded. *Manually* means that you execute each `DELETE` statement in series
+    (one after the other), not in parallel. Do not write a program to execute the
+    `DELETE` statements. Most humans are too slow for MySQL to notice, so no matter
+    how fast you are, you cannot manually execute `DELETE`…`LIMIT 1000` statements
+    fast enough to overload MySQL. Use this shortcut judiciously, and have another
+    engineer review any manual deletes.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The method described in this section focuses on `DELETE` but applies in general
+    to `INSERT` and `UPDATE`. For `INSERT`, batch size is controlled by the number
+    of rows inserted, not a `LIMIT` clause.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The rate at which you can quickly *and safely* delete rows is determined by
+    the batch size that MySQL and the application can sustain without impacting query
+    response time or replication lag. ([Chapter 7](ch07.html#ch07) covers replication
+    lag.) *Batch size* is the number of rows deleted per `DELETE` statement, which
+    is controlled by a `LIMIT` clause and throttled by a simple delay, if necessary.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Batch size is calibrated to an execution time; 500 milliseconds is a good starting
+    point. This means that each `DELETE` statement should take no longer than 500
+    ms to execute. This is critically important for two reasons:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Replication lag
+  prefs: []
+  type: TYPE_NORMAL
+- en: Execution time on a source MySQL instance creates replication lag on replica
+    MySQL instances. If a `DELETE` statement takes 500 ms to execute on the source,
+    then it also takes 500 ms to execute on a replica, which creates 500 ms of replication
+    lag. You cannot avoid replication lag, but you must minimize it because replication
+    lag is data loss. (For now, I gloss over many details about replication that I
+    clarify in [Chapter 7](ch07.html#ch07).)
+  prefs: []
+  type: TYPE_NORMAL
+- en: Throttling
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In some cases, it’s safe to execute `DELETE` statements with no delay—no throttling—because
+    the calibrated batch size limits query execution time, which limits QPS. A query
+    that takes 500 ms to execute can only execute at 2 QPS in series. But these are
+    no ordinary queries: they’re purpose-built to access and write (delete) as many
+    rows as possible. Without throttling, bulk writes can disrupt other queries and
+    impact the application.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Throttling is paramount when deleting data: always begin with a delay between
+    `DELETE` statements, and monitor replication lag.^([2](ch03.html#idm45829112148736))'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Always build a throttle into bulk operations.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To calibrate the batch size to a 500 ms execution time (or whatever execution
+    time you chose), start with batch size 1,000 (`LIMIT 1000`) and a 200 ms delay
+    between `DELETE` statements: 200 ms is a long delay, but you decrease it after
+    calibrating the batch size. Let that run for at least 10 minutes while monitoring
+    replication lag and MySQL stability—don’t let MySQL lag or destabilize. (Replication
+    lag and MySQL stability are covered in Chapters [7](ch07.html#ch07) and [6](ch06.html#ch06),
+    respectively.) Use query reporting (see [“Reporting”](ch01.html#query-reporting))
+    to inspect the maximum execution time of the `DELETE` statement, or measure it
+    directly in your data archiving tool. If the maximum execution time is well below
+    the target—500 ms—then double the batch size and re-run for another 10 minutes.
+    Keep doubling the batch size—or making smaller adjustments—until the maximum execution
+    time is consistently on target—preferably just a little below target. When you’re
+    done, record the calibrated batch size and execution time because deleting old
+    data should be a recurring event.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To set the throttle using the calibrated batch size, repeat the process by
+    slowly reducing the delay on each 10-minute rerun. Depending on MySQL and the
+    application, you might reach zero (no throttling). Stop at the first sign of replication
+    lag or MySQL destabilizing, then increase the delay to the previous value that
+    didn’t cause either problem. When you’re done, record the delay for the same reason
+    as before: deleting old data should be a recurring event.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'With the batch size calibrated and the throttle set, you can finally calculate
+    the rate: how many rows per second you can delete without impacting query response
+    time: `batch size * DELETE QPS`. (Use query reporting to inspect the QPS of the
+    `DELETE` statement, or measure it directly in your data archiving tool.) Expect
+    the rate to change throughout the day. If the application is extremely busy during
+    business hours, the only sustainable rate might be zero. If you’re an ambitious
+    go-getter who’s on a rocket ride to the top of your career, your industry, and
+    the world, then wake up in the middle of the night and try a higher rate when
+    the database is quiet: larger batch size, lower delay, or both. Just remember
+    to reset the batch size and delay before the sun rises and database load increases.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: MySQL backups almost always run in the middle of the night. Even if the application
+    is quiet in the dead of night, the database might be busy.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Row Lock Contention
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'For write-heavy workloads, bulk operations can cause elevated *row lock contention*:
+    queries waiting to acquire row locks on the same (or nearby) rows. This problem
+    mainly affects `INSERT` and `UPDATE` statements, but `DELETE` statements could
+    be affected, too, if deleted rows are interspersed with kept rows. The problem
+    is that the batch size is too large even though it executes within the calibrated
+    time. For example, MySQL might be able to delete 100,000 rows in 500 ms, but if
+    the locks for those rows overlap with rows that the application is updating, then
+    it causes row lock contention.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The solution is to reduce the batch size by calibrating for a much smaller
+    execution time—100 ms, for example. In extreme cases, you might need to increase
+    the delay, too: small batch size, long delay. This reduces row lock contention,
+    which is good for the application, but it makes data archiving slower. There’s
+    no magical solution for this extreme case; it’s best to avoid with *less data*
+    and *fewer QPS*.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Space and Time
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Deleting data does not free disk space. Row deletes are logical, not physical,
+    which is a common performance optimization in many databases. When you delete
+    500 GB of data, you don’t get 500 GB of disk space, you get 500 GB of free pages.
+    Internal details are more complex and beyond the scope of this book, but the general
+    idea is correct: deleting data yields free pages, not free disk space.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Free pages do not affect performance, and InnoDB reuses free pages when new
+    rows are inserted. If deleted rows will soon be replaced by new rows, and disk
+    space isn’t limited, then free pages and unclaimed disk space are not a concern.
+    But please be mindful of your colleagues: if your company runs its own hardware
+    and MySQL for your application shares disk space with MySQL for other applications,
+    then don’t waste disk space that can be used by other applications. In the cloud,
+    storage costs money, so don’t waste money: reclaim the disk space.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The best way to reclaim disk space from InnoDB is to rebuild the table by executing
+    a no-op `ALTER TABLE`…`ENGINE=INNODB` statement. This is a solved problem with
+    three great solutions:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[pt-online-schema-change](https://oreil.ly/8EJph)'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[`gh-ost`](https://oreil.ly/IsV83)'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[`ALTER TABLE`…`ENGINE=INNODB`](https://oreil.ly/JhWdg)'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Each solution works differently, but they have one thing in common: all of
+    them can rebuild huge InnoDB tables *online*: in production without impacting
+    the application. Read the documentation for each to decide which one works best
+    for you.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: To rebuild a table with `ALTER TABLE`…`ENGINE=INNODB`, replace … with the table
+    name. Do not make any other changes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Deleting large amounts of data takes time. You might read or hear about how
+    fast MySQL can write data, but that’s usually for benchmarks (see [“MySQL Tuning”](ch02.html#mysql-tuning)).
+    In the glamorous world of laboratory research, sure: MySQL will consume every
+    clock cycle and disk IOP you can give it. But in the quotidian world that you
+    and I slog through, data must be deleted with significant restraint to avoid impacting
+    the application. To put it bluntly: it’s going to take a lot longer than you think.
+    The good news is: if done correctly—as detailed in [“Batch Size”](#batch-size)—then
+    time is on your side. A well-calibrated, sustainable bulk operation can run for
+    days and weeks. This includes the solution that you use to reclaim disk space
+    from InnoDB because rebuilding the table is just another type of bulk operation.
+    It takes time to delete rows, and it takes additional time to reclaim the disk
+    space.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Binary Log Paradox
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Deleting data creates data. This paradox happens because data changes are written
+    to the binary logs. Binary logging can be disabled, but it never is in production
+    because the binary logs are required for replication, and no sane production system
+    runs without replicas.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If the table contains large `BLOB`, `TEXT`, or `JSON` columns, then binary
+    log size could increase dramatically because the MySQL system variable [`binlog_row_image`](https://oreil.ly/0bNcG)
+    defaults to `full`. That variable determines how row images are written to the
+    binary logs; it has three settings:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`full`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Write the value of every column (the full row).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`minimal`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Write the value of columns that changed and columns required to identify the
+    row.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`noblob`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Write the value of every column *except* `BLOB` and `TEXT` columns that aren’t
+    required.
+  prefs: []
+  type: TYPE_NORMAL
+- en: It’s both safe and recommended to use `minimal` (or `noblob`) if there are no
+    external services that rely on full row images in the binary logs—for example,
+    a data pipeline service that stream changes to a data lake or big data store.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you use [pt-online-schema-change](https://oreil.ly/2EB4l) or [`gh-ost`](https://oreil.ly/nUuvv)
+    to rebuild the table, these tools copy the table (safely and automatically), and
+    that copy process writes even more data changes to the binary logs. However, `ALTER
+    TABLE`…`ENGINE=INNODB` defaults to an in-place alter—no table copy.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: When deleting a lot of data, disk usage will *increase* because of binary logging
+    and the fact that deleting data does not free disk space.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Paradoxically, you must ensure that the server has enough free disk space to
+    delete data and rebuild the table.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Summary
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'This chapter examined data with respect to performance and argued that reducing
+    data access and storage is a technique—an indirect query optimization—for improving
+    performance. The primary takeaway points are:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Less data yields better performance.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Less QPS is better because it’s a liability, not an asset.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Indexes are necessary for maximum MySQL performance, but there are cases when
+    indexes may not help.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'The principle of least data means: store and access only needed data.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Ensure that queries access as few rows as possible.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Do not store more data than needed: data is valuable to you, but it’s dead
+    weight to MySQL.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Deleting or archiving data is important and improves performance.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The next chapter centers on access patterns that determine how you can change
+    the application to use MySQL efficiently.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Practice: Audit Query Data Access'
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'The goal of this practice is to audit queries for inefficient data access.
+    This is the efficient data access checklist ([Table 3-2](#data-access-checklist)):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: ☐ Return only needed columns
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: ☐ Reduce query complexity
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: ☐ Limit row access
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: ☐ Limit the result set
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: ☐ Avoid sorting rows
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Apply the checklist to the top 10 slow queries. (To get slow queries, refer
+    back to [“Query profile”](ch01.html#query-profile) and [“Practice: Identify Slow
+    Queries”](ch01.html#ch01-ai).) An easy fix is any `SELECT *`: explicitly select
+    only the columns needed. Also pay close attention to any query with an `ORDER
+    BY` clause: is it using an index? Does it have a `LIMIT`? Can the application
+    sort rows instead?'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Unlike [“Practice: Identify Slow Queries”](ch01.html#ch01-ai) and [“Practice:
+    Find Duplicate Indexes”](ch02.html#ch02-ai), there is no tool to audit query data
+    access. But the checklist is only five items, so it doesn’t take long to audit
+    queries manually. Carefully and methodically auditing queries for optimal data
+    access is expert-level MySQL performance practice.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([1](ch03.html#idm45829112705168-marker)) MySQL does not support sparse or
+    partial indexes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '^([2](ch03.html#idm45829112148736-marker)) Check out [`freno`](https://oreil.ly/vSmUb)
+    by GitHub Engineering: an open source throttle for MySQL.'
+  prefs: []
+  type: TYPE_NORMAL

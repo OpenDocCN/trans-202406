@@ -1,0 +1,1276 @@
+- en: Chapter 13\. High Availability
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: In the IT context, the term *high availability* defines a state of continuous
+    operation for a specified length of time. The goal is not eliminating the risk
+    of failure—that would be impossible. Rather, we are trying to guarantee that in
+    a failure situation, the system remains available so that operation can continue.
+    We often measure availability against a 100% operational or never-fails standard.
+    A common standard of availability is known as *five 9s*, or 99.999% availability.
+    Two 9s would be a system that guarantees 99% availability, allowing up to 1% downtime.
+    Over the course of a year, this would translate to 3.65 days of unavailability.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*Reliability engineering* uses three principles of systems design to help achieve
+    high availability: elimination of single points of failure (SPOFs), reliable crossover
+    or failover points, and failure detection capabilities (including monitoring,
+    discussed in [Chapter 12](ch12.xhtml#CH12_MONITORING)).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Redundancy is required for many components to achieve high availability. A simple
+    example is an airplane with two engines. If one engine fails while flying, the
+    aircraft can still land at an airport. A more complex example is a nuclear power
+    plant, where there are numerous redundant protocols and components to avoid catastrophic
+    failures. Similarly, to achieve high availability of a database we need network
+    redundancy, disk redundancy, different power supplies, multiple application and
+    database servers, and much more.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This chapter will focus on the options to achieve high availability that MySQL
+    databases offer.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Asynchronous Replication
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: '*Replication* enables data from one MySQL database server (known as a *source*)
+    to be copied to one or more other MySQL database servers (known as *replicas*).
+    MySQL replication by default is asynchronous. With asynchronous replication, the
+    source writes events to its binary log, and replicas request them when ready.
+    There is no guarantee that any event will ever reach any replica. It’s a loosely
+    coupled source/replica relationship, where the following are true:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The source does not wait for the replica to catch up.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The replica determines how much to read and from which point in the binary log.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The replica can be arbitrarily far behind the source in reading or applying
+    changes. This issue is known as *replication lag*, and we will look at ways of
+    minimizing it.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Asynchronous replication provides lower write latency since a write is acknowledged
+    locally by a source before being written to the replicas.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'MySQL implements its replication capabilities using three main threads, one
+    on the source server and two on the replicas:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*Binary log dump thread*'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The source creates a thread to send the binary log contents to a replica when
+    the replica connects. We can identify this thread in the output of `SHOW PROCESSLIST`
+    on the source as the `Binlog Dump` thread.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The binary log dump thread acquires a lock on the source’s binary log for reading
+    each event sent to the replica. When the source reads the event, the lock is released,
+    even before the source sends the event to the replica.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*Replication I/O thread*'
+  prefs: []
+  type: TYPE_NORMAL
+- en: When we execute the `START SLAVE` statement on a replica server, the replica
+    creates an I/O thread connected to the source and asks it to send the updates
+    recorded in its binary logs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The replication I/O thread reads the updates that the source’s `Binlog Dump`
+    thread sends (see the previous item) and copies them to local files that comprise
+    the replica’s relay log.
+  prefs: []
+  type: TYPE_NORMAL
+- en: MySQL shows the state of this thread as `Slave_IO_running` in the output of
+    `SHOW SLAVE STATUS`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*Replication SQL thread*'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The replica creates a SQL thread to read the relay log written by the replication
+    I/O thread and execute the transactions contained in it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: As mentioned in Chapter 1, Oracle, Percona, and Maria DB are working to remove
+    legacy terminology with negative connotations from their products. The documentation
+    already uses the terms *source* and *replica*, as we do in this book, but because
+    of the need to maintain backward compatibility and support for older versions,
+    it would be impossible to completely change the terminology in one release. This
+    is an ongoing effort.
+  prefs: []
+  type: TYPE_NORMAL
+- en: There are ways to improve replication parallelization, as you’ll see later in
+    this chapter.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Figure 13-1](#FIG-ASYNC_REPL) shows what the MySQL replication architecture
+    looks like.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![lm2e 1301](Images/lm2e_1301.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 13-1\. Asynchronous replication architecture flow
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Replication works because events written to the binary log are read from the
+    source and then processed on the replica, as shown in [Figure 13-1](#FIG-ASYNC_REPL).
+    The events are recorded within the binary log in different formats according to
+    the type of event. MySQL replication has three kinds of binary logging formats:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Row-based replication (RBR)
+  prefs: []
+  type: TYPE_NORMAL
+- en: The source writes events to the binary log that indicate how individual table
+    rows are changed. Replication of the source to the replica works by copying the
+    events representing the replica’s table rows’ changes. For MySQL 5.7 and 8.0,
+    this is the default replication format.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Statement-based replication (SBR)
+  prefs: []
+  type: TYPE_NORMAL
+- en: The source writes SQL statements to the binary log. Replication of the source
+    to the replica works by executing the SQL statements on the replica.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Mixed replication
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You can also configure MySQL to use a mix of both statement-based and row-based
+    logging, depending on which one is most appropriate to log the changes. With mixed-format
+    logging, MySQL uses a statement-based log by default but switches to a row-based
+    log for certain unsafe statements that have a nondeterministic behavior. For example,
+    suppose we have the following statement:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: We know that the function `NOW()` returns the current date and time. Imagine
+    that the source replicates the statement with 1 second of delay (there could be
+    various reasons for this, such as the replica being on a different continent than
+    the source). When the replica receives the statement and executes it, there will
+    be a 1-second difference in the date and time returned by the function, leading
+    to data inconsistency between the source and replica. When the mixed replication
+    format is used, whenever MySQL parses a nondeterministic function like this, it
+    will convert the statement to row-based replication. You can find a list of other
+    functions that MySQL considers unsafe in the [documentation](https://oreil.ly/RGyxB).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Basic Parameters to Set on the Source and the Replica
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: There are some basic settings that we need to set on both the source server
+    and the replica server in order to make replication work. They are required for
+    all methods explained in this section.
+  prefs: []
+  type: TYPE_NORMAL
+- en: On the source server, you must enable binary logging and define a unique server
+    ID. You’ll need to restart the server after making these changes (if you haven’t
+    already) because these parameters are not dynamic.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The server ID does not need to be incremental or be in any order, like having
+    the source server ID be smaller than the replica server ID. The only requirement
+    is that it be unique in each server that is part of the replication topology.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Here’s what this will look like in the *my.cnf* file:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You also need to establish a unique server ID for each replica. Like with the
+    source, if you haven’t done this yet, you’ll need to restart the replica server
+    after assigning it its ID. It is not mandatory to enable the binary log in the
+    replica server, although it is a recommended practice:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: Using the `log_slave_updates` option tells the replica server that commands
+    from a source server should be logged to the replica’s own binary log. Again,
+    this is not mandatory, but it is recommended as a good practice.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Each replica connects to the source using a MySQL username and password, so
+    you’ll also need to create a user account on the source server that the replica
+    can use to connect (for a refresher on this, see “Creating and Using New Users”
+    on page 317). Any account can be used for this operation, provided it has been
+    granted the `REPLICATION SLAVE` privilege. Here’s an example of how to create
+    the user on the source server:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'If you are using an automation tool like Ansible to deploy MySQL, you can use
+    the following bash command to create server IDs:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: The command converts the current date and time to an integer value, so it increases
+    monotonically. Note that the `date` command does not guarantee the values’ uniqueness,
+    but you may find it convenient to use as it provides a relatively good uniqueness
+    level.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the next sections, you will see different options to create a replica server.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Creating a Replica Using PerconaXtraBackup
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: As we saw in Chapter 10, the Percona XtraBackup tool provides a method of performing
+    a hot backup of your MySQL data while the system is running. It also offers advanced
+    capabilities like parallelization, compression, and encryption.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The first step is taking a copy of the current source so we can start our replica.
+    The XtraBackup tool performs a physical backup of the source (see “Physical and
+    Logical Backups” on page 376). We will use the commands provided in [“Percona
+    XtraBackup”](ch10.xhtml#PERCONA_PXB):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: Alternatively, you can use `rsync`, NFS, or any other method that you feel comfortable
+    with.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Once XtraBackup finishes the backup, we will send the files to a backup directory
+    on the replica server. In this example, we will send the files using the `scp`
+    command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'At this point we’re finished with the source. The following steps will run
+    only on the replica server. The next step is to prepare our backup:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'With everything set, we are going to move the backup to the data directory:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Before proceeding, verify that your replica server does not have the same `server_id`
+    as your source. If you followed the steps outlined in the previous section, you
+    should have taken care of this already; if not, do so now.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'On the replica, the content of the file *xtrabackup_binlog_info* will look
+    something like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: This information is essential because it tells us where to start replicating.
+    Remember that the source was still receiving operations when we took the backup,
+    so we need to know what position MySQL was at in the binary log file when the
+    backup finished.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'With that information, we can run the command to start the replication. It
+    will look something like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Once you’ve started, you can run the `SHOW SLAVE STATUS` command to check if
+    the replication is working:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE13]'
+  prefs: []
+  type: TYPE_PRE
+- en: It is important to check that both threads are running (`Slave_IO_Running` and
+    `Slave_SQL_Running`), whether there have been any errors (`Last_Error`), and how
+    many seconds the replica is behind the source. For large databases with an intensive
+    write workload, the replica may take a while to catch up.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Creating a Replica Using the Clone Plugin
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: MySQL 8.0.17 introduced the [clone plugin](https://oreil.ly/fBWth), which can
+    be used to make one MySQL server instance a *clone* of another. We refer to the
+    server instance where the `CLONE` statement is executed as the *recipient* and
+    to the source server instance from which the recipient will clone the data as
+    the *donor*. The donor instance can be local or remote. The cloning process works
+    by creating a physical snapshot of the data and metadata stored in the InnoDB
+    storage engine on the donor, and transferring it to the recipient. Both local
+    and remote instances perform the same clone operation; there is no difference
+    related to the data between the two options.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Let’s walk through a real example. We’ll show you some additional details along
+    the way, like how to monitor the progress of a long-running `CLONE` command, the
+    privileges required to clone, and more. The following example uses the classic
+    shell. We’ll talk about MySQL Shell, introduced in MySQL 8.0, in Chapter 16.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Choose the MySQL server to clone from and connect to it as the `root` user.
+    Then install the clone plugin, create a user to transfer the data from the donor
+    server, and grant that user the `BACKUP_ADMIN` privilege:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE14]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Next, to observe the progress of the cloning operation, we need to grant that
+    user privileges to view the `performance_schema` database and execute functions:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE15]'
+  prefs: []
+  type: TYPE_PRE
+- en: Now we will move to the recipient server. If you are provisioning a new node,
+    first initialize a data directory and start the server.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Connect to the recipient server as the `root` user. Then install the clone
+    plugin, create a user to replace the current instance data with the cloned data,
+    and grant that user the `CLONE_ADMIN` privilege. We’ll also provide a list of
+    valid donors that the recipient can clone (here, just one):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE16]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'We’ll grant this user the same privileges we did on the donor side, to observe
+    the progress on the recipient side:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE17]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'We now have everything we need in place, so it’s time to start the cloning
+    process. Note that the donor server must be reachable from the recipient. The
+    recipient will connect to the donor with the address and credentials provided
+    and start cloning:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE18]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The recipient must shut down and restart itself for the clone operation to
+    succeed. We can monitor the progress with the following query:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE19]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This will allow us to observe each state of the cloning process. The output
+    will be similar to this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE20]'
+  prefs: []
+  type: TYPE_PRE
+- en: As mentioned previously, there is a restart at the end. Note that replication
+    has not started yet.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In addition to cloning the data, the cloning operation extracts the binary
+    log position and GTID from the donor server and transfers them to the recipient.
+    We can execute the following queries on the donor to view the binary log position
+    or the GTID of the last transaction that was applied:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE21]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE22]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE23]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE24]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'In this example we are not using GTIDs, so the query does not return anything.
+    Next, we will run the command to start the replication:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE25]'
+  prefs: []
+  type: TYPE_PRE
+- en: As in the previous section, we can check that replication is working correctly
+    by running the `SHOW SLAVE STATUS` command.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The advantage of this approach is that the clone plugin automates the whole
+    process, and only at the end is it necessary to execute the `CHANGE MASTER` command.
+    The disadvantage is that the plugin is available only for MySQL 8.0.17 and higher.
+    While it’s still relatively new, we believe that in years to come, this process
+    may become the default.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Creating a Replica Using mysqldump
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: This is what we might call the classic approach. It’s the typical option for
+    those who are getting started with MySQL and still learning about the ecosystem.
+    As usual, we assume here that you have performed the necessary setup in [“Basic
+    Parameters to Set on the Source and the Replica”](#basicparameters).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s see an example of using `mysqldump` to create a new replica. We will
+    execute the backup from the source server:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE26]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The dump succeeded if the message `Dump completed` appears at the end:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE27]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE28]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'With the backup taken, we need to import it in the replica server. For example,
+    you can use this command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE29]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Once that’s done, you’ll need to execute the `CHANGE MASTER` command with the
+    coordinates extracted from the dump (for more details about `mysqldump`, revisit
+    [“The mysqldump Program”](ch10.xhtml#CH10_BACKUP_MYSQLDUMP)). Because we used
+    the `--master-data=2` option, the information will be written at the beginning
+    of the dump. For example:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE30]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Or, if you’re using GTIDs:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE31]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Next, we are going to execute the command to start the replication. For the
+    GTID scenario, it looks like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE32]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'For traditional replication, you can start replication from the previously
+    extracted binary log file position as follows:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE33]'
+  prefs: []
+  type: TYPE_PRE
+- en: To verify that replication is working, execute the `SHOW SLAVE STATUS` command.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Creating a Replica Using mydumper and myloader
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '`mysqldump` is the most common tool used by beginners for performing backups
+    and building replicas. But there is a more efficient method: `mydumper`. Like
+    `mysqldump`, this tool generates a logical backup and can be used to create a
+    consistent backup of your database. The main difference between `mydumper` and
+    `mysqldump` is that `mydumper`, when paired with `myloader`, can dump and restore
+    data in parallel, improving the dump and, especially, restore time. Imagine a
+    scenario where your database has a dump of 500 GB. Using `mysqldump`, you will
+    have a single huge file. With `mydumper`, you will have one file per table, allowing
+    the restore process to be executed in parallel later.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Setting up the mydumper and myloader utilities
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: You can run `mydumper` directly on the source server or from another server,
+    which in general is better since it will avoid the overhead in the storage system
+    of writing the backup files on the same server.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To install `mydumper`, download the package specific to the operating system
+    version you are using. You can find the releases in the [`mydumper` GitHub repository](https://oreil.ly/7hakG).
+    Let’s see an example for CentOS:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE34]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Now you should have both the `mydumper` and `myloader` commands installed on
+    the server. You can validate this with:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE35]'
+  prefs: []
+  type: TYPE_PRE
+- en: Extracting data from the source
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'The following command will execute a dump of all databases (except `mysql`,
+    `test`, and the `sys` schema) with 15 simultaneous threads and will also include
+    triggers, views, and functions:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE36]'
+  prefs: []
+  type: TYPE_PRE
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: You will need to grant at least the `SELECT` and `RELOAD` permissions to the
+    `mydumper` user.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If you check the output directory (`outputdir`), you will see the compressed
+    files. Here’s the output on one of the authors’ machines:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE37]'
+  prefs: []
+  type: TYPE_PRE
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Decide the number of threads based on the CPU cores of the database server and
+    server load. Doing a parallel dump can consume a lot of server resources.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Restoring data in a replica server
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'Like with `mysqldump`, we need to have the replica MySQL instance already up
+    and running. Once the data is ready to be imported, we can execute the following
+    command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE38]'
+  prefs: []
+  type: TYPE_PRE
+- en: Establishing the replication
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'Now that we’ve restored the data, we will set up replication. We need to find
+    the correct binary log position at the start of the backup. This information is
+    stored in the `mydumper` metadata file:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE39]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Now, we simply execute the `CHANGE MASTER` command like we did previously for
+    `mysqldump`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE40]'
+  prefs: []
+  type: TYPE_PRE
+- en: Group Replication
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: It might be a bit controversial to include Group Replication in the asynchronous
+    replication group. The short explanation for this choice is that Group Replication
+    is asynchronous. The confusion here can be explained by the comparison with Galera
+    (discussed in [“Galera/PXC Cluster”](#GALERA-CLUSTER-INTRO)), which claims to
+    be synchronous or virtually synchronous.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The more detailed reasoning is that it depends on how we define replication.
+    In the MySQL world, we define replication as the process that enables changes
+    made in one database (the source) to be automatically duplicated in another (the
+    replica). The entire process involves five different steps:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Locally applying the change on the source
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Generating a binlog event
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Sending the binlog event to the replica(s)
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Adding the binlog event to the replica’s relay log
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Applying the binlog event from the relay log on the replica
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: In MySQL Group Replication and Galera (even if the Galera cache primarily replaces
+    the binlog and relay log files), only step 3 is synchronous—the streaming of the
+    binary log event (or write set in Galera) to the replica(s).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Thus, while the process of sending (replicating/streaming) the data to the other
+    servers is synchronous, the *applying* of these changes is still wholly asynchronous.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Group Replication has been available since MySQL 5.7\. However, when the product
+    was released, it was not mature enough, leading to constant performance issues
+    and crashes. We highly recommend using MySQL 8.0 if you want to test Group Replication.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Installing Group Replication
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: The first advantage of Group Replication compared to Galera is that you don’t
+    have to install different binaries. MySQL Server provides Group Replication as
+    a plugin. It’s also available for Oracle MySQL and Percona Server for MySQL; for
+    details on installing those, see [Chapter 1](ch01.xhtml#CH1_INSTALL).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To confirm that the Group Replication plugin is enabled, run the following
+    query:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE41]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The output should show `ACTIVE`, as you see here:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE42]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'If the plugin is not installed, run the following command to install it:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE43]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'With the plugin active, we will set the minimum parameters required on the
+    servers to start Group Replication. Open *my.cnf* on server 1 and add the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE44]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Let’s go over each of those parameters:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`server_id`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Like with classic replication, this parameter helps to identify each member
+    in the group using a unique ID. You must use a different value for each server
+    participating in Group Replication.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`log_bin`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: In MySQL 8.0 this parameter is enabled by default. It is responsible for recording
+    all the changes in the database in binary log files.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`enforce_gtid_consistency`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This value must be set to `ON` to instruct MySQL to execute transaction-safe
+    statements to ensure consistency when replicating data.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`gtid_mode`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This directive enables global transaction identifier-based logging when set
+    to `ON`. This is required for Group Replication.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`log_slave_updates`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This value is set to `ON` to allow members to log updates from each other. In
+    other words, the directive chains the replication servers together.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`transaction_write_set_extraction`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This instructs the MySQL server to collect write sets and encode them using
+    a hashing algorithm. In this case, we are using the XXHASH64 algorithm. Write
+    sets are defined by primary keys on each record.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`master_info_repository`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: When set to `TABLE`, this directive allows MySQL to store details about source
+    binary log files and positions into a table rather than a file to enable faster
+    replication and guarantee consistency using InnoDB’s ACID properties. In MySQL
+    8.0.23 this is the default, and the `FILE` option is deprecated.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`relay_log_info_repository`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: When set to `TABLE`, this configures MySQL to store replication information
+    as an InnoDB table. In MySQL 8.0.23 this is the default, and the `FILE` option
+    is deprecated.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`binlog_checksum`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Setting this to `NONE` tells MySQL not to write a checksum for each event in
+    the binary log. The server will instead verify events when they are written by
+    checking their length. In versions of MySQL up to and including 8.0.20, Group
+    Replication cannot make use of checksums. If you’re using a later release and
+    want to use checksums, you can omit this setting and use the default, `CRC32`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Next, we are going to add some specific parameters for Group Replication:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE45]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: We are using the `loose-` prefix to instruct the server to start even when the
+    MySQL Group Replication plugin is not installed and configured. This avoids encountering
+    server errors before you finish configuring all the settings.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s see what each parameter does:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`group_replication_group_name`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This is the name of the group that we are creating. We are going to use the
+    built-in Linux `uuidgen` command to generate a universally unique identifier (UUID).
+    It produces output like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE46]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE47]'
+  prefs: []
+  type: TYPE_PRE
+- en: '`group_replication_start_on_boot`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: When set to `OFF`, the value instructs the plugin not to start working automatically
+    when the server starts. You may set this value to `ON` once you are through with
+    configuring all the group members.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`loose-group_replication_local_address`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is the internal IP address and port combination used for communicating
+    with other MySQL server members in the group. The recommended port for Group Replication
+    is 33061.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`group_replication_group_seeds`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This configures the IP addresses or hostnames of members participating in Group
+    Replication, together with their communication port. New members use the value
+    to establish themselves in the group.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`group_replication_bootstrap_group`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This option instructs the server whether to create a group or not. We will only
+    enable this option on demand on server 1, to avoid creating multiple groups. So,
+    it will remain off for now.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`bind_address`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The value of `0.0.0.0` tells MySQL to listen to all networks.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`report_host`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is the IP address or hostname the group members reports to each other when
+    they are registered in the group.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Setting up MySQL Group Replication
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: First, we will set up the `group_replication_recovery` channel. MySQL Group
+    Replication uses this channel to transfer transactions between members. Because
+    of this, we must set up a replication user with `REPLICATION SLAVE` permission
+    on each server.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'So, on server 1, log in to the MySQL console and execute the following commands:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE48]'
+  prefs: []
+  type: TYPE_PRE
+- en: We first set `SQL_LOG_BIN` to `0` to prevent the new user’s details from being
+    logged to the binary log then we reenable it at the end.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To instruct the MySQL server to use the replication user we have created for
+    the `group_replication_recovery` channel, run this command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE49]'
+  prefs: []
+  type: TYPE_PRE
+- en: These settings will allow members joining the group to run the distributed recovery
+    process to get to the same state as the other members (donors).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Now we will start the Group Replication service on server 1\. We will bootstrap
+    the group using these commands:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE50]'
+  prefs: []
+  type: TYPE_PRE
+- en: To avoid starting up more groups, we set `group_replication_bootstrap_group`
+    back to `OFF` after successfully starting the group.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To check the status of the new member, use this command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE51]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE52]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Great. So far we’ve bootstrapped and initiated one group member. Let’s proceed
+    to the second server. Make sure you have installed the same MySQL version as on
+    server 1, and add the following settings to the *my.cnf* file:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE53]'
+  prefs: []
+  type: TYPE_PRE
+- en: All we’ve changed is the `group_replication_local_address`; the other settings
+    remain the same. Note that the other MySQL configurations are required for server
+    2, and we strongly recommend keeping them the same across all nodes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'With the configurations in place, restart the MySQL service:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE54]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Issue the following commands to configure the credentials for the recovery
+    user on server 2:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE55]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Next, add server 2 to the group that we bootstrapped earlier:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE56]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'And run the query to check the member’s state:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE57]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE58]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Now you can follow the same steps for server 3 as we used for server 2, again
+    updating the local address. When you’re done, you can validate whether all the
+    servers are responsive by inserting some dummy data:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE59]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE60]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE61]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE62]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE63]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE64]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE65]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE66]'
+  prefs: []
+  type: TYPE_PRE
+- en: Then connect to the other servers to see whether you can visualize the data.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Synchronous Replication
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Synchronous replication is used by Galera Clusters, where we have more than
+    one MySQl server, but they act as a single entity for the application. [Figure 13-2](#FIG-GALERA-TOPOLOGY)
+    illustrates a Galera Cluster with three nodes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![lm2e 1302](Images/lm2e_1302.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 13-2\. In a Galera Cluster, all nodes communicate with each other
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The primary difference between synchronous and asynchronous replication is that
+    synchronous replication guarantees that if a change happens on one node in the
+    cluster, then the change will happen on the other nodes in the cluster synchronously,
+    or at the same time. Asynchronous replication gives no guarantees about the delay
+    between applying changes on the source node and propagating those changes to replica
+    nodes. The delay with asynchronous replication can be short or long. This also
+    implies that if the source node crashes in an asynchronous replication topology,
+    some of the latest changes may be lost. This concepts of source and replica do
+    not exist in a Galera Cluster. All nodes can receive reads and writes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Theoretically, synchronous replication has several advantages over asynchronous
+    replication:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Clusters utilizing synchronous replication are always highly available. If one
+    of the nodes crashes, then there will be no data loss. Additionally, all cluster
+    nodes are always consistent.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Clusters utilizing synchronous replication allow transactions to be executed
+    on all nodes in parallel.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Clusters utilizing synchronous replication can guarantee causality across the
+    whole cluster. This means that if a `SELECT` is executed on one cluster node after
+    a transaction is executed on another cluster node, it should see the effects of
+    that transaction.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: However, there are disadvantages to synchronous replication as well. Traditionally,
+    eager replication protocols coordinate nodes one operation at a time, using a
+    two-phase commit or distributed locking. Increasing the number of nodes in the
+    cluster leads to growth in the transaction response times and the probability
+    of conflicts and deadlocks among the nodes. This is because all nodes need to
+    certify the transaction and reply with an OK message.
+  prefs: []
+  type: TYPE_NORMAL
+- en: For this reason, asynchronous replication remains the dominant replication protocol
+    for database performance, scalability, and availability. Not understanding or
+    underestimating the impact of synchronous replication is one reason companies
+    sometimes give up using Galera Clusters and go back to using asynchronous replication.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'At the time of writing, two companies support the Galera Cluster: Percona and
+    MariaDB. The following example shows how to set up a Percona XtraDB Cluster.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Galera/PXC Cluster
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Installing Percona XtraDB Cluster (PXC) is similar to installing Percona Server
+    (the difference is the packages), so we won’t dive into details for all platforms.
+    You may want to revisit [Chapter 1](ch01.xhtml#CH1_INSTALL) to review the installation
+    process. The configuration process we’ll follow here assumes there are three PXC
+    nodes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 13-1\. The three PXC nodes
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Node | Host | IP |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Node 1 | pxc1 | 172.16.2.56 |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Node 2 | pxc2 | 172.16.2.198 |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Node 3 | pxc3 | 172.16.3.177 |'
+  prefs: []
+  type: TYPE_TB
+- en: 'Connect to one of the nodes and install the repository:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE67]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'With the repository installed, install the binaries:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE68]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Next, you can apply the typical configurations that you would use for a regular
+    MySQL process (see Chapter 11). With the changes made, start the `mysqld` process
+    and get the temporary password:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE69]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Use the previous password to log in as `root` and change the password:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE70]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE71]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Stop the `mysqld` process:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE72]'
+  prefs: []
+  type: TYPE_PRE
+- en: Repeat the previous steps for the other two nodes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: With the binaries and basic configuration in place, we can start working on
+    the cluster parameters.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'We need to add the following configuration variables to */etc/my.cnf* on the
+    first node:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE73]'
+  prefs: []
+  type: TYPE_PRE
+- en: Use the same configuration for the second and third nodes, except the `wsrep_node_name`
+    and `wsrep_node_address` variables.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'For the second node, use:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE74]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'For the third node, use:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE75]'
+  prefs: []
+  type: TYPE_PRE
+- en: Like regular MySQL, Percona XtraDB Cluster has many configurable parameters,
+    and the ones we’ve shown are the minimal settings to start the cluster. We are
+    configuring the node’s name and IP address, the cluster address, and the user
+    that will be used for internal communication among the nodes. You can find more
+    detailed information in the [documentation](https://oreil.ly/Ap8Rr).
+  prefs: []
+  type: TYPE_NORMAL
+- en: We have all the nodes configured at this point, but the `mysqld` process is
+    not running on any node. PXC requires you to start one node in a cluster as a
+    reference point for the others before the other nodes can join and form the cluster.
+    This node must be started in *bootstrap* mode. Bootstrapping is an initial step
+    to introduce one server as a primary component so the others can use it as a reference
+    point to sync up data.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Start the first node with the following command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE76]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Before adding other nodes to your new cluster, connect to the node that you
+    just started, create a user for State Snapshot Transfer (SST), and provide the
+    necessary privileges for it. The credentials must match those specified in the
+    `wsrep_sst_auth` configuration that you set previously:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE77]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The SST process is used by the cluster to provision nodes by transferring a
+    full data copy from one node to another. When a new node joins the cluster, the
+    new node initiates an SST to synchronize its data with a node that is already
+    part of the cluster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'After this, you can initialize the other nodes regularly:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE78]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'To verify that the cluster is up and running fine, we can perform a few checks,
+    like creating a database on the first node, creating a table and inserting some
+    data on the second node, and retrieving some rows from that table on the third
+    node. First, let’s create the database on the first node (`pxc1`):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE79]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE80]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'On the second node (`pxc2`), create a table and insert some data:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE81]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE82]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE83]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE84]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE85]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE86]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Then retrieve some rows from that table on the third node:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE87]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE88]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Another, more elegant solution is checking the `wsrep_%` global status variables,
+    in particular `wsrep_cluster_size` and `wsrep_cluster_status`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE89]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE90]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE91]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE92]'
+  prefs: []
+  type: TYPE_PRE
+- en: The output of these commands tells us that the cluster has three nodes and is
+    in the primary state (it can receive reads and writes).
+  prefs: []
+  type: TYPE_NORMAL
+- en: You might consider using ProxySQL in addition to the Galera Cluster to ensure
+    transparency for the application (see [Chapter 15](ch15.xhtml#CH15_LOAD_BAlANCERS)).
+  prefs: []
+  type: TYPE_NORMAL
+- en: The goal of this chapter was just to familiarize you with the different topologies
+    so you know they exist. Cluster maintenance and optimization are advanced topics
+    that are beyond the scope of this book.
+  prefs: []
+  type: TYPE_NORMAL

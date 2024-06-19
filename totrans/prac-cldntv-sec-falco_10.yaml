@@ -1,0 +1,572 @@
+- en: Chapter 8\. The Output Framework
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: In previous chapters, you learned how Falco collects events (its input) and
+    how it processes them to allow you to receive important security notifications
+    (its output). At the end of this processing pipeline, a key piece of Falco—the
+    *output framework*—enables it to deliver those notifications (also called *alerts*)
+    to the right place. We call it a framework because its modular design provides
+    all you need to deliver notifications to any destination you wish. In this chapter,
+    you will learn how the output framework works and how you can configure and extend
+    it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Falco’s Output Architecture
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The output framework is the last piece of the event-processing pipeline that
+    we have been describing in this part of the book. Falco’s user-space program implements
+    the core mechanism internally, but external tools can extend it. Its job is to
+    deliver notifications to the correct destination on time. Whenever an upstream
+    event (produced by a driver, a plugin, or any other input source supported by
+    Falco) meets a rule’s condition, the rule engine asks the output framework to
+    send a notification to a downstream consumer, which could be any other program
+    or system in your environment (or simply you).
+  prefs: []
+  type: TYPE_NORMAL
+- en: The process of delivering alerts involves two distinct stages, as pictured in
+    [Figure 8-1](#the_two_stages_of_delivering_notificati).
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the first stage, a *handler* receives the event data and information about
+    the event-triggered rule. It prepares the notification using the provided information
+    and formats the textual representation according to the rule’s `output` key. Then,
+    to prevent the output destination from blocking the processing pipeline (which
+    runs in the main execution thread), the handler pushes the notification into a
+    concurrent queue.^([1](ch08.xhtml#ch01fn8)) The push operation is nonblocking,
+    so the processing pipeline does not need to wait for the notification consumer
+    to pull the notification; it can continue to do its job without interruption.
+    Indeed, Falco needs to perform this stage as quickly as possible so that the processing
+    pipeline can process the next event.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![](Images/pcns_0801.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 8-1\. The two stages of delivering notifications in Falco
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: At the other end of the queue, the *output worker* (which runs in a separate
+    execution thread) is waiting to pop notifications from the queue. This is when
+    the second stage begins. Once the output worker receives a notification, it immediately
+    fans that notification out to all configured output channels. An *output channel*
+    (or simply an *output*) is a part of the output framework that allows Falco to
+    forward alerts to a destination. Each output channel implements the actual logic
+    to notify a particular class of alert consumers. For instance, some consumers
+    want notifications written to a file, while others prefer them to be posted to
+    a web endpoint (see [Chapter 10](ch10.xhtml#configuring_and_running)).
+  prefs: []
+  type: TYPE_NORMAL
+- en: This two-stage approach allows the processing pipeline to run without interference
+    from the output delivery process. However, things can still go wrong with delivery.
+    In particular, when delivering a notification involves I/O operations, those may
+    block the caller temporarily (for example, in the event of a network slowdown)
+    or indefinitely (e.g., when there’s no space left on the disk). The queue in the
+    middle of the two stages works well at absorbing temporary slowdowns—so well that
+    you won’t even notice them (by default, Falco can accumulate pending notifications
+    in the queue for up to two seconds). But when the recipient of a notification
+    blocks for a long time (or indefinitely), there’s nothing that Falco can automatically
+    do. As a last resort, it will try to inform you about what happened by logging
+    to the [standard error stream (*stderr*)](https://oreil.ly/IbBik). When this happens,
+    it is usually a symptom of a misconfiguration (for example, the path to the destination
+    is wrong) or insufficient resources (no space left in the destination), which
+    the user is asked to manually fix.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Once the notification delivery process completes, Falco’s user-space program
+    has accomplished its purpose. It’s then up to the consumer to decide what to do
+    with the alert.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The output framework accommodates many different use cases and can take care
+    of many possible issues. It is also flexible enough to allow you to receive notifications
+    in various ways and at different destinations. The rest of this chapter will give
+    you details about all the available possibilities. We’ll also take a quick look
+    at some other tools that allow you to further extend output processing before
+    delivering the notifications to their final destination. (We’ll go deeper into
+    this in [Chapter 13](ch13.xhtml#writing_falco_rules).)
+  prefs: []
+  type: TYPE_NORMAL
+- en: Output Formatting
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: In the first stage of notification delivery, Falco applies formatting to the
+    notification before forwarding it to the output channel. You can customize how
+    Falco presents notifications to its consumers so that you can easily integrate
+    them with your specific use case.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Two options in the Falco configuration file (*/etc/falco/falco.yaml*) control
+    this operation. The first controls the formatting of the timestamp:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: If this option is `false` (the default value), Falco will display dates and
+    times according to the */etc/localtime* settings. If it’s `true` (the default
+    value when Falco is running in a container), Falco will use the ISO 8601 standard
+    for representing dates and times. Note that this option controls not only output
+    notifications but also any other messages that Falco logs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The second option is actually a set of options that enable JSON formatting
+    for the notifications. By default, JSON formatting is disabled:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'With this setting, Falco formats the notification as a plain-text string (including
+    the timestamp, the severity, and the message). If it’s set to `true`, Falco encloses
+    the notification in a JSON-formatted string, including several fields. The following
+    two options allow you to include or exclude some of those fields from the output:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`json_include_output_property: true`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: If this option is enabled (the default), you will still find the plain-text
+    representation of the notification in the `output` field of the JSON object. You
+    can disable this option to save a few bytes if you don’t need it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`json_include_tags_property: true`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: If this option is enabled, you will find a `tags` field in the JSON object containing
+    an array of tags specified in the matching rule. Rules with no tags defined will
+    have an empty array (`tags:[]`) in the output. If you disable this option, you
+    won’t get the `tags` field in the JSON object.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Despite its name, `json_output` is not an output channel. The `json_output`
+    configuration controls the formatting applied to notifications in the first stage
+    of processing—thus, it affects the content of the notifications that channels
+    deliver. The next section describes the available output channels.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Output Channels
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Falco comes with six built-in output channels, listed in [Table 8-1](#falcoapostrophes_built_in_output_channe).
+    We will describe each of them in more detail in the following subsections. By
+    default only two channels are enabled—[standard output](https://oreil.ly/kBm4I)
+    and syslog output—but Falco allows you to enable as many channels as you need
+    simultaneously.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 8-1\. Falco’s built-in output channels
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Channel | Description |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Standard output | Sends notifications to Falco’s standard output (stdout)
+    |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Syslog output | Sends notifications to the system via syslog |'
+  prefs: []
+  type: TYPE_TB
+- en: '| File output | Writes notifications to a file |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Program output | Pipes notifications to a program’s standard input |'
+  prefs: []
+  type: TYPE_TB
+- en: '| HTTP output | Posts notifications to a URL |'
+  prefs: []
+  type: TYPE_TB
+- en: '| gRPC output | Allows a client program to consume notifications via a gRPC
+    API |'
+  prefs: []
+  type: TYPE_TB
+- en: You configure these outputs in the Falco configuration file (*/etc/falco/falco.yaml*).
+    Note that all the configuration snippets in this section are part of this file.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Each output channel has at least one option called `enabled`, which can be `true`
+    or `false`. Other options may be available for specific outputs (you will discover
+    them soon). Furthermore, there are some global options that can affect the functioning
+    of all or some output channels. One such option (which you saw in the previous
+    section) is `json_output`; when this is enabled, the alert messages will be JSON-formatted,
+    regardless of the output channel used. The other global options that can affect
+    the output channels’ behavior are listed in [Table 8-2](#global_options_for_output_channels).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 8-2\. Global options for output channels
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Global option (with default) | Description |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `buffered_outputs: false` | This option enables or disables full buffering
+    in output channels. When disabled, Falco immediately flushes the output buffer
+    on every alert, which may generate higher CPU usage but is useful when piping
+    outputs into another process or a script. Unless you encounter an issue with the
+    default value, you usually won’t need to enable this option. Note that Falco’s
+    `--unbuffered` command-line flag can override this option. Not all output channels
+    observe this global option. Some output channels may implement specific buffering
+    strategies that you cannot disable. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `output_timeout: 2000` | The value of this option specifies the duration
+    to wait (in milliseconds) before considering the delivery notification deadline
+    exceeded. When the notification consumer blocks and the output channel cannot
+    deliver an alert within the given deadline, Falco reports an error indicating
+    which output is blocking the notifications. Such an error indicates a misconfiguration
+    issue or I/O problem in the consumer that Falco cannot recover. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `outputs:` `rate: 1`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`max_burst: 1000` | These options control the notification rate limiter so
+    that output channels do not flood their destinations. The rate limiter implements
+    a token bucket algorithm. To send a notification, the system must remove a token
+    from the bucket. `rate` sets the number of tokens the system gains per second,
+    and `max_burst` sets the maximum number of tokens in the bucket. With the defaults,
+    Falco can send up to 1,000 notifications in a row; then it must wait for additional
+    tokens to be added to the bucket, which happens at the rate of 1 token per second.
+    In other words, once the bucket has been emptied, notifications are rate-limited
+    to one per second. |'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Although not strictly related to the output mechanism, other Falco settings
+    may affect what you will receive in the output. For example, the configuration
+    `priority: *<severity>*` controls the minimum rule priority level to load and
+    run, and the command-line option `-t *<tag>*` allows you to load only those rules
+    with a specific tag. In those cases, clearly, you won’t get any output regarding
+    rules that Falco does not load. In general, any rules-related option or configuration
+    could indirectly affect the output.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Now that you’ve learned what the output channels are and what settings can change
+    their behavior, let’s go through each in turn.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Standard Output
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Standard output (`stdout_output` in the configuration file, enabled by default)
+    is Falco’s most straightforward output channel. When it is enabled, Falco will
+    print a line to standard output for each alert. This allows you to see alert notifications
+    when manually running Falco from a console or when looking at a container or Kubernetes
+    Pod log. The only option specifically available for this output channel is `enabled`
+    (which can be either `true` or `false`). However, it’s also affected by the global
+    buffering option, `buffered_outputs`. When the outputs are buffered, the stdout
+    stream will be fully buffered or line-buffered if the stream is an interactive
+    device (such as a TTY).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Syslog Output
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The syslog output channel (`syslog_output` in the configuration file, also enabled
+    by default) allows Falco to send a syslog message for each alert. As with standard
+    output, the only option specifically available for this output channel is `enabled`
+    (which can be either `true` or `false`). When enabled, Falco sends messages to
+    syslog with a facility of `LOG_USER`^([2](ch08.xhtml#ch01fn9)) and a severity
+    level equal to the priority value defined by the rule.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Depending on the syslog daemon you are using, you can read those messages using
+    commands like `tail -f /var/log/syslog` or `journalctl -xe`. The actual message
+    format depends on the syslog daemon, too.
+  prefs: []
+  type: TYPE_NORMAL
+- en: File Output
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'If you enable file output, Falco will write each alert to a file. The default
+    configuration for this output channel is:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: The `filename` option allows you to specify the destination file to which Falco
+    will write. It will create the file if it does not yet exist and will not try
+    to truncate or rotate the file if it exists already.
+  prefs: []
+  type: TYPE_NORMAL
+- en: With `keep_alive` disabled (the default), Falco will open the file for appending,
+    write the message, and then close the file for each alert. If `keep_alive` is
+    set to `true`, Falco will only open the file once before the first alert and will
+    keep it open for all subsequent alerts. Whether `keep_alive` is enabled or not,
+    Falco closes and reopens the file when it receives a `SIGUSR1` signal. This feature
+    is handy if you’d like to use a program to rotate the output file (for example,
+    `logrotate`).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Finally, writing to a file is generally buffered unless you disable the global
+    buffering option. Closing the file will flush the buffer.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Program Output
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'The program output is very similar to the file output, but in this case Falco
+    will write the content of each alert to the standard input of a program you specify
+    in the configuration file. The default configuration for this output channel is:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The `program` field allows you to specify the program the alerts will be sent
+    to. Falco runs the program via a shell, so you can specify a command pipeline
+    if you wish to add any processing steps before delivering the messages to the
+    program. This field’s default value shows a nice example of its usage: when executed,
+    that one-liner posts the alert to a Slack webhook endpoint. (However, using Falcosidekick
+    would be a better option; see [Chapter 12](ch12.xhtml#consuming_falco_events).)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: If `keep_alive` is set to `false`, Falco restarts the program and writes the
+    content of the alert to its standard input each time it has a notification to
+    deliver. If `keep_alive` is set to `true`, Falco starts the program once (right
+    before sending the first alert) and keeps the program pipe open for delivering
+    subsequent alerts.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Falco closes and reopens the program when it receives a `SIGUSR1` signal. However,
+    the program runs in the same process group as Falco, so it gets all of the signals
+    that Falco receives. It’s up to you to override the program signal handler if
+    you need to.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Buffering is supported via the global option. When Falco closes the program,
+    it also flushes the buffer.
+  prefs: []
+  type: TYPE_NORMAL
+- en: HTTP Output
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'When you need to send alerts over an HTTP(S) connection, the best choice is
+    to use the HTTP output. Its default configuration is straightforward:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: Once enabled, the only other configuration you need to specify is the `url`
+    of your endpoint. Falco will make an HTTP POST request to the specified URL for
+    each alert. Both unencrypted HTTP and secure HTTPS endpoints are supported. Buffering
+    for this output channel is always enabled (even if you disable the global buffering
+    option).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The HTTP output channel is preferred when you use Falcosidekick; it takes Falco’s
+    alerts and forwards them in fan-out style to many different destinations (more
+    than 50 are available at the time of writing). If you want Falco to forward alerts
+    to Falcosidekick, apply this Falco configuration:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note that this configuration assumes you already have Falcosidekick running
+    and configured to listen to `localhost:2801`; change it accordingly if your setup
+    is different. You can find details about configuring Falcosidekick in [Chapter 12](ch12.xhtml#consuming_falco_events)
+    and in its [online documentation](https://oreil.ly/uUQBR).
+  prefs: []
+  type: TYPE_NORMAL
+- en: gRPC Output
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'The [gRPC](https://grpc.io) output is the most sophisticated output channel.
+    It allows greater control than the others over alert forwarding and full granularity
+    in the information received. This output channel is for you if you’d like to send
+    alerts to an external program connected via Falco’s gRCP API. Its default configuration
+    is:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: As you can see, it’s disabled by default—and before you enable it, there’s something
+    you should consider. Falco comes with a gRPC server that exposes the API. You
+    will need to enable both the gRPC server and the gRPC output (we will show you
+    how to do that in a moment). The API provides several gRPC services, only some
+    of which are related to the gRPC output. One service allows you to pull all pending
+    alerts. Another allows you to subscribe to a stream of alerts. Client programs
+    can decide which implementations best fit their needs. In both cases, when the
+    gRPC output is enabled, Falco uses an internal queue to temporarily store alerts
+    until the client program consumes them. This means you should not enable the gRPC
+    output if there’s no client program set up to consume the alerts; otherwise, the
+    internal queue may grow indefinitely. The global buffering option does not affect
+    this output channel.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'With that in mind, to make this output channel work, the first thing you have
+    to do is to enable the gRPC server. It supports two binding types: over a Unix
+    socket and over the network with mandatory mutual TLS authentication.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Here’s how to enable the gRPC server over a Unix socket:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'And here’s how to enable the gRPC server over the network with mandatory mutual
+    TLS authentication:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Both binding types offer the same gRPC functionalities, so you can choose the
+    one that satisfies your needs. Once you have enabled the gRPC server, the next
+    step is to enable the gRCP output:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Finally, you will have to configure your client program to connect to the Falco
+    gRPC API. How this is done depends on the program you are using. The Falcosecurity
+    organization provides two programs that can connect to this output (see [Chapter 2](ch02.xhtml#getting_started_with_falco)):
+    [falco-exporter](https://oreil.ly/FN9gE), which connects to the Falco gRPC API
+    to export metrics consumable by Prometheus (more on this in [Chapter 12](ch12.xhtml#consuming_falco_events)),
+    and the [event-generator](https://oreil.ly/4MHw1), which can optionally connect
+    to the Falco gRPC API to test whether fake events are actually processed (helpful
+    when developing integration tests). You can also implement your own program. The
+    Falcosecurity organization provides SDKs that allow you to create gRPC client
+    programs for Falco easily in several programming languages—for example, [client-go
+    for Golang](https://oreil.ly/HXPKL), [client-rs for Rust](https://oreil.ly/XdgVp),
+    and [client-py for Python](https://oreil.ly/A64Dh). You can find more information
+    about developing with the Falco gRPC API in [Chapter 14](ch14.xhtml#falco_development).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Last but not least, here is an extract from the proto-definition of the message
+    that Falco sends via the gRCP API:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: The `response` message includes the already formatted alert string (which you
+    will find in the `output` field) as well as all the component pieces of information,
+    split across various fields. The client program can assemble and process them
+    in any way it needs, which is very useful if you want to build your own application
+    on top of Falco.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Other Logging Options
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: So far we’ve described the core part of the output framework. Now let’s look
+    at a few options to help you in troubleshooting. Like most applications, Falco
+    can output debugging information and errors. Those informative messages are about
+    the functioning of Falco itself and are not its primary output.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Falco implements various logging messages internally. They can vary from one
+    release to another. A common example of this logging is the initial information
+    that Falco prints out when it starts. Another, less common case is when Falco
+    informs you that it was not able to load the driver:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The term *logging* does *not* refer to the process of outputting security notifications.
+    The log messages discussed in this section are not security alerts. Logging options
+    do not affect notification processing in any way. Also, since these log messages
+    are not notifications, Falco does not output them through the output channels.
+    Although you might see the usual notifications interleaved with log messages when
+    running Falco in a terminal, keep in mind that they are different.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Falco outputs these messages via the [standard error stream](https://oreil.ly/yatpB)
+    and sends them to syslog. You can configure Falco to discard some messages based
+    on their severity level. [Table 8-3](#options_for_falcoapostrophes_internal_l)
+    lists the logging options you can configure in Falco’s configuration file (*/etc/falco/falco.yaml*).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 8-3\. Options for Falco’s internal logging
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Logging option (with default) | Description |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `log_stderr: true` | If enabled, Falco sends log messages to the stderr.
+    |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `log_syslog: true` | If enabled, Falco sends log messages to syslog. Note
+    that this option is not related to the syslog output and does not affect it. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `log_level: info` | This option defines the minimum log level to include
+    in logs: `emergency`, `alert`, `critical`, `error`, `warning`, `notice`, `info`,
+    or `debug`. Note that these values, although similar, are not rule priority levels.
+    |'
+  prefs: []
+  type: TYPE_TB
+- en: Conclusion
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: This chapter concludes [Part II](part02.xhtml#ii_the_architecture_of_falco)
+    of this book. At this point, you should have a solid understanding of Falco’s
+    architecture and its inner workings. Your familiarity with the processing pipeline’s
+    data flow, ending with the output framework, will allow you to use Falco in a
+    variety of ways. For example, you can view security notifications in your favorite
+    dashboard or even create a response engine (a mechanism that takes action when
+    a specific event occurs) on top of Falco. To discover more use cases, use your
+    imagination—and continue reading this book.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The next level up is real-world use cases, so [Part III](part03.xhtml#iii_running_falco_in_production)
+    is all about running Falco in production. As always, we will guide you through
+    each step.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([1](ch08.xhtml#ch01fn8-marker)) A *concurrent queue* is a way of implementing
+    a [queue data structure](https://oreil.ly/NWtzd) that multiple running threads
+    can safely access in parallel. The *pop* and *push* operations are typical actions
+    that a queue supports (respectively, to enqueue and dequeue an item). Most implementations
+    allow performing those operations in either blocking or nonblocking fashions.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([2](ch08.xhtml#ch01fn9-marker)) In the syslog protocol, the facility value
+    determines the function of the process that created the message. `LOG_USER` is
+    intended for messages generated by user-level applications.
+  prefs: []
+  type: TYPE_NORMAL

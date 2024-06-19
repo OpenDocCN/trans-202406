@@ -1,0 +1,586 @@
+- en: Chapter 21\. Implementing an Operator
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: A key tenet of Kubernetes is its ability to be extended beyond the core API
+    by the operators of the system. Many (these authors included) believe this extensibility
+    was a driving factor in the dominance of Kubernetes in the marketplace. As developers
+    began to create applications that would run on Kubernetes, operators developed
+    helper applications that knew how to call the Kubernetes API and automate much
+    of the routine work they would need to do to keep the applications stable. Many
+    of these applications were bash scripts or helper containers running in a cluster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In 2016, a key group of Kubernetes contributors, led by CoreOS (now Red Hat),
+    positioned an Operator pattern to allow for easier development and implementation
+    of Kubernetes applications. The Operator pattern outlined a way to package, deploy,
+    and maintain an application that is integrated with the Kubernetes API and client
+    tooling such as `kubectl`. Using an Operator, an application developer could natively
+    create an application that could run in Kubernetes, be integrated with the existing
+    Kubernetes process, and embed institutional knowledge. This knowledge wasn’t limited
+    to deploying the application but also allowed for smooth upgrades, reconciliation
+    across disparate services, custom scaling processes, and embedding observability
+    into the complex system, which drove the acceptance of the framework into the
+    Kubernetes ecosystem.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The goal of this chapter is not to teach you how to write an Operator. Numerous
+    resources are available on this topic and have much more in-depth coverage than
+    what can be covered in a single chapter. The goal here is to introduce the concept
+    and explain when and why to implement an Operator into your environment while
+    sharing some of the key considerations you will need to plan.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Operator Key Components
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'The [Operator Framework](https://oreil.ly/YG0gU) itself is an open source toolkit
+    with a well-defined software development kit (SDK), life-cycle management, and
+    publication tooling. A few projects out there have been built around the concept
+    of the Operator pattern and making it easier for the community to develop. The
+    members of the API Machinery SIG in the Kubernetes community sponsored the development
+    of kubebuilder to offer a base SDK for working with the two main components of
+    an Operator: Custom Resource Definitions (CRDs) and controllers. Sponsored by
+    Google as part of the community, kubebuilder is being positioned as the base SDK
+    for all operators and other projects such as KUDO, KubeOps, and Kopf. Examples
+    in this chapter will be based on kubebuilder syntax where specific code is discussed;
+    however, the concepts are very similar in many of the Operator SDKs out there.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Custom Resource Definitions
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Often the need to define complex application dependencies and resources using
+    only native Kubernetes resources becomes challenging in actual practice. The platform
+    engineers usually have to build complex yaml templates, with rendering pipelines
+    and additional resources like jobs and init containers to manage much of the customization
+    needed to run a large application. However, the Custom Resource Definition allows
+    developers to extend the Kubernetes API to provide new resource types that can
+    then better represent declaratively the resource needs of an application.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Kubernetes allows for the dynamic registration of new resources using the `Custom​Re⁠sourceDefinition`
+    interface and will automatically register a new RESTful resource path for the
+    versions you specify. Unlike many of the resources that are built into Kubernetes
+    natively, CRDs can be maintained independently and updated when needed. CRDs will
+    define a specification of the resource under the `spec` field and will have a
+    `spec.scope` defining if the custom resources that are created from the CRD will
+    be namespaced or cluster-wide resources. Before we see a CRD and its custom resource
+    implementation, a small diversion into nomenclature of the Kubernetes API is important.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Kubernetes API objects, resources, version, group, and kind
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: Objects in Kubernetes are the actual entities that are persisted in the system
+    to represent the state of the cluster. The object itself is what the typical CRUD
+    operations act on within a cluster. In essence an object will be the entire resource
+    definition in state such as a pod or PersistentVolume.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'A Kubernetes resource is an endpoint in the API that represents a collection
+    of objects of a specific kind. So a pod resource will contain a collection of
+    Pod objects. One can see this in the cluster easily with:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Groups bring objects of similar concern together. This grouping combined with
+    versioning allows for objects within the same group to be managed individually
+    and updated as needed. The group is represented in the RESTful path in the `apiVersion`
+    field of the object. In Kubernetes the core group (also described as legacy) will
+    fall under the */api/REST* path. Often seen in a Pod spec or Deployment yaml in
+    the `apiVersion` field with the base path removed as such:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'As with any good API, Kubernetes APIs are versioned and support multiple versions
+    using different API paths. There are guidelines for Kubernetes versioning and
+    the same guidelines should be used when versioning Custom Resources. APIs can
+    also fall into different levels based on support or stability of the API, so often
+    you will see Alpha, Beta, or Stable APIs. In a cluster, for example, you may have
+    `v1` and `v1beta1` for the same group:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Often, Kind and Resource are used as the same context; however, a resource
+    is a concrete implementation of a Kind. Often there is a direct Kind to Resource
+    relationship such as when defining a `kind: Pod` specification that will create
+    a pod resource in the cluster. On occasion there is a one to many relationship
+    such as the `Scale` kind, which can be returned by different resources such as
+    `Deployment` or `ReplicaSet`. This is known as a subresource.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Putting these principles together we can begin to model our API for our customer
+    resource. For the rest of this chapter, kubebuilder-generated snippets will be
+    used, but the actual code is not important and will be only a partial representation.
+    The concept discussed is what the focus will be and how it relates to best practices
+    when implementing an Operator.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Creating Our API
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'A Customer Resource Definition can be created in yaml by hand; however, kubebuilder
+    and other Operator SDKs will automatically generate the API definition for you
+    based on the code provided. In kubebuilder you can create a scaffold of the API
+    and the required Go code after your project is initialized. To initialize a project,
+    once kubebuilder and its prerequisites are met, you can simply run an `init` command
+    from a new directory that will contain your project files:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This will create some basic files and placeholder boilerplate code:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Once that is completed you can create the scaffold for the API definition by
+    running the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: This will add an API, bin, and controllers directories and update other directories
+    with more boilerplate code. The two main files to work with are the *api/<version>/<kind>_types.go*
+    and *controllers/<kind>_controller.go* files.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To start modifying your API to map to the resources you want expressed in your
+    CRD, you will add new fields to the struct created for your new object in the
+    *api/<version>/<kind>_types.go* file. So for our example here we add the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note
+  prefs:
+  - PREF_BQ
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: ''
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: If you are not a Go programmer do not worry as there are other projects such
+    as Java Operator SDK and Kopf that can help you build Operators in either Java
+    or Python as well. The Operator Framework SDK also has support to create Operators
+    from Ansible or Helm.
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: 'To continue with the example, we want to add specific fields to the spec and
+    also have a status. To update specification the information can be added as such:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'What is of importance here is we mapped the information we need in the spec
+    that defines the application into data types and gave them a JSON representation.
+    The `// +kubebuilder:` lines that look like they are in comments are marker comments
+    that kubebuilder uses to generate code based on the information provided. As an
+    example, we are declaring to kubebuilder to generate all the needed code to ensure
+    that the `Framework` field is validated against three possible strings of Java,
+    Python, or Go. That is why it was noted at the end of the `kubebuilder create
+    api` command that any changes made to the API require a `make generate` to update
+    all the other generated code required and the `make manifests` to update all the
+    yaml manifests’ boilerplate. This will then give you a starting CRD that looks
+    something like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You will notice that kubebuilder also added the OpenAPI validation information
+    so the CR can be validated against the requirements of the CRD. Kubebuilder also
+    allows for the creation of additional validators using logic via a webhook. To
+    add admission webhooks for your CRD, by implementing the Defaulter and/or the
+    Validator interface, kubebuilder provides code generation to create the webhook
+    server and registers it with the controller manager. Using the kubebuilder CLI
+    this can easily be generated in a scaffold again with:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'We can deploy this custom resource easily with kubebuilder:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'We can then see from the `kubectl` command that the egapp resource is now installed
+    in the cluster, and we can see the structure of the resource itself:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: Now that the API has been created and installed in the cluster, it can’t really
+    do anything. At this stage if we create a yaml and deploy it to the cluster in
+    a namespace it will create an entry in etcd with the information stated in the
+    yaml, but until we create the controller, nothing will happen. Now let’s explore
+    how the controller works.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Controller Reconciliation
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The controller code was created when the API was created and will have much
+    of the boilerplate needed to start building the reconciliation logic needed. Note
+    that the code is not important here, but the understanding of what is happening
+    behind the scenes is key to understanding what an Operator can do. The controller
+    code is located in the *controllers/<kind>_controller.go* file. The `Reconcile`
+    method is where the logic should be added. Before we dive into that, a plan for
+    reconciliation and understanding the phases is required. This is shown in [Figure 21-1](#operator_overview).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Operator Overview](assets/kbp2_2101.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 21-1\. Operator overview
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Operators are services that watch for events related to the resource types the
+    operator cares about. When an event occurs that meets the criteria, called a predicate
+    in the Operator pattern, the Operator begins the process of reconciling the desired
+    state to the running state. During the reconciliation process, any logic to determine
+    how to handle the state change is implemented; regardless of what exactly changed,
+    the reconcile cycle handles it all. This is known as level-based triggering, and
+    while less efficient, it is well-suited for complex distributed system like Kubernetes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In the Operator, developers will code into the `Reconcile` method the logic
+    represented in [Figure 21-2](#reconciliation_logic):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Is there an instance of the Custom Resource?
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: If so, do some validation.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: If valid, check to see if state needs to be changed and change it.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: If the resource is being deleted, the logic to handle cleanup is also implemented
+    here.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If your CR implements other resources that it does not directly own, you should
+    implement a `Finalizer` to handle the cleanup of those sources and block the deletion
+    of the CR until the finalizer completes its process. This is often used for CRs
+    that will create resources on a cloud provider, for example, or PersistentVolumes
+    as they may have some reclaim policy defined that needs to be honored before the
+    PV is considered deleted.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Reconciliation Logic](assets/kbp2_2102.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 21-2\. Reconciliation logic
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Resource Validation
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: An important aspect of designing an efficient Operator is the validation of
+    the resources being requested. As mentioned there are a few ways to validate the
+    resource against the API specification; however, it is important to build redundancies
+    into the process to ensure consistent behavior. The first layer of validation
+    should be the OpenAPI validation defined in the CRD specification. This validation
+    will prevent the CR from ever making it to the etcd server as a resource and causing
+    detrimental aftereffects. The second layer of validation should be a validating
+    admission controller implementation that will check the resource against the API
+    specification through a webhook request. This again prevents the resource from
+    ever making it into the API server. Adding some validation logic in the reconciliation
+    loop code is also a valid strategy, but it is important to understand that it
+    will be validation against an already existing resource in the cluster state,
+    and therefore proper error handling needs to take place. Often this is implemented
+    as an `IsValid` method that calls the same validation logic that the Validating
+    Webhook implementation has.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Controller Implementation
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'If we continue with the example used so far, the logic for our controller will
+    be in the following code:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The main steps are implemented here through the reconcile process. Two important
+    points to reference are:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Custom Resource actually creates deployments. If the specific instance is
+    not found, a deployment is created using values from the CR spec to fill in the
+    required data. The line `ctrl.SetControllerReference(m, deploy, r.scheme)` is
+    where ownership of the deployment is obtained by the CR. This allows for the resource
+    to also clean up any deployments it owns when deleted.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The status is updated on the resource with a list of pods associated with the
+    deployment. This update is done to the `status.pods` property of the CR, which
+    was created as a subresource on the line `err := r.Status().Update(ctx, egApp)`.
+    This is important because it will not update the status of our resource without
+    increasing the `ResourceGeneration` metadata field. By implementing a predicate
+    on the watch to not trigger a reconciliation on events that did not increase the
+    `ResourceGeneration` metadata field, we can ensure the entire loop is not repeated
+    for a noop scenario.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Once the controller logic is implemented, to test it against the CR spec deployed
+    earlier to the cluster, kubebuilder can run the code locally to verify all is
+    working and then also package it as a container and deploy to the cluster when
+    ready to operationalize.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Here is what that looks like:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The logs show that the controller is up and listening for events. Then a CR
+    was deployed to the cluster using:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE14]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The controller log shows the reconciliation loop starting, and because a deployment
+    did not exist it created the deployment:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE15]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Then a `kubectl delete` was called on the instance and the controller began
+    another reconciliation loop and deleted the object:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE16]'
+  prefs: []
+  type: TYPE_PRE
+- en: Much more can be done within the context of the controller and API itself, for
+    example, implementing complex logic around cleanup, such as calling backups, rebalancing
+    workloads across nodes, scaling with custom logic, etc. This is where an engineer’s
+    deep knowledge of how a system should behave, how it should be deployed, and how
+    to react in case of a problem is codified. The whole premise of the benefits of
+    the Operator pattern is encapsulated in this code example.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Operator Life Cycle
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'The development of an Operator is not an easy undertaking, but it does not
+    have to answer all the operational problems of the application. Development should
+    focus on the big hurdles and then iterate through versions to enhance the Operator’s
+    capabilities over time. The team at CoreOS and RedHat put together a solid spectrum
+    of capabilities they call [Operator Capability Levels](https://oreil.ly/X_Lun)
+    that outline some of the main concerns the Operator should tackle when maturing
+    through the levels. These are:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Basic install
+  prefs: []
+  type: TYPE_NORMAL
+- en: Automated application provisioning and configuration management
+  prefs: []
+  type: TYPE_NORMAL
+- en: Seamless upgrades
+  prefs: []
+  type: TYPE_NORMAL
+- en: Patch and minor version upgrades are supported
+  prefs: []
+  type: TYPE_NORMAL
+- en: Full life cycle
+  prefs: []
+  type: TYPE_NORMAL
+- en: App life cycle, storage life cycle (backup, failure recovery)
+  prefs: []
+  type: TYPE_NORMAL
+- en: Deep insights
+  prefs: []
+  type: TYPE_NORMAL
+- en: Metrics, alerts, log processing and workload analysis
+  prefs: []
+  type: TYPE_NORMAL
+- en: Auto pilot
+  prefs: []
+  type: TYPE_NORMAL
+- en: Horizontal/vertical scaling, auto config tuning, abnormal detection, scheduling
+    tuning
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is a solid framework for planning the life of an Operator that will progress
+    over time. The focus is that the Operator should be treated like any piece of
+    software with defined life cycle, product management, deprecation policies, and
+    clear and consistent versioning.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Version Upgrades
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: In our example we started with `v1alphav1` as our stated version supported in
+    the CRD. Through the life cycle of the Operator there may be a need to support
+    multiple versions depending on the stage and stability of the API.
+  prefs: []
+  type: TYPE_NORMAL
+- en: When a new version is introduced, a process should be followed carefully to
+    ensure that issues will not arise with existing resources. A Custom Resource object
+    will need the ability to be served by all defined versions of the CRD. That means
+    there could be a mismatch between the version being served and the one stored
+    in state. A conversion process should be implemented on the Custom Resource object
+    to be converted between the version stored and the version that is served. When
+    the conversion involves schema changes or custom logic, a conversion webhook can
+    be used to make the required updates. The default None conversion strategy is
+    used when there are no schema or custom logic is needed as only the apiVersion
+    field will be changed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You will add a conversion strategy field to the CRD and point it to the webhook
+    listening for the specific resource. This would look like:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE17]'
+  prefs: []
+  type: TYPE_PRE
+- en: Operator Best Practices
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'The development and ongoing upkeep of an Operator is no small endeavor and
+    should be thought about and planned very carefully. Many times it is easier to
+    package an application using simpler paradigms such as Helm charts, Kustomize
+    repositories, or Terraform modules. When it becomes important to include special
+    reconciliation logic to maintain the application or ease the burden for the users
+    of the application, then an Operator pattern may make sense. If you decide to
+    build an Operator then best practice guidelines are:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Do not overload an Operator to manage more than a single application, and own
+    each CRD it controls.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'If your Operator manages multiple CRDs then the Operator should also have multiple
+    controllers. Keep it simple: one controller for each CRD.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Operators should not be specific to the namespace they are watching resources
+    in and also should not be specific to the namespace they will be deployed in.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Operators should be versioned using [semantic versioning](https://semver.org),
+    and as extensions of the Kubernetes API, they should also follow the [Kubernetes
+    API versioning guidelines](https://oreil.ly/O-5lH) as they relate to version changes.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: CRDs should follow the OpenAPI spec to allow for a known schema. Most Operator
+    SDK-based tooling will provide a method to create boilerplate CRDs based on the
+    OpenAPI spec to make them easier to develop.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: As with any Kubernetes service the Operator itself should follow sound security
+    guidelines such as run as non-root, least privilege RBAC, and observability. Metrics
+    and logs should be external to the system. The Operator should be instrumented
+    to allow for visibility into the Operator’s health and any known Service Level
+    Indicators (SLIs). Metric exports such as Prometheus, DataDog, Cloud Operations,
+    and OpenTelemetry can all be leveraged.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Operators do not install other Operators and should not register their own CRDs
+    as those resources are global to the cluster and would require escalated privileges
+    for the Operator.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Check all CRDs for validity before accepting the request. The CRDs could be
+    validated against a known schema such as an OpenAPI validation schema or through
+    an admission controller that can validate the CRD. These methods will prevent
+    the resource from wasting space on etcd as it will not be submitted to the API.
+    There should also be some validation logic within the reconciliation cycle as
+    a last effort to validate and clean up the resource.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The Operator should be self-cleaning when no longer needed. Proper resource
+    clean up after deletion is important, not only for direct resources created by
+    the Operator but also for any external resources that may have been created in
+    support of the application requirements of the Operator (e.g., PVs for storage
+    attached to pods as needed by the application, external resources to the cluster,
+    etc.).
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Think carefully about the life cycle of the Operator and when breaking changes
+    are introduced to the upgrade path for existing users of the prior versions. Implement
+    conversion webhooks to allow the conversion to and from a specific version to
+    ensure there is no loss of information converting a resource from a vX to a vY
+    and back to vX.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Be thoughtful on the status information written to the resources managed by
+    the Operator. The customer resource is the only interface to the user to understand
+    the state of the resource. By having a status that is clear and concise written
+    to the resource by the controller the user can easily use the existing Kubernetes
+    client tooling to query and act on the status as desired. Status should be implemented
+    as a subresource, and a predicate should be used so as not to trigger a reconciliation
+    loop after an update that did not increase the `ResourceGeneration` metadata field
+    of the main resource.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Summary
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The promise of fully automated deployment and “day 2” operations for an application
+    has driven the Operator market beyond just experimental to become a key feature
+    in the Kubernetes ecosystem. Operators should be used when complex applications
+    are needed to support an organization’s business, but be careful in creating them
+    when easier mechanisms exist. Leverage existing Operators created by software
+    vendors that help support and maintain them, many of which can be found on [operatorhub.io](https://oreil.ly/wMLSA).
+    While the Operator pattern can be a very powerful tool, it requires commitment
+    to ensure that it doesn’t create more problems than it can solve. All warnings
+    aside, if you are building a large application platform based on Kubernetes the
+    Operator pattern should be front and center in reducing operator toil.
+  prefs: []
+  type: TYPE_NORMAL

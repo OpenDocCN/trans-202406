@@ -1,0 +1,635 @@
+- en: Chapter 13\. Writing Falco Rules
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Welcome to [Part IV](part04.xhtml#iv_extending_falco) of the book! Now that
+    you’ve learned what Falco is and does ([Part I](part01.xhtml#i_the_basics)), understand
+    the intricacies of its architecture ([Part II](part02.xhtml#ii_the_architecture_of_falco)),
+    and are a pro at deploying and running it ([Part III](part03.xhtml#iii_running_falco_in_production)),
+    it’s time, once more, to step up your game.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The final part of this book (Chapters [13](#writing_falco_rules) through [15](ch15.xhtml#how_to_contribute))
+    is about going beyond what comes out of the box. You will learn how to customize
+    Falco for your specific needs and how, if you desire, you can contribute your
+    improvements to the project so that the community can benefit from them. This
+    is where you get to unleash your creativity.
+  prefs: []
+  type: TYPE_NORMAL
+- en: We’ve already covered rules extensively in the book, in particular in [Chapter 7](ch07.xhtml#falco_rules).
+    But you unlock the true power of Falco when you become capable of creating your
+    own rules and adapting the existing ones to your environment—which is what we’re
+    going to show you how to do here.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This chapter assumes you have a good understanding of fields and filters (covered
+    in [Chapter 6](ch06.xhtml#fields_and_filters)) and of the basics of rules and
+    rules files ([Chapter 7](ch07.xhtml#falco_rules)). If you feel you need a refresher,
+    just go back to those chapters. We’ll wait for you here until you’re ready.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Customizing the Default Falco Rules
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'Although Falco’s default set of rules is rich and constantly expanding, it’s
+    not uncommon to encounter situations where those rules require customization.
+    Here are some examples:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: You want to expand the scope of a rule or increase its coverage.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: You want to tighten the number of rules that Falco loads to decrease its CPU
+    usage.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: You want to reduce alerting noise by controlling a rule’s behavior or adding
+    exceptions to it.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Falco offers a framework to accomplish these things without having to fork the
+    default rules files and maintain your own copies. [Chapter 7](ch07.xhtml#falco_rules)
+    taught you how to replace and append to macros, lists, and rules, as well as how
+    to disable rules. This is especially useful since, as you learned in [Chapter 10](ch10.xhtml#configuring_and_running),
+    the order in which rules files are loaded is important, and you control that order.
+    This means you can change an existing rule in a separate file that is loaded later
+    in the initialization chain.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The default Falco configuration is crafted to take advantage of this mechanism,
+    providing two places out of the box where you can customize existing rules without
+    touching the default ruleset. The first is *falco_rules.local.yaml*. This file,
+    which is initially empty, is loaded after *falco_rules.yaml* and is therefore
+    a good place to disable or modify rules in the default ruleset. The second is
+    */etc/falco/rules.d*. Falco, by default, loads all the rules files that it finds
+    in this directory after loading *falco_rules.yaml* and *falco_rules.local.yaml*.
+    This makes it another good place for customizations.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Writing New Falco Rules
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: At its core, writing a new rule is just a matter of crafting the condition and
+    the output, so conceptually it is a very straightforward process. In practice,
+    however, there are several factors to take into account. Improvised rule development
+    often results in imperfect or even nonfunctional rules. Seasoned Falco users tend
+    to develop their own processes for rule writing, and we recommend you do the same.
+    What the best process is depends on your setup, target environment, and taste,
+    so we won’t be able to offer you absolute prescriptions. Instead, we’ll share
+    the way we do it, hoping it can serve as inspiration and guidance.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Our Rule Development Method
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'The method for rule development used by this book’s authors consists of nine
+    steps:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Replicate the events you want to detect.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Capture the events and save them in a trace file.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Craft and test the condition filter with the aid of sysdig.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Craft and test the output with the aid of sysdig.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Convert the sysdig command line into a rule.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Validate the rule in Falco.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Modularize and optimize the rule.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Create a regression.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Share the rule with the community.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: In the following sections we’ll expand on each item in this list and provide
+    a real-world example, walking you through crafting a new rule that detects attempts
+    to create symlinks^([1](ch13.xhtml#ch01fn18)) inside the */proc*, */bin*, and
+    */etc* directories. This is, at minimum, strange behavior and could potentially
+    indicate fishy activity. Here’s how you would apply our method to build such a
+    rule.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 1\. Replicate the events you want to detect
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'It’s almost impossible to create a reliable rule without testing and validating
+    it, so the first step is to re-create the scenario (or scenarios) that the rule
+    should detect. In this case, you want to detect the creation of symlinks in three
+    specific directories. You can re-create that scenario from within a terminal using
+    the `ln` command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: 2\. Capture the events and save them in a trace file
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'Now you can capture the suspicious activity using sysdig. (If you need a refresher
+    on sysdig and trace files, go back to [“Observing System Calls”](ch04.xhtml#observing_system_calls).)
+    sysdig allows you to easily store the activity in a trace file using the `-w`
+    command-line flag. To see how it works, issue this command in a terminal:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'In another terminal, run the three `ln` commands again, then go back to the
+    first terminal and stop sysdig with Ctrl-C. You now have your activity in a trace
+    file that you can inspect as many times you want:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You will notice that the trace file contains all of the host’s activity, not
+    only your `ln` commands. You will also notice that the file is pretty big. You
+    can make it smaller and easier to inspect by using a filter when you run the capture:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Now you have a noise-free file that is less than 1 MB in size, containing only
+    the specific activity that you need to craft your rule. Saving the rule-triggering
+    activity in a trace file has several advantages:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: It requires replicating complex behaviors only once. (Not all suspicious behaviors
+    are as simple to detect as running `ln` three times!)
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: It allows you to focus on the events and stay in a single terminal, without
+    having to replicate the rule-triggering commands many times.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: It allows you to develop rules on a different machine. You don’t even need to
+    deploy and configure Falco on the machine where the behavior is happening! This
+    is really nice if you want to capture behaviors in “unfriendly” environments like
+    cloud containers or edge devices.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: It lets you develop rules with normal user privileges.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: It provides consistency, which is useful not only for creating the rule but
+    also for implementing regressions when the rule is done.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 3\. Craft and test the condition filter with the aid of sysdig
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'Now that you have the data you need, it’s time to work on the condition. Typically,
+    at this stage you’ll want to answer a couple of questions:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: What type of system call (or system calls) do you need to target? Of course,
+    not all Falco rules are based on system calls; for example, you might be using
+    a plugin. But in general, identifying the type of event that will trigger the
+    rule is the first order of business.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Once you know which event to parse, which of its parameters or arguments do
+    you need to check?
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'sysdig can help you answer these questions. Use it to read and decode the capture
+    file:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Toward the end of the output file is where the magic happens:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Our system call is `symlinkat`. The system call’s [manpage](https://oreil.ly/oW7rT)
+    tells you that it’s a variation of another system call, `symlink`. You can also
+    see that the `linkpath` argument contains the filesystem path of the symbolic
+    link. This is exactly what you need to know to craft your filter, which should
+    look like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You can immediately leverage sysdig to validate that this is the right filter:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: Bingo! The output correctly shows the three system calls that should trigger
+    the rule.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 4\. Craft and test the output with the aid of sysdig
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'sysdig, handily, can help you craft the rule’s output too. The sysdig `-p`
+    flag, in particular, receives a Falco output–compatible string as input and uses
+    it to print a Falco-like output to the terminal for each event accepted by the
+    filter. This makes it effortless to craft and test the rule’s output, knowing
+    that Falco will show the same thing when the rule triggers. For example, this
+    looks like a nice output for your rule:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Test it, together with the filter, in sysdig:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note the quotation marks around both the filter and the output condition. This
+    prevents the shell from getting confused by any characters they contain.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Your condition and output look pretty good. Time to switch to Falco!
+  prefs: []
+  type: TYPE_NORMAL
+- en: 5\. Convert the sysdig command line into a rule
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'The next step is converting what you have into a Falco rule. This is little
+    more than a copy-and-paste exercise, since you already know that the condition
+    and output work:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: 6\. Validate the rule in Falco
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'Save the rule in a YAML file called *symlink.yaml*. Now testing it in Falco
+    is a matter of loading it with the `-r` flag, then using the `-e` flag to use
+    the capture file as input:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: The rule triggered the expected number of times and displayed the correct output.
+    Congratulations!
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Note how, in Falco, you can leverage the same trace file that you created with
+    sysdig. The `-e` command-line option tells Falco: “Read system calls from the
+    given file instead of using a driver. When you reach the end of the file, print
+    a summary and return.” Very handy for quick iteration!'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 7\. Modularize and optimize the rule
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'You have a working rule and you’ve tested it, but there’s room to make it prettier.
+    Step 7 is adding modularity to the rule:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This moves the condition’s checks into macros, which makes the condition shorter
+    and more readable. That’s great, but you can do even better:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  prefs: []
+  type: TYPE_PRE
+- en: What you did here is to move the condition constants into lists. This has multiple
+    benefits. First, it makes the rule easy to extend, in a noninvasive way. If you
+    want to add another sensitive directory, you can do it easily by adding the relevant
+    item to the list or, even better, by creating a second `symlink_syscalls` list
+    in append mode. This also gives you an opportunity to optimize the rule by using
+    operators like `in` and `pmatch` that can perform multiple checks in an efficient
+    way.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 8\. Create a regression
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: When you create a new rule, particularly if your goal is including it in the
+    official ruleset, you might like to be able to test it in the future. For example,
+    you might want to ensure it still works with new versions of Falco or on different
+    Linux distributions. You might also want to measure its performance (such as its
+    CPU utilization) under stress. The capture file you created at the beginning of
+    the process is a good base for a regression.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As an alternative, the Falco community has created a tool called event-generator
+    (mentioned in [Chapter 2](ch02.xhtml#getting_started_with_falco)) that’s useful
+    for testing. If you add an action for your rule in event-generator, you or other
+    people will be able to trigger the rule in real time on an arbitrary machine.
+    The tool can replay your rule-triggering scenario in a flexible way, including
+    triggering the rule multiple times and at specific frequencies. That way, you
+    can precisely measure its CPU utilization. You can also check if, under heavy
+    stress, the rule will slow Falco down to the point where the driver starts dropping
+    system calls.
+  prefs: []
+  type: TYPE_NORMAL
+- en: A full discussion of event-generator goes beyond the scope of this book, but
+    you can take a look at its [GitHub repository](https://oreil.ly/jERpD) to learn
+    more about it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 9\. Share the rule with the community
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: Congratulations, you’ve completed the development of a brand new rule! At this
+    point, it is important to remember that Falco is a tool written by the community
+    for the community. Every new rule you write could be valuable to many others,
+    so you should consider contributing it to the default ruleset. [Chapter 15](ch15.xhtml#how_to_contribute)
+    will teach you everything you need to know about contributing to Falco. As Falco
+    maintainers and community members, we’d like to thank you in advance for any rules
+    you decide to share with the community.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Things to Keep in Mind When Writing Rules
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Now that we’ve covered the basics, let’s discuss some concepts that are a bit
+    more advanced but very important to keep in mind when developing rules.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Priorities
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'As mentioned in [Chapter 7](ch07.xhtml#falco_rules), every Falco rule must
+    have a priority. The rule priority is typically reported in conjunction with the
+    output and can have one of the following values:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`EMERGENCY`'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`ALERT`'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`CRITICAL`'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`ERROR`'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`WARNING`'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`NOTICE`'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`INFORMATIONAL`'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`DEBUG`'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Picking the right priorities for your rules is crucial, because typically rules
+    are filtered based on priority. Assigning too high a priority to a rule could
+    cause alert flooding and diminish its value.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Here is what the official Falco documentation has to say about how priorities
+    are used in the default ruleset:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: If a rule is related to writing state (filesystem, etc.), its priority is `ERROR`.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: If a rule is related to an unauthorized read of state (reading sensitive files,
+    etc.), its priority is `WARNING`.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: If a rule is related to unexpected behavior (spawning an unexpected shell in
+    a container, opening an unexpected network connection, etc.), its priority is
+    `NOTICE`.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: If a rule is related to behaving against good practices (unexpected privileged
+    containers, containers with sensitive mounts, running interactive commands as
+    root), its priority is `INFORMATIONAL`.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Noise
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Noise is one of the most critical factors to take into account when crafting
+    rules, as well as a generally complex topic in security. The trade-off between
+    detection accuracy and false positive generation is a constant source of tension
+    in detection tools like Falco.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'It’s often said that the only ruleset with no false positives is one with no
+    rules. Completely avoiding false positives is extremely difficult and often an
+    unrealistic goal, but there are some guidelines you can follow to reduce the problem:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Guideline 1: Test and validate.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Before using a rule in production, make sure you test it extensively in as many
+    environments as possible (different OS distributions, kernels, container engines,
+    and orchestrators).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Guideline 2: Priorities, and priority-based filtering, are your friends.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Avoid deploying a rule for the first time with `ERROR` or `CRITICAL` as the
+    priority. Start with `DEBUG` or `INFO`, see what happens, and increase the value
+    if it’s not too noisy. Lower-priority rules can be easily filtered out at different
+    stages of the output pipeline, so they don’t run the risk of waking up the security
+    operations center team in the middle of the night.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Guideline 3: Leverage tags.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The tags that you assign to your rules are included in Falco’s gRPC and JSON
+    outputs. This means you can use them to complement priorities and filter Falco’s
+    output in an even more flexible way.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Guideline 4: Plan for exceptions.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Good rules are designed to account for known and unknown exceptions in a way
+    that is readable and modular and can easily be extended.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Take a look, for example, at the *Write below rpm database* rule from the default
+    ruleset:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE14]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note how known exceptions are included in the rule as macros (`rpm_procs`, `ansible_running_python`,
+    etc.), but the rule also includes a macro (`user_known_write_rpm_database_activities`)
+    that lets the user add their own exceptions through the override mechanism.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Performance
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Performance is another important topic to consider when writing and deploying
+    rules, because Falco typically operates with high-frequency data sources. When
+    you are using Falco with a system call source like the kernel module or the eBPF
+    probe, your whole ruleset might need to be evaluated millions of times per second.
+    At such frequencies, rule performance is key.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Having a tight ruleset is definitely a good practice to keep Falco’s CPU utilization
+    under control, as you learned in [Chapter 10](ch10.xhtml#configuring_and_running).
+    It is also important, however, to make sure every new rule you create is optimized
+    for performance. The overhead of your rule is more or less proportional to the
+    number of field comparisons that the rule’s condition needs to perform for every
+    input event. Therefore, you should expect that a simple condition like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE15]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'will use around 20% of the CPU of a more complex rule like this one:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE16]'
+  prefs: []
+  type: TYPE_PRE
+- en: Optimizing a rule is all about making sure that, in most common situations,
+    it requires the Falco engine to perform the smallest possible number of comparisons.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Here are some guidelines you should follow to reduce the CPU utilization of
+    your rules:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The rule should always start with a check on the event type (such as `evt.type=open`
+    or `evt.type in (mkdir, mkdirat)`). Falco is smart about this: it understands
+    when your rule is restricted to only some event types and will evaluate the rule
+    only when it receives a matching event. In other words, if your rule starts with
+    `evt.type=open`, Falco won’t even start evaluating it for any event that is not
+    an `open` system call. This is so effective (and important!) that Falco emits
+    a warning when a rule doesn’t include a check on the event type.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Include aggressive comparisons that have a high probability of failing earlier,
+    rather than later, in your rule. A Falco condition works like an `if` statement
+    in a programming language: it’s evaluated left to right until something fails.
+    The sooner you make the condition fail, the less work it will require to complete.
+    Try to find simple ways to restrict the scope of your rule. Can you limit it to
+    specific processes, files, or containers? Can you apply it to only a subset of
+    users? Encode these restrictions in the rule, toward the beginning.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Heavy, complex rule logic should be included after (to the right of) the aggressive
+    comparisons and restrictions. For example, long exception lists belong at the
+    end of the rule.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Whenever possible, use multiple value operators like `in` and `pmatch` instead
+    of writing multiple comparisons. In other words, `evt.type in (mkdir, mkdirat)`
+    is better than `evt.type=mkdir or evt.type=mkdirat`. Multiple value operators
+    are heavily optimized and become progressively more effective as the number of
+    values grows.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: In general, small is good. Develop the habit of keeping things as simple as
+    possible. This will not only speed up processing of your rules, it will also ensure
+    they are readable and maintainable!
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Tagging
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Tagging is a powerful tool for crafting rules. It has three important uses:
+    flexibly filtering the rules Falco loads, adding context to its output, and supporting
+    notification filtering and prioritization, therefore reducing noise. Using tags
+    generously will improve your Falco experience and ensure you get the most out
+    of your rules.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Conclusion
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: This was an intense chapter! Rule writing is a demanding topic, but it can also
+    be fun and creative. Plus, writing the perfect rule to perform an impressive detection
+    will earn you a lot of points with your coworkers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([1](ch13.xhtml#ch01fn18-marker)) The term *symlink* is short for *symbolic
+    link*; in Unix, it indicates a filesystem entry that is a reference to another
+    file or directory.
+  prefs: []
+  type: TYPE_NORMAL

@@ -1,0 +1,1204 @@
+- en: Chapter 5\. Advanced Shared Memory
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: '[Chapter 4](ch04.xhtml#ch_shared_mem) looked at using the `SharedArrayBuffer`
+    object to read and write directly to a collection of shared data from across separate
+    threads. But doing so is risky business, allowing one thread to clobber data that
+    was written by another thread. However, thanks to the `Atomics` object, you are
+    able to perform very basic operations with that data in a way that prevents data
+    from being clobbered.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Although the basic operations provided by `Atomics` are convenient, you will
+    often find yourself needing to perform more complex interactions with that data.
+    For example, once you’ve serialized data as described in [“Data Serialization”](ch04.xhtml#ch_shared_mem_sec_serialize),
+    like a 1 kilobyte string, you’ll then need to write that data to the `SharedArrayBuffer`
+    instance, and none of the existing `Atomics` methods will allow you to set the
+    entire value all at once.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This chapter covers additional functionality for coordinating reads and writes
+    to shared data across threads for situations when the previously covered `Atomics`
+    methods just aren’t enough.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Atomic Methods for Coordination
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: These methods are a little different than the ones that were already covered
+    in [“Atomic Methods for Data Manipulation”](ch04.xhtml#ch_shared_mem_sec_atomics).
+    Specificially, the methods previously covered each work with a `TypedArray` of
+    any kind and may operate on both `SharedArrayBuffer` and `ArrayBuffer` instances.
+    However, the methods listed here will only work with `Int32Array` and `BigInt64Array`
+    instances, and they only make sense when used with `SharedArrayBuffer` instances.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If you try to use these methods with the wrong type of `TypedArray`, you’ll
+    get one of these errors:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: As far as prior art goes, these methods are modeled after a feature available
+    in the Linux kernel called the *futex*, which is short for *fast userspace mutex*.
+    *Mutex* itself is short for *mutual exclusion*, which is when a single thread
+    of execution gets exclusive access to a particular piece of data. A mutex can
+    also be referred to as a *lock*, where one thread locks access to the data, does
+    its thing, and then unlocks access, allowing another thread to then touch the
+    data. A futex is built on two basic operations, one being “wait” and the other
+    being “wake.”
+  prefs: []
+  type: TYPE_NORMAL
+- en: Atomics.wait()
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: This method first checks `typedArray` to see if the value at `index` is equal
+    to `value`. If it is not, the function returns the value `not-equal`. If the value
+    is equal, it will then freeze the thread for up to `timeout` milliseconds. If
+    nothing happens during that time, the function returns the value `timed-out`.
+    On the other hand, if another thread calls `Atomics.notify()` for that same `index`
+    within the time period, the function then returns with a value of `ok`. [Table 5-1](#list_atomics_wait_return)
+    lists these return values.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 5-1\. Return values from `Atomics.wait()`
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Value | Meaning |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `not-equal` | The provided `value` didn’t equal the value present in the
+    buffer. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `timed-out` | Another thread didn’t call `Atomics.notify()` within the allotted
+    `timeout`. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `ok` | Another thread did call `Atomics.notify()` in time. |'
+  prefs: []
+  type: TYPE_TB
+- en: You might be wondering why this method doesn’t throw an error for the first
+    two conditions and silently succeed instead of returning an `ok`. Because multithreaded
+    programming is used for performance reasons, it stands to reason that calling
+    these `Atomics` methods will be done in the *hotpaths* of an application, which
+    are areas where the application spends the most time. It’s less performant in
+    JavaScript to instantiate `Error` objects and generate stack traces than to return
+    a simple string, so the performance of this approach is pretty high. Another reason
+    is that the `not-equal` case doesn’t really represent an error case but that something
+    you’re waiting for has already happened.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This blocking behavior might be a little shocking at first. Locking an entire
+    thread sounds a bit intense, and in many cases it is. Another example of what
+    can cause an entire JavaScript thread to lock is the `alert()` function in a browser.
+    When that function is called, the browser displays a dialog and nothing at all
+    can run—not even any background tasks using the event loop—until the dialog is
+    dismissed. The `Atomics.wait()` method similarly freezes the thread.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This behavior is so extreme, in fact, that the “main” thread—the default thread
+    that is available when running JavaScript, outside of a web worker—is not allowed
+    to call this method, at least in a browser. The reason is that locking the main
+    thread would be such a poor user experience that the API authors didn’t even want
+    to allow it. If you do try to call this method in the main thread of a browser,
+    you will get one of the following errors:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: Node.js, on the other hand, does allow `Atomics.wait()` to be called in the
+    main thread. Since Node.js doesn’t have a UI, this isn’t necessarily a bad thing.
+    Indeed, it can be useful when writing scripts where calling `fs.readFileSync()`
+    is acceptable.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you’re a JavaScript developer who has ever worked at a company with mobile
+    or desktop developers, you may have overheard them talk about “offloading work
+    from the main thread” or “locking the main thread.” These concerns, which have
+    traditionally belonged to developers of native apps, will be enjoyed by us JavaScript
+    engineers more and more as the language advances. With regards to browsers this
+    issue is often referred to as *scroll jank*, which is when a CPU is too busy to
+    draw the UI while scrolling.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Atomics.notify()
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: The `Atomics.notify()`^([1](ch05.xhtml#idm45995918555608)) method attempts to
+    awaken other threads that have called `Atomics.wait()` on the same `typedArray`
+    and at the same `index`. If any other threads are currently frozen, then they
+    will wake up. Multiple threads can be frozen at the same time, each waiting to
+    be notified. The `count` value then determines how many of them to awaken. The
+    `count` value defaults to `Infinity`, meaning that every thread will be awakened.
+    However, if you have four threads waiting and set the value to three, then all
+    but one of them will be woken up. [“Timing and Nondeterminism”](#ch_adv_shared_mem_sec_timing)
+    examines the order of these waking threads.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The return value is the number of threads that have been awoken once the method
+    is complete. If you were to pass in a `TypedArray` instance that points to a nonshared
+    `ArrayBuffer` instance, this will always return a `0`. If no threads happen to
+    be listening at the time it will also return a `0`. Because this method doesn’t
+    block the thread, it can always be called from a main JavaScript thread.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Atomics.waitAsync()
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: This is essentially a promise-based version of `Atomics.wait()` and is the latest
+    addition to the `Atomics` family. As of this writing it is available in Node.js
+    v16 and Chrome v87 but not yet available in Firefox or Safari.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This method is essentially a less-performant, nonblocking version of `Atomics.wait()`
+    that returns a promise which resolves the status of the wait operation. Due to
+    the loss of performance (a resolving promise is going to have more overhead than
+    pausing a thread and returning a string), it isn’t necessarily as useful for the
+    hotpath of a CPU-heavy algorithm. On the other hand, it can be useful in situations
+    where a lock change is more convenient to signal another thread than to perform
+    message-passing operations via `postMessage()`. Because this method doesn’t block
+    the thread, it can be used in the main thread of an application.
+  prefs: []
+  type: TYPE_NORMAL
+- en: One of the driving factors for adding this method is so that code compiled using
+    Emscripten (covered in [“Compiling C Programs to WebAssembly with Emscripten”](ch07.xhtml#ch_webassembly_sec_compile))
+    that makes use of threading is allowed to execute in the main thread and not just
+    in worker threads.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Timing and Nondeterminism
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: In order for an application to be correct it usually needs to behave in a deterministic
+    fashion. The `Atomics.notify()` function accepts an argument `count` that contains
+    the number of threads to wake up. The glaring question in this situation is which
+    threads get woken up and in which order?
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example of Nondeterminism
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Threads are woken up in *FIFO* (first in, first out) order, meaning the first
+    thread that called `Atomics.wait()` is the first to be woken up, the second to
+    call is the second to be woken up, and so on. Measuring this can be difficult,
+    however, because log messages printed from different workers aren’t guaranteed
+    to be displayed in the terminal in the true order that they were executed in.
+    Ideally, you should build your application in such a way that it continues to
+    work fine regardless of the order in which threads have been awoken.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To test this for yourself, you can create a new application. First, create a
+    new directory named *ch5-notify-order/*. In it, start off by creating another
+    basic *index.html* file using the content from [Example 5-1](#ex_timing_index).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 5-1\. *ch5-notify-order/index.html*
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: Next, create another *main.js* file, containing the content from [Example 5-2](#ex_timing_main).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 5-2\. *ch5-notify-order/main.js*
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](Images/1.png)](#co_advanced_shared_memory_CO1-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Four dedicated workers are instantiated.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](Images/2.png)](#co_advanced_shared_memory_CO1-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The shared buffer is notified at index 0.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![3](Images/3.png)](#co_advanced_shared_memory_CO1-3)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The notification is sent at half a second.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This file first creates a 4-byte buffer, which is the smallest buffer that can
+    support the needed `Int32Array` view. Next, it creates four different dedicated
+    workers using a `for` loop. For each of the workers it immediately calls the appropriate
+    `postMessage()` call to pass in both the buffer as well as the identifier for
+    the thread. This results in five different threads that we care about; namely
+    the main thread and threads that we’ve nicknamed 0, 1, 2, and 3.
+  prefs: []
+  type: TYPE_NORMAL
+- en: JavaScript creates those threads, and the underlying engine goes to work assembling
+    resources, allocating memory, and otherwise doing a lot of magic for us behind
+    the scenes. The amount of time that it takes to perform those tasks is nondeterministic,
+    which is unfortunate. We can’t know that, for example, it always takes 100 ms
+    to complete the preparation work. In fact, this number will change wildy across
+    machines depending on things like core count and how busy the machine happens
+    to be at the time the code is run. Lucky for us, the `postMessage()` call is essentially
+    queued up for us; the JavaScript engine will call the worker’s `onmessage` function
+    once it’s ready.
+  prefs: []
+  type: TYPE_NORMAL
+- en: After that, the main thread finishes its work, then waits half a second (500
+    ms) using `setTimeout`, and finally calls `Atomics.notify()`. What would happen
+    if the `setTimeout` value were too low, say 10 ms? Or even if it were called in
+    the same stack outside of `setTimeout`? In that case the threads wouldn’t yet
+    be initialized, the worker wouldn’t have had time to call `Atomics.wait()`, and
+    the call would immediately return with a `0`. What would happen if the time value
+    is too high? Well, the application might be painfully slow, or any `timeout` value
+    used by `Atomics.wait()` might have been exceeded.
+  prefs: []
+  type: TYPE_NORMAL
+- en: On Thomas’s laptop the threshold of readiness seems to be somewhere around 120
+    ms. At that point some of the threads are ready and some aren’t. At about 100
+    ms usually none of the threads are ready, and at 180 ms usually all of the threads
+    are ready. But *usually* is a word that we don’t like to use in programming. It
+    is difficult to know an exact amount of time before a thread is ready. Often this
+    is an issue when first starting an application, not one that is present throughout
+    the life cycle of the application.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To finish off the application, create a file named *worker.js*, and add the
+    content from [Example 5-3](#ex_timing_worker) to it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 5-3\. *ch5-notify-order/worker.js*
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](Images/1.png)](#co_advanced_shared_memory_CO2-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Wait on 0th entry in buffer, assuming initial value of `0`, for up to 1 second.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The worker accepts the shared buffer and the name of the worker thread and stores
+    the values, printing a message that the thread has been initialized. It then calls
+    `Atomics.wait()` using the 0th index of the buffer. It assumes an initial value
+    of `0` is present in the buffer (which it is, since we haven’t modified the value).
+    The method call also uses a `timeout` value of one second (1,000 ms). Finally,
+    once the method call is complete, the value is printed in the terminal.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Once you’ve finished creating these files, switch to a terminal and run another
+    web server to view the content. Again, you can do so by running the following
+    command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: As usual, navigate to the URL printed in the terminal and open the console.
+    If you don’t see any output, you may need to refresh the page to run the application
+    again. [Table 5-2](#table_coordination_determinism) contains the output from a
+    test run.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 5-2\. Example nondeterministic output
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Log | Location |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Worker 1 started | worker.js:4:11 |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Worker 0 started | worker.js:4:11 |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Worker 3 started | worker.js:4:11 |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Worker 2 started | worker.js:4:11 |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Worker 0 awoken with ok | worker.js:7:11 |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Worker 3 awoken with ok | worker.js:7:11 |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Worker 1 awoken with ok | worker.js:7:11 |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Worker 2 awoken with timed-out | worker.js:7:11 |'
+  prefs: []
+  type: TYPE_TB
+- en: You will most likely get different output. In fact, if you refresh the page
+    again, you may get different output once again. Or you may even get consistent
+    output across multiple runs. Ideally, though, the final worker name that is printed
+    with the “started” messages will also be the worker that fails with the “timed-out”
+    message.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This output might be a little confusing. Earlier we stated that the order seems
+    to be FIFO ordered, but the numbers here aren’t from 0 to 3\. The reason is that
+    the order doesn’t depend on the order that the threads were created (0, 1, 2,
+    3), but the order in which the threads executed the `Atomics.wait()` call (1,
+    0, 3, 2 in this case). Even with that in mind the order of the “awoken” messages
+    is confusing (0, 3, 1, 2 in this case). This is likely due to a race condition
+    in the JavaScript engine where different threads print messages, likely at almost
+    the exact same moment.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Once printed, the messages don’t get displayed directly to the screen. If that
+    could happen, then the messages could overwrite each other, and you’d end up with
+    visual tearing of pixels. Instead, the engine queues up the messages to be printed,
+    and some other mechanism internal to the browser, but hidden away from us developers,
+    determines the order in which they’re taken from the queue and printed to the
+    screen. For that reason, the order of the two sets of messages won’t necessarily
+    correlate. But the only way to truly tell any order is that the message that times
+    out happens to be from the final thread that was started. Indeed, in this case
+    the “timed-out” message is always from the last worker that was started.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Detecting Thread Preparedness
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'This experiment begs the question: how can an application deterministically
+    know when a thread has finished going through initial setup and is thus prepared
+    to take on work?'
+  prefs: []
+  type: TYPE_NORMAL
+- en: A simple way to do so is to call `postMessage()` from within the worker threads
+    to post back to the parent thread at some point during the `onmessage()` handler.
+    This works because once the `onmessage()` handler has been called the worker thread
+    has finished its initial setup and is now running JavaScript code.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Here’s an example of the quickest way to pull this off. First, copy the *ch5-notify-order/*
+    directory you created and paste it as a new *ch5-notify-when-ready/* directory.
+    Inside this directory the *index.html* file will remain the same, though the two
+    JavaScript files will be updated. First, update *main.js* to contain the content
+    from [Example 5-4](#ex_timing_ready_main).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 5-4\. *ch5-notify-when-ready/main.js*
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](Images/1.png)](#co_advanced_shared_memory_CO3-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Instantiate four workers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](Images/2.png)](#co_advanced_shared_memory_CO3-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Immediately post a message to the workers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![3](Images/3.png)](#co_advanced_shared_memory_CO3-3)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Notify on the 0th entry once all four workers reply.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The script has been modified so that `Atomics.notify()` will be called after
+    each of the four workers has posted a message back to the main thread. Once the
+    fourth and final worker has posted a message, the notification is then sent. This
+    allows the application to post a message as soon as it’s ready, likely saving
+    hundreds of milliseconds in the best case, and preventing a failure in the worst
+    case (like when running the code on a very slow single-core computer).
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `Atomics.notify()` call has also been updated to simply wake up all threads
+    instead of just three, and the timeout has been set back to the default of `Infinity`.
+    This was done to show that every thread will receive the message on time.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Next, update *worker.js* to contain the content from [Example 5-5](#ex_timing_ready_worker).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 5-5\. *ch5-notify-when-ready/worker.js*
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](Images/1.png)](#co_advanced_shared_memory_CO4-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Post message back to parent thread to signal readiness.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](Images/2.png)](#co_advanced_shared_memory_CO4-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Wait for notification on the 0th entry.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This time the `onmessage` handler immediately calls `postMessage()` to send
+    a message back to the parent. Then, the wait call happens shortly afterward. Technically,
+    if the parent thread were to somehow receive the message before the `Atomics.wait()`
+    call were made, then the application could conceivably break. But the code is
+    relying on the fact that message passing is far slower than iterating over lines
+    of code within a synchronous JavaScript function.
+  prefs: []
+  type: TYPE_NORMAL
+- en: One thing to keep in mind is that calling `Atomics.wait()` will pause the thread.
+    This means `postMessage()` can’t be called afterward.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'When you run this code, the new logs print out three pieces of information:
+    the name of the thread, the countdown (always in the order of 3, 2, 1, 0), and
+    finally the amount of time it took for the thread to be ready since the start
+    of the script. Run the same command that you ran before and open the resulting
+    URL in your browser. [Table 5-3](#table_thread_start_timing) contains the log
+    output from some sample runs.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 5-3\. Thread start timing
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Firefox v88 | Chrome v90 |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| T1, 86ms | T0, 21ms |'
+  prefs: []
+  type: TYPE_TB
+- en: '| T0, 99ms | T1, 24ms |'
+  prefs: []
+  type: TYPE_TB
+- en: '| T2, 101ms | T2, 26ms |'
+  prefs: []
+  type: TYPE_TB
+- en: '| T3, 108ms | T3, 29ms |'
+  prefs: []
+  type: TYPE_TB
+- en: In this case, with a 16-core laptop, Firefox seems to take around four times
+    as long to initialize the worker threads as Chrome does. Also, Firefox gives a
+    more random thread order than Chrome. Each time the page is refreshed the order
+    of threads for Firefox changes but the order in Chrome does not. This then suggests
+    that the V8 engine used by Chrome is more optimized for starting new JavaScript
+    environments or instantiating browser APIs than the SpiderMonkey engine used by
+    Firefox.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Be sure to test this code in multiple browsers to compare the results that you
+    get. Another thing to keep in mind is that the speed that it takes to initialize
+    threads will also likely depend on the number of cores available on your computer.
+    In fact, to have some additional fun with this program, change the value of `4`
+    that is assigned to the `count` variable and in the `for` loop to a higher number,
+    then run the code and see what happens. Upon increasing the value to `128`, the
+    amount of time it took both browsers to initialize threads jumped a lot. This
+    also consistently breaks the order in which the threads are prepared on Chrome.
+    Generally, performance is lost when using too many threads, and this is examined
+    in more detail in [“Low Core Count”](ch08.xhtml#ch_benchmarks_sec_avoid_ss_lowcore).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Example Application: Conway’s Game of Life'
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'Now that we’ve had a look at `Atomics.wait()` and `Atomics.notify()`, it’s
+    time to look at a concrete example. We’ll use Conway’s Game of Life, a well-established
+    concept that naturally lends itself to parallel programming. The “game” is actually
+    a simulation of population growth and decay. The “world” this simulation exists
+    in is a grid of cells that are in one of two states: alive or dead. The simulation
+    works iteratively, and on each iteration, the following algorithm is performed
+    for each cell.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If the cell is alive:'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: If there are 2 or 3 neighbors alive, the cell remains alive.
+  prefs:
+  - PREF_IND
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: If there are 0 or 1 neighbors alive, the cell dies (this simulates underpopulation
+    as a cause of death).
+  prefs:
+  - PREF_IND
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: If there are 4 or more neighbors alive, the cell dies (this simulates overpopulation
+    as a cause of death).
+  prefs:
+  - PREF_IND
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'If the cell is dead:'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: If there are exactly 3 neighbors alive, the cell becomes alive (this simulates
+    reproduction).
+  prefs:
+  - PREF_IND
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: In any other case, the cell remains dead.
+  prefs:
+  - PREF_IND
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: When talking about “neighbors alive,” we’re referring to any cell that’s at
+    most one unit away from the current cell, including diagonals, and we’re referring
+    to the state prior to the current iteration. We can simplify these rules to the
+    following.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If there are exactly 3 neighbors alive, the new cell state is alive (regardless
+    of how it started).
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: If the cell is alive and exactly 2 neighbors are alive, the cell remains alive.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: In all other cases, the new cell state is dead.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'For our implementation, we’ll make the following assumptions:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The grid is a square. This is a slight simplification so that there’s one less
+    dimension to worry about.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The grid wraps around itself like a torus. This means that when we’re at an
+    edge, and we need to evaluate a neighboring cell outside the bounds, we’ll look
+    at the cell at the other end.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: We’ll write our code for web browsers, since they give us a handy canvas element
+    with which to plot the state of the Game of Life world. That being said, it’s
+    relatively straightforward to adapt the example to other environments that have
+    some kind of image rendering. In Node.js you could even write to the terminal
+    using ANSI escape codes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Single-Threaded Game of Life
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: To start off, we’ll build up a `Grid` class, which holds our Game of Life world
+    as an array and handles each iteration. We’ll build it in a frontend-agnostic
+    way, and we’ll even make it usable without any changes in our multithreaded example.
+    To properly simulate the Game of Life, we’ll need a multidimensional array to
+    represent our grid of cells. We could use arrays of arrays, but to make things
+    easier later on, we’ll store it in a one-dimensional array (in fact, a `Uint8Array`),
+    and then for any cell with coordinates `x` and `y`, we’ll store it in the array
+    at `cells[size * x + y]`. We’ll also need two of these, since one will be for
+    the current state, and one for the previous state. In another attempt to simplify
+    things for later on, we’ll store both of them sequentially in the same `ArrayBuffer`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Make a directory called *ch5-game-of-life/* and add the contents of [Example 5-6](#ex_ch5_gol_1)
+    to *gol.js* in that directory.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 5-6\. *ch5-game-of-life/gol.js* (part 1)
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: Here we’ve started off the `Grid` class with a constructor. It takes in a `size`,
+    which is the width of our square, an `ArrayBuffer` called `buffer`, and a `paint`
+    function which we’ll use later on. We then establish our `cells` and `nextCells`
+    as instances of `Uint8Array` stored side-by-side in the `buffer`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Next, we can add the cell retrieval method we’ll need later on when performing
+    iterations. Add the code in [Example 5-7](#ex_ch5_gol_2).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 5-7\. *ch5-game-of-life/gol.js* (part 2)
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: To retrieve a cell with a given set of coordinates, we need to normalize the
+    indices. Recall that we’re saying the grid wraps around. The normalization we’ve
+    done here makes sure that if we’re one unit above or below the range, we instead
+    retrieve the cell at the other end of the range.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Now, we’ll add the actual algorithm that runs on every iteration. Add the code
+    in [Example 5-8](#ex_ch5_gol_3).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 5-8\. *ch5-game-of-life/gol.js* (part 3)
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](Images/1.png)](#co_advanced_shared_memory_CO5-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The set of neighbors coordinates are used in the algorithm to look at neighboring
+    cells in eight directions. We’ll keep this array handy because we’ll need to use
+    it for every cell.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](Images/2.png)](#co_advanced_shared_memory_CO5-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `iterate()` method takes in a range to operate on in the form of minimum
+    X and Y values (inclusive) and maximum X and Y values (exclusive). For our single-threaded
+    example, it will always be `(0, 0, size, size)`, but putting a range here will
+    make it easier to split up when we move to a multithreaded implementation, where
+    we’ll use these X and Y boundaries to divide the whole grid into sections for
+    each thread to work on.
+  prefs: []
+  type: TYPE_NORMAL
+- en: We loop over every cell in the grid, and for each one get the number of neighbors
+    that are alive. We’re using the number `1` to represent living cells and `0` to
+    represent dead cells, so we can count the number of neighboring living cells by
+    adding them all up. Once we have that, we can apply the simplified Game of Life
+    algorithm. We store the new cell state in the `nextCells` array, and then provide
+    the new cell state and coordinates to the `paint` callback for visualization.
+    Then we swap the `cells` and `nextCells` arrays for the subsequent iteration to
+    use. That way, inside each iteration, `cells` always represents the previous iteration’s
+    result, and `newCells` always represents the current iteration’s result.
+  prefs: []
+  type: TYPE_NORMAL
+- en: All the code up until this point will be shared with our multithreaded implementation.
+    With the `Grid` class complete, we can now move on to creating and initializing
+    a `Grid` instance and tying it to our UI. Add the code from [Example 5-9](#ex_ch5_gol_4).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 5-9\. *ch5-game-of-life/gol.js* (part 4)
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE14]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](Images/1.png)](#co_advanced_shared_memory_CO6-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: We assign some constants for the black-and-white pixels we’ll draw to the screen
+    and set the size (actually, the width) of the grid we’re using. Feel free to play
+    around with the size to see the Game of Life play out in different magnitudes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](Images/2.png)](#co_advanced_shared_memory_CO6-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: We grab an iteration counter and canvas element from the HTML (which we’ll write
+    later on). We’ll set our canvas width and height to `SIZE`, and get a 2D context
+    from it to work with.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![3](Images/3.png)](#co_advanced_shared_memory_CO6-3)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: We’ll use an `ImageData` instance to modify the pixels on the canvas directly,
+    via a `Uint32Array`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![4](Images/4.png)](#co_advanced_shared_memory_CO6-4)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This `paint()` function will be used both in initialization of the grid and
+    on each iteration to modify the buffer backing the `ImageData` instance. If a
+    cell is alive, it’ll paint it black. Otherwise, it’ll paint it white.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![5](Images/5.png)](#co_advanced_shared_memory_CO6-5)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Now we create the grid instance, passing in the size, an `ArrayBuffer` big enough
+    to hold both `cells` and `nextCells`, and our `paint()` function.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![6](Images/6.png)](#co_advanced_shared_memory_CO6-6)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: To initialize the grid, we’ll loop over all the cells and assign each one a
+    random dead or alive state. At the same time, we’ll pass the result to our `paint()`
+    function to ensure that the image is updated.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![7](Images/7.png)](#co_advanced_shared_memory_CO6-7)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Whenever an `ImageData` is modified, we need to add it back to the canvas, so
+    we’re doing it here now that we’re done initializing.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Finally, we’re ready to start running iterations. Add the code from [Example 5-10](#ex_ch5_gol_5).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 5-10\. *ch5-game-of-life/gol.js* (part 5)
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE15]'
+  prefs: []
+  type: TYPE_PRE
+- en: For each iteration, we start off by calling our `grid.iterate()` method, which
+    modifies the cells as appropriate. Note that it calls the `paint()` function for
+    each cell, so once that happens, our image data is already set, so we just need
+    to add it to the canvas context with `putImageData()`. Then, we’ll update the
+    iteration counter on the page and schedule another iteration to happen in a `requestAnimationFrame()`
+    callback. Finally, we kick everything off with an initial call to `iterate()`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: We’re done with the JavaScript, but now we need the supporting HTML. Fortunately,
+    this is very short. Add the contents of [Example 5-11](#ex_ch5_gol_6) to a file
+    called *gol.html* in the same directory, and then open that file up in your browser.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 5-11\. *ch5-game-of-life/gol.html*
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE16]'
+  prefs: []
+  type: TYPE_PRE
+- en: You should now see a 1,000 by 1,000 image displaying Conway’s Game of Life,
+    going through the iterations as fast as it can. It should look something like
+    [Figure 5-1](#fig_gol1).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Depending on your computer, you may find that this lags a little bit, rather
+    than being crisp and smooth. Iterating over all of these cells and performing
+    calculations on them takes a lot of computing power. To speed things up a bit,
+    let’s take advantage of some more CPU cores on your machine using web worker threads.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![mtjs 0501](Images/mtjs_0501.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 5-1\. Conway’s Game of Life after 290 iterations
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Multithreaded Game of Life
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: For the multithreaded version of our Game of Life implementation, we can reuse
+    a lot of the code. In particular, the HTML doesn’t change and neither does our
+    `Grid` class. We’ll set up some worker threads and an additional one to coordinate
+    and modify image data. We need that additional thread because we can’t use `Atomics.wait()`
+    on the main browser thread. We’ll make use of `SharedArrayBuffer`, rather than
+    the regular `ArrayBuffer` used in the single-threaded example. To coordinate the
+    threads, we’ll need 8 bytes for coordination, specifically 4 to synchronize in
+    each direction, since `Atomics.wait()` requires at least an `Int32Array`. Since
+    our coordination thread will also be generating the image data, we’ll also need
+    enough shared memory to hold that as well. For a grid of side length `SIZE`, this
+    means a `SharedArrayBuffer` with memory laid out as in [Table 5-4](#table_gol_sab_layout).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 5-4\. Memory layout for four worker threads
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Purpose | # of Bytes |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Cells (or next cells) | `SIZE * SIZE` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Cells (or next cells) | `SIZE * SIZE` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Image data | `4 * SIZE * SIZE` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Worker thread wait | `4` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Coordination thread wait | `4` |'
+  prefs: []
+  type: TYPE_TB
+- en: To get started here, copy the *.html* and *.js* files from the previous example
+    to new files named *thread-gol.html* and *thread-gol.js*, respectively. Edit *thread-gol.html*
+    to make reference to this new JavaScript file.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Delete everything after the `Grid` class definition. The next thing we’ll do
+    is set up some constants. Add [Example 5-12](#ex_ch5_gol_thread_1) to *thread-gol.js*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 5-12\. *ch5-game-of-life/thread-gol.js* (part 1)
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE17]'
+  prefs: []
+  type: TYPE_PRE
+- en: The `BLACK`, `WHITE`, and `SIZE` constants have the same purpose as in the single-threaded
+    example. We’ll set this `THREADS` constant to any number that’s a divisor of `SIZE`,
+    and it will represent the number of worker threads we’ll spawn for doing the Game
+    of Life calculation. We’ll be dividing the grid into chunks that can be handled
+    by each thread. Feel free to play around with the `THREADS` and `SIZE` variables,
+    so long as `THREADS` divides `SIZE`. We’ll need the offsets for where the image
+    data and sync bytes are stored, so those are handled here as well. Finally, we’re
+    going to use the same file to run on the main thread and any worker threads, so
+    we’ll need a way of knowing whether we’re on the main thread or not.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Next, we’ll start writing the code for the main thread. Add the contents of
+    [Example 5-13](#ex_ch5_gol_thread_2).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 5-13\. *ch5-game-of-life/thread-gol.js* (part 2)
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE18]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](Images/1.png)](#co_advanced_shared_memory_CO7-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `SharedArrayBuffer` ends 16 bytes later than the `syncOffset`, since we
+    need 4 bytes for synchronization for each of our four threads.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The first part of this is roughly the same as in the single-threaded example.
+    We’re just grabbing the DOM elements and setting the grid size. Next, we set up
+    the `SharedArrayBuffer`, which we’re calling `sharedMemory`, and put views on
+    it for the `cells` (which we’ll assign values to soon) and got the image data.
+    We’ll use both a `Uint32Array` and a `Uint8ClampedArray` for the image data, for
+    modification and assignment to the `ImageData` instance, respectively.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Then we’ll initialize the grid randomly, and at the same time modify the image
+    data accordingly and populate that image data to the canvas context. This sets
+    up our initial state for the grid. At this point, we can start spawning worker
+    threads. Add the contents of [Example 5-14](#ex_ch5_gol_thread_3).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 5-14\. *ch5-game-of-life/thread-gol.js* (part 3)
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE19]'
+  prefs: []
+  type: TYPE_PRE
+- en: We set up some worker threads in a loop. For each one, we give it a unique name
+    for debugging purposes, post it a message telling it what range (i.e., the boundaries
+    `minX`, `minY`, `maxX`, and `maxY`) of the grid we want it to operate in, and
+    send it the `s⁠h⁠a⁠r⁠e⁠d⁠M⁠e⁠mo⁠r⁠y`. Then we add a coordination worker, pass
+    it the `sharedMemory`, and let it know that it’s the coordination worker via a
+    message.
+  prefs: []
+  type: TYPE_NORMAL
+- en: From the main browser thread, we’re only going to talk to this coordination
+    worker. We’ll set it up so that it loops by posting a message every time it receives
+    one, but only after grabbing the image data from `SharedMemory`, making the appropriate
+    UI updates, and requesting an animation frame.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The rest of the code runs in the other threads. Add the contents of [Example 5-15](#ex_ch5_gol_thread_4).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 5-15\. *ch5-game-of-life/thread-gol.js* (part 4)
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE20]'
+  prefs: []
+  type: TYPE_PRE
+- en: We’re on the other side of that `isMainThread` condition now, so we know we’re
+    in a worker thread or the coordination thread. Here, we declare some variables,
+    and then add an initial listener to the `message` event. Regardless of whether
+    this is a coordination thread or a worker thread, we’ll need the `sharedMemory`
+    and `sync` variables populated, so we assign those in the listener. Then we remove
+    the initialization listener, since we won’t need it anymore. The worker threads
+    won’t rely on message passing at all, and the coordination thread will have a
+    different listener, as we’ll see in a moment.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If we’ve initialized a coordination thread we’ll add a new `message` listener;
+    a `runCoord` function that we’ll define later. Then we’ll get references to `cells`
+    and `nextCells` since we’ll need to keep track on the coordination thread separate
+    from what’s going on in the `Grid` instances in the worker threads. Since we’re
+    generating the image on the coordination thread, we’ll need that too. Then we
+    run the first iteration of `runCoord`. If we’ve initialized a worker thread, we
+    simply go ahead and pass the options (containing the range to operate) to `runWorker()`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Let’s go ahead and define `runWorker()` right now. Add the contents of [Example 5-16](#ex_ch5_gol_thread_5).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 5-16\. *ch5-game-of-life/thread-gol.js* (part 5)
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE21]'
+  prefs: []
+  type: TYPE_PRE
+- en: Worker threads are the only ones that need an instance of the `Grid` class,
+    so first we instantiate it, passing in the `sharedMemory` as the backing buffer.
+    This works because we decided that the first part of the `sharedMemory` would
+    be the `cells` and `nextCells`, as it would be in the single-threaded example.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Then we start an infinite loop. The loop performs the following operations:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: It performs an `Atomics.wait()` on the `i`th element of the `sync` array. In
+    the coordination thread, we’ll do the appropriate `Atomics.notify()` to allow
+    this to proceed. We’re waiting for the coordination thread here because otherwise
+    we may start changing data and swapping references to `cells` and `nextCells`
+    before other threads are ready and data has made its way to the main browser thread.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Then it performs the iteration on the `Grid` instance. Remember, we’re only
+    operating on the range that the coordination thread said to operate on via the
+    `range` property.
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: Once that’s done, it notifies the main thread of having completed this task.
+    This is done by setting the `i`th element of the `sync` array to `1` with `Atomics.store()`,
+    and then waking the waiting thread via `Atomics.notify()`. We’re using the transition
+    away from the `0` state as an indicator that we should do some work, and a transition
+    back to the `0` state to notify that we’ve finished the work.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: We’re using `Atomics.wait()` to stop the coordination thread from executing
+    while the worker threads are modifying data, and then stop the worker threads
+    with `Atomics.wait()` while the coordination thread does its work. On either side,
+    we use `Atomics.notify()` to wake the other thread and immediately go back into
+    a waiting state, waiting for the other thread to notify back. Because we use atomic
+    operations to both modify data and control when it is modified, we know that all
+    the data accesses are *sequentially consistent*. In the interleaving program flow
+    across threads, a deadlock cannot occur, since we’re always flipping execution
+    back and forth from the coordination thread to the worker threads. The worker
+    threads never execute on the same parts of memory as each other, so we don’t have
+    to worry about this concept from the perspective of solely the worker threads.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Worker threads can just run infinitely. We don’t have to be worried about that
+    infinite loop because it will only proceed if `Atomics.wait()` returns, which
+    requires that another thread calls `Atomics.notify()` for that same array element.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Let’s wrap up the code here with the `runCoord()` function, which is triggered
+    via a message from the main browser thread after the initialization message. Add
+    the contents of [Example 5-17](#ex_ch5_gol_thread_6).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 5-17\. *ch5-game-of-life/thread-gol.js* (part 6)
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE22]'
+  prefs: []
+  type: TYPE_PRE
+- en: The first thing that happens here is the coordination thread notifying the worker
+    threads via the `i`th element of the `sync` array for each worker thread, waking
+    them up to perform an iteration. When they’re done, they’ll notify via the same
+    element of the `sync` array, so we’ll wait on those. The fact that each of these
+    calls to `Atomics.wait()` blocks the thread execution is exactly why we need this
+    coordination thread in the first place, rather than just doing it all on the main
+    browser thread.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Next, we swap the `cells` and `nextCells` references. The workers have already
+    done this for themselves inside the `iterate()` method, so we need to follow suit
+    here. Then we’re ready to iterate over all the `cells` and convert their values
+    to pixels in the image data. Finally, we post a message back to the main browser
+    thread, indicating that the data is ready to be displayed in the UI. The coordination
+    thread has nothing to do until the next time it receives a message, at which point
+    `runCoord` is run again. This method completes the conceptual loop started in
+    [Example 5-14](#ex_ch5_gol_thread_3).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Now we’re done! To view the HTML file, remember that in order to use `SharedArrayBuffer`,
+    we need a server running with particular headers set. To do this, run the following
+    in your *ch5-game-of-life* directory:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE23]'
+  prefs: []
+  type: TYPE_PRE
+- en: Then, append */thread-gol.html* to the URL provided to see our multithreaded
+    implementation of Conway’s Game of Life running. Because we haven’t changed any
+    UI code, it should look exactly the same as the single-threaded example in [Figure 5-1](#fig_gol1).
+    The only difference you should see is in performance. The transitions between
+    iterations likely appear to be much smoother and quicker. You’re not imagining
+    things! We’ve moved the work of calculating cell states and plotting pixels into
+    separate threads, so now the main thread is free to animate more smoothly, and
+    iterations happen faster because we’re using more CPU cores in parallel to do
+    the work.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Most importantly, we’re avoiding most of the overhead of passing messages between
+    threads for coordination by just using `Atomics.notify()` to let other threads
+    know that they can continue after having paused themselves with `Atomics.wait()`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Atomics and Events
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: At the heart of JavaScript lies the event loop, which allows the language to
+    create new call stacks and handle events. It’s always been there and we JavaScript
+    engineers have always depended on it. This is true for both JavaScript that runs
+    in the browser, where you might have jQuery that listens for a click event in
+    the DOM, or JavaScript that runs on the server, where you might have the Fastify
+    server that waits for an incoming TCP connection to be established.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Enter the new kid on the block: `Atomics.wait()` and shared memory. This pattern
+    now allows applications to halt the execution of JavaScript, thereby causing the
+    event loop to completely stop working. Because of this you can’t simply start
+    throwing calls to make use of multithreading into your application and expect
+    it to work without problem. Instead, certain restrictions must be followed to
+    make the application behave nicely.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'One such restriction is hinted at when it comes to browsers: the main thread
+    of the application should not call `Atomics.wait()`. And, while it can be done
+    in a simple Node.js script, you should really avoid doing so in a larger application.
+    For example, if your main Node.js thread is handling incoming HTTP requests, or
+    has a handler for receiving operating system signals, what’s going to happen when
+    the event loop comes to a halt when a wait operation is started? [Example 5-18](#ex_stutter)
+    is an example of such a program.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 5-18\. *ch5-node-block/main.js*
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE24]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](Images/1.png)](#co_advanced_shared_memory_CO8-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Every 2 seconds the app pauses for 1.9 seconds
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If you feel so inclined, create a directory for this file and execute the server
+    by running the following command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE25]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Once it’s running, execute the following command in your terminal several times,
+    waiting a random amount of time between each invocation:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE26]'
+  prefs: []
+  type: TYPE_PRE
+- en: What this application does is first create an HTTP server and listen for requests.
+    Then, every two seconds, a call to `Atomics.wait()` is made. It’s configured in
+    such a way that the application freezes for 1.9 seconds to exaggerate the effect
+    of long pauses. The `curl` command you’re running is prefixed with the `time`
+    command, which displays the amount of time the following command takes to run.
+    Your output will then randomly vary between 0 and 1.9 seconds, which is a huge
+    amount of time for a web request to pause for. Even as you reduce that timeout
+    value closer and closer to 0, you’ll still end up with micro stutters that globally
+    affect all incoming requests. If web browsers allowed `Atomics.wait()` calls in
+    the main thread, you would definitely be encountering micro stutters from this
+    in websites you visit today.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Another question still remains: what sort of restrictions should come into
+    play with each of the additional threads that an application spawns, considering
+    that each thread has their own event loop?'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Our recommendation is to designate ahead of time what the main purpose of each
+    spawned thread is. Each thread either becomes a CPU-heavy thread that makes heavy
+    use of `Atomics` calls or an event-heavy thread that makes minimal `Atomics` calls.
+    With such an approach, you might have a thread that is a worker in the truest
+    sense, constantly performing complex calculations and writing the results to a
+    shared array buffer. You would also have your main thread, which is then mostly
+    communicating via message passing and doing event loop based work. It then might
+    make sense to have simple intermediary threads that call `Atomics.wait()` as they
+    wait for another thread to finish doing work, then call `postMessage()` to send
+    the resulting data back to the main thread to handle the result at a much higher
+    level.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To summarize the concepts in this section:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Don’t use `Atomics.wait()` in the main thread.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Designate which threads are CPU-heavy and use lots of `Atomics` calls and which
+    threads are evented.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Consider using simple “bridge” threads to wait and post messages where appropriate.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: These are some very high-level guidelines that you can follow when designing
+    your application. But sometimes some more concrete patterns really help drive
+    the point home. [Chapter 6](ch06.xhtml#ch_patterns) contains some such patterns
+    you might find beneficial.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([1](ch05.xhtml#idm45995918555608-marker)) `Atomics.notify()` was originally
+    going to be called `Atomics.wake()` like its Linux futex equivalent but was later
+    renamed to prevent visual confusion between “wake” and “wait” methods.
+  prefs: []
+  type: TYPE_NORMAL

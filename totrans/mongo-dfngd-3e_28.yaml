@@ -1,0 +1,528 @@
+- en: Chapter 22\. Monitoring MongoDB
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'Before you deploy, it is important to set up some type of monitoring. Monitoring
+    should allow you to track what your server is doing and alert you if something
+    goes wrong. This chapter will cover:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: How to track MongoDB’s memory usage
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: How to track application performance metrics
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: How to diagnose replication issues
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: We’ll use example graphs from MongoDB Ops Manager to demonstrate what to look
+    for when monitoring (see [installation instructions for Ops Manager](https://oreil.ly/D4751)).
+    The monitoring capabilities of MongoDB Atlas (MongoDB’s cloud database service)
+    are very similar. MongoDB also offers a free monitoring service that monitors
+    standalones and replica sets. It keeps the monitoring data for 24 hours after
+    it has been uploaded and provides coarse-grained statistics on operation execution
+    times, memory usage, CPU usage, and operation counts.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you do not want to use Ops Manager, Atlas, or MongoDB’s free monitoring service,
+    please use some type of monitoring. It will help you detect potential issues before
+    they cause problems and diagnose issues when they occur.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Monitoring Memory Usage
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Accessing data in memory is fast, and accessing data on disk is slow. Unfortunately,
+    memory is expensive (and disk is cheap), and typically MongoDB uses up memory
+    before any other resource. This section covers how to monitor MongoDB’s interactions
+    with the CPU, disk, and memory, and what to watch for.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Introduction to Computer Memory
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Computers tend to have a small amount of fast-to-access memory and a large amount
+    of slow-to-access disk. When you request a page of data that is stored on disk
+    (and not yet in memory), your system page faults and copies the page from disk
+    into memory. It can then access the page in memory extremely quickly. If your
+    program stops regularly using the page and your memory fills up with other pages,
+    the old page will be evicted from memory and only live on disk again.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Copying a page from disk into memory takes a lot longer than reading a page
+    from memory. Thus, the less MongoDB has to copy data from disk, the better. If
+    MongoDB can operate almost entirely in memory, it will be able to access data
+    much faster. Thus, MongoDB’s memory usage is one of the most important stats to
+    track.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tracking Memory Usage
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'MongoDB reports on three “types” of memory in Ops Manager: resident memory,
+    virtual memory, and mapped memory. Resident memory is the memory that MongoDB
+    explicitly owns in RAM. For example, if you query for a document and it is paged
+    into memory, that page is added to MongoDB’s resident memory.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: MongoDB is given an address for that page. This address isn’t the literal address
+    of the page in RAM; it’s a virtual address. MongoDB can pass it to the kernel
+    and the kernel will look up where the page really lives. This way, if the kernel
+    needs to evict the page from memory, MongoDB can still use the address to access
+    it. MongoDB will request the memory from the kernel, the kernel will look at its
+    page cache, see that the page is not there, page fault to copy the page into memory,
+    and return it to MongoDB.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If your data fits entirely in memory, the resident memory should be approximately
+    the size of your data. When we talk about data being “in memory,” we’re always
+    talking about the data being in RAM.
+  prefs: []
+  type: TYPE_NORMAL
+- en: MongoDB’s mapped memory includes all of the data MongoDB has ever accessed (all
+    the pages of data it has addresses for). It will usually be about the size of
+    your dataset.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Virtual memory is an abstraction provided by the operating system that hides
+    the physical storage details from the software process. Each process sees a contiguous
+    address space of memory that it can use. In Ops Manager, the virtual memory use
+    of MongoDB is typically twice the size of the mapped memory.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Figure 22-1](#monitor-mem) shows the Ops Manager graph for memory information,
+    which describes how much virtual, resident, and mapped memory MongoDB is using.
+    Mapped memory is relevant only for older (pre-4.0) deployments using the MMAP
+    storage engine. Now that MongoDB uses the WiredTiger storage engine, you should
+    see zero usage for mapped memory. On a machine dedicated to MongoDB, resident
+    memory should be a little less than the total memory size (assuming your working
+    set is as large or larger than memory). Resident memory is the statistic that
+    actually tracks how much data is in physical RAM, but by itself this does not
+    tell you much about how MongoDB is using memory.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![](Images/mdb3_2201.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: 'Figure 22-1\. From the top line to the bottom: virtual, resident, and mapped
+    memory'
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: If your data fits entirely in memory, resident should be approximately the size
+    of your data. When we talk about data being “in memory,” we’re always talking
+    about the data being in RAM.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As you can see from [Figure 22-1](#monitor-mem), memory metrics tend to be fairly
+    steady, but as your dataset grows virtual memory (top line) will grow with it.
+    Resident memory (middle line) will grow to the size of your available RAM and
+    then hold steady.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tracking Page Faults
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You can use other statistics to find out how MongoDB is using memory, not just
+    how much of each type it has. One useful stat is the number of page faults, which
+    tells you how often the data MongoDB is looking for is not in RAM. Figures [22-2](#monitor-fault-1)
+    and [22-3](#monitor-fault-2) are graphs that show page faults over time. [Figure 22-3](#monitor-fault-2)
+    is page faulting less than [Figure 22-2](#monitor-fault-1), but by itself this
+    information is not very useful. If the disk in [Figure 22-2](#monitor-fault-1)
+    can handle that many faults and the application can handle the delay of the disk
+    seeks, there is no particular problem with having so many faults (or more). On
+    the other hand, if your application cannot handle the increased latency of reading
+    data from disk, you have no choice but to store all of your data in memory (or
+    use SSDs).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![](Images/mdb3_2202.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 22-2\. A system that is page faulting hundreds of times a minute
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '![](Images/mdb3_2203.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 22-3\. A system that is page faulting a few times a minute
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Regardless of how forgiving the application is, page faults become a problem
+    when the disk is overloaded. The amount of load a disk can handle isn’t linear:
+    once a disk begins getting overloaded, each operation must queue for a longer
+    and longer period of time, creating a chain reaction. There is usually a tipping
+    point where disk performance begins degrading quickly. Thus, it is a good idea
+    to stay away from the maximum load that your disk can handle.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Track your page fault numbers over time. If your application is behaving well
+    with a certain number of page faults, you have a baseline for how many page faults
+    the system can handle. If page faults begin to creep up and performance deteriorates,
+    you have a threshold to alert on.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You can see page fault stats per database by looking at the `"page_faults"`
+    field of `serverStatus`’s output:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: '`"page_faults"` gives you a count of how many times MongoDB has had to go to
+    disk (since startup).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: I/O Wait
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Page faults in general are closely tied to how long the CPU is idling waiting
+    for the disk, called `I/O wait`. Some I/O wait is normal; MongoDB has to go to
+    disk sometimes, and although it tries not to block anything when it does, it cannot
+    completely avoid it. The important thing is that I/O wait is not increasing or
+    near 100%, as shown in [Figure 22-4](#figure21-5). This indicates that the disk
+    is getting overloaded.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![](Images/mdb3_2204.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 22-4\. I/O wait hovering around 100%
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Calculating the Working Set
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'In general, the more data you have in memory, the faster MongoDB will perform.
+    Thus, in order from fastest to slowest, an application could have:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The entire dataset in memory. This is nice to have but is often too expensive
+    or infeasible. It may be necessary for applications that depend on fast response
+    times.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: The working set in memory. This is the most common choice.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'Your working set is the data and indexes that your application uses. This may
+    be everything, but generally there’s a core dataset (e.g., the *users* collection
+    and the last month of activity) that covers 90% of requests. If this working set
+    fits in RAM, MongoDB will generally be fast: it only has to go to disk for a few
+    “unusual” requests.'
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: The indexes in memory.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: The working set of indexes in memory.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: No useful subset of data in memory. If possible, avoid this. It will be slow.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: You must know what your working set is (and how large it is) to know if you
+    can keep it in memory. The best way to calculate the size of the working set is
+    to track common operations to find out how much your application is reading and
+    writing. For example, suppose your application creates 2 GB of new data per week
+    and 800 MB of that data is regularly accessed. Users tend to access data up to
+    a month old, and data that’s older than that is mostly unused. Your working set
+    size is probably about 3.2 GB (800 MB/week × 4 weeks), plus a fudge factor for
+    indexes, so call it 5 GB.
+  prefs: []
+  type: TYPE_NORMAL
+- en: One way to think about this is to track data accessed over time, as shown in
+    [Figure 22-5](#monitor-calc). If you choose a cutoff where 90% of your requests
+    fall, like in [Figure 22-6](#monitor-calc2), then the data (and indexes) generated
+    in that period of time form your working set. You can measure for that amount
+    of time to figure out how much your dataset grows. Note that this example uses
+    time, but it’s possible that there’s another access pattern that makes more sense
+    for your application (time being the most common one).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![](Images/mdb3_2205.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 22-5\. A plot of data accesses by age of data
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '![](Images/mdb3_2206.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 22-6\. The working set is data used in the requests before the cutoff
+    of “frequent requests” (indicated by the vertical line in the graph)
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Some Working Set Examples
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Suppose that you have a 40 GB working set. A total of 90% of requests hit the
+    working set, and 10% hit other data. If you have 500 GB of data and 50 GB of RAM,
+    your working set fits entirely in RAM. Once your application has accessed the
+    data it usually accesses (a process called *preheating*), it should never have
+    to go to disk again for the working set. It then has 10 GB of space available
+    for the 460 GB of less-frequently-accessed data. Obviously, MongoDB will almost
+    always have to go to disk for the nonworking set data.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'On the other hand, suppose your working set does not fit in RAM—say, if you
+    have only 35 GB of RAM. Then the working set will generally take up most of the
+    RAM. The working set has a higher probability of staying in RAM because it’s accessed
+    more frequently, but at some point the less-frequently-accessed data will have
+    to be paged in, evicting the working set (or other less-frequently-accessed data).
+    Thus, there is a constant churn back and forth from disk: accessing the working
+    set does not have predictable performance anymore.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tracking Performance
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Performance of queries is often important to track and keep consistent. There
+    are several ways to track if MongoDB is having trouble with the current request
+    load.
+  prefs: []
+  type: TYPE_NORMAL
+- en: CPU can be I/O bound with MongoDB (indicated by a high I/O wait). The WiredTiger
+    storage engine is multithreaded and can take advantage of additional CPU cores.
+    This can be seen in a higher level of usage across CPU metrics when compared with
+    the older MMAP storage engine. However, if user or system time is approaching
+    100% (or 100% multiplied by the number of CPUs you have), the most common cause
+    is that you’re missing an index on a frequently used query. It is a good idea
+    to track CPU usage (particularly after deploying a new version of your application)
+    to ensure that all your queries are behaving as they should.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Note that the graph shown in [Figure 22-7](#monitor-cpu) is fine: if there
+    is a low number of page faults, I/O wait may be dwarfed by other CPU activities.
+    It is only when the other activities creep up that bad indexes may be a culprit.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![](Images/mdb3_2207.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: 'Figure 22-7\. A CPU with minimal I/O wait: the top line is user and the lower
+    line is system; the other stats are very close to 0%'
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'A similar metric is queuing: how many requests are waiting to be processed
+    by MongoDB. A request is considered queued when it is waiting for the lock it
+    needs to do a read or a write. [Figure 22-8](#monitor-queue) shows a graph of
+    read and write queues over time. No queues are preferred (basically an empty graph),
+    but this graph is nothing to be alarmed about. In a busy system, it isn’t unusual
+    for an operation to have to wait a bit for the correct lock to be available.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![](Images/mdb3_2208.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 22-8\. Read and write queues over time
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'The WiredTiger storage engine provides document-level concurrency, which allows
+    for multiple simultaneous writes to the same collection. This has drastically
+    improved the performance of concurrent operations. The ticketing system used controls
+    the number of threads in use to avoid starvation: it issues tickets for read and
+    write operations (128 of each, by default), after which point new read or write
+    operations will queue. The `wiredTiger.concurrentTransactions.read.available`
+    and `wire⁠d​Tiger.concurrentTransactions.write.available` fields of `serverStatus`
+    can be used to track when the number of available tickets reaches zero, indicating
+    the respective operations are now queuing up.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: You can see if requests are piling up by looking at the number of requests enqueued.
+    Generally, the queue size should be low. A large and ever-present queue is an
+    indication that *mongod* cannot keep up with its load. You should decrease the
+    load on that server as fast as possible.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tracking Free Space
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: One other metric that is basic but important to monitor is disk usage. Sometimes
+    users wait until their disk runs out of space before they think about how they
+    want to handle it. By monitoring your disk usage and tracking free disk space,
+    you can predict how long your current drive will be sufficient and plan in advance
+    what to do when it is not.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'As you run out of space, there are several options:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you are using sharding, add another shard.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: If you have unused indexes, remove them. These can be identified using the aggregation
+    `$indexStats` for a specific collection.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: If you have not run a compaction operation, then do so on a secondary to see
+    if it assists. This is normally only useful in cases where a large amount of data
+    or indexes have been removed from a collection and will not be replaced.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Shut down each member of the replica set (one at a time) and copy its data to
+    a larger disk, which can then be mounted. Restart the member and proceed to the
+    next.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Replace members of your replica set with members with a larger drive: remove
+    an old member and add a new member, and allow that one to catch up with the rest
+    of the set. Repeat for each member of the set.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: If you are using the `directoryperdb` option and you have a particularly fast-growing
+    database, move it to its own drive. Then mount the volume as a directory in your
+    data directory. This way the rest of your data doesn’t have to be moved.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Regardless of the technique you choose, plan ahead to minimize the impact on
+    your application. You need time to take backups, modify each member of your set
+    in turn, and copy your data from place to place.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Monitoring Replication
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'Replication lag and oplog length are important metrics to track. Lag is when
+    the secondaries cannot keep up with the primary. It’s calculated by subtracting
+    the time of the last op applied on a secondary from the time of the last op on
+    the primary. For example, if a secondary just applied an op with the timestamp
+    3:26:00 p.m. and the primary just applied an op with the timestamp 3:29:45 p.m.,
+    the secondary is lagging by 3 minutes and 45 seconds. You want lag to be as close
+    to 0 as possible, and it is generally on the order of milliseconds. If a secondary
+    is keeping up with the primary, the replication lag should look something like
+    the graph shown in [Figure 22-9](#monitor-no-lag): basically 0 all the time.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![](Images/mdb3_2209.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 22-9\. A replica set with no lag; this is what you want to see
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'If a secondary cannot replicate writes as fast as the primary can write, you’ll
+    start seeing a nonzero lag. The most extreme case of this is when replication
+    is stuck: the secondary cannot apply any more operations for some reason. At this
+    point, lag will grow by one second per second, creating the steep slope shown
+    in [Figure 22-10](#monitor-repl-stuck). This could be caused by network issues
+    or a missing `"_id"` index, which is required on every collection for replication
+    to function properly.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: If a collection is missing an `"_id"` index, take the server out of the replica
+    set, start it as a standalone server, and build the `"_id"` index. Make sure you
+    create the `"_id"` index as a *unique* index. Once created, the `"_id"` index
+    cannot be dropped or changed (other than by dropping the whole collection).
+  prefs: []
+  type: TYPE_NORMAL
+- en: If a system is overloaded, a secondary may gradually fall behind. Some replication
+    will still be happening, so you generally won’t see the characteristic “one second
+    per second” slope in the graph. Still, it’s important to be aware if the secondaries
+    cannot keep up with peak traffic or are gradually falling further behind.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![](Images/mdb3_2210.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 22-10\. Replication getting stuck and, just before February 10, beginning
+    to recover; the vertical lines are server restarts
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Primaries do not throttle writes to “help” secondaries catch up, so it’s common
+    for secondaries to fall behind on overloaded systems (particularly as MongoDB
+    tends to prioritize writes over reads, which means replication can be starved
+    on the primary). You can force throttling of the primary to some extent by using
+    `"w"` with your write concern. You also might want to try removing load from the
+    secondary by routing any requests it was handling to another member.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If you are on an extremely *underloaded* system, you may see another interesting
+    pattern: sudden spikes in replication lag, as shown in [Figure 22-11](#monitor-low-write).
+    The spikes shown are not actually lag—they are caused by variations in sampling.
+    The *mongod* is processing one write every couple of minutes. Because lag is measured
+    as the difference between timestamps on the primary and secondary, measuring the
+    timestamp of the secondary right before a write on the primary makes it look minutes
+    behind. If you increase the write rate, these spikes should disappear.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![](Images/mdb3_2211.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 22-11\. A low-write system can cause “phantom” lag
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'The other important replication metric to track is the length of each member’s
+    oplog. Every member that might become primary should have an oplog longer than
+    a day. If a member may be a sync source for another member, it should have an
+    oplog longer than the time an initial sync takes to complete. [Figure 22-12](#monitor-repl-1)
+    shows what a standard oplog-length graph looks like. This oplog has an excellent
+    length: 1,111 hours is over a month of data! In general, oplogs should be as long
+    as you can afford the disk space to make them. Given the way they’re used, they
+    take up basically no memory, and a long oplog can mean the difference between
+    a painful ops experience and an easy one.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![](Images/mdb3_2212.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 22-12\. A typical oplog-length graph
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '[Figure 22-13](#monitor-repl-2) shows a slightly unusual variation caused by
+    a fairly short oplog and variable traffic. This is still healthy, but the oplog
+    on this machine is probably too short (between 6 and 11 hours of maintenance).
+    The administrator may want to make the oplog longer when they get a chance.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![](Images/mdb3_2213.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 22-13\. Oplog-length graph of an application with daily traffic peaks
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL

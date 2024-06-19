@@ -1,0 +1,1053 @@
+- en: Chapter 12\. Multitenancy
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: When building a production application platform atop Kubernetes, you must consider
+    how to handle the tenants that will run on the platform. As we’ve discussed throughout
+    this book, Kubernetes provides a set of foundational features you can use to implement
+    many requirements. Workload tenancy is no different. Kubernetes offers various
+    knobs you can use to ensure tenants can safely coexist on the same platform. With
+    that said, Kubernetes does not define a tenant. A tenant can be an application,
+    a development team, a business unit, or something else. Defining a tenant is up
+    to you and your organization, and we hope this chapter will help you with that
+    task.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Once you establish who your tenants are, you must determine whether multiple
+    tenants should run on the same platform. In our experience helping large organizations
+    build application platforms, we’ve found that platform teams are usually interested
+    in operating a multitenant platform. With that said, this decision is firmly rooted
+    in the nature of the different tenants and the trust that exists between them.
+    For example, an enterprise offering a shared application platform is a different
+    story than a company offering containers-as-a-service to external customers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In this chapter, we will first explore the degrees of tenant isolation you can
+    achieve with Kubernetes. The nature of your workloads and your specific requirements
+    will dictate how much isolation you need to provide. The stronger the isolation,
+    the higher the investment you need to make in this area. We will then discuss
+    Kubernetes Namespaces, an essential building block that enables a large portion
+    of the multitenancy capabilities in Kubernetes. Finally, we will dig into the
+    different Kubernetes features you can leverage to isolate tenants on a multitenant
+    cluster, including Role-Based Access Control (RBAC), Resource Requests and Limits,
+    Pod Security Policies, and others.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Degrees of Isolation
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'Kubernetes lends itself to various tenancy models, each with pros and cons.
+    The most critical factor that determines which model to implement is the degree
+    of isolation demanded by your workloads. For example, running untrusted code developed
+    by different third parties usually requires more robust isolation than hosting
+    your organization’s internal applications. Broadly speaking, there are two tenancy
+    models you can follow: single-tenant clusters and multitenant clusters. Let’s
+    discuss the strengths and weaknesses of each model.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Single-Tenant Clusters
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The single-tenant cluster model (depicted in [Figure 12-1](#each_tenant_runs_in_a_separate_cluster))
+    provides the strongest isolation between tenants, as there is no sharing of cluster
+    resources. This model is rather appealing as you do not have to solve the complex
+    multitenancy problems that can otherwise arise. In other words, there is no tenant
+    isolation problem to solve.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![prku 1201](assets/prku_1201.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 12-1\. Each tenant runs in a separate cluster (CP represents a control
+    plane node).
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Single-tenant clusters can be viable if you have a small number of tenants.
+    However, the model can suffer from the following downsides:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Resource overhead
+  prefs: []
+  type: TYPE_NORMAL
+- en: Each single-tenant cluster has to run its own control plane, which in most cases,
+    requires at least three dedicated nodes. The more tenants you have, the more resources
+    dedicated to cluster control planes—resources that you could otherwise use to
+    run workloads. In addition to the control plane, each cluster hosts a set of workloads
+    to provide platform services. These platform services also incur overhead as they
+    could otherwise be shared among different tenants in a multitenant cluster. Monitoring
+    tools, policy controllers (e.g., Open Policy Agent), and Ingress controllers are
+    good examples.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Increased management complexity
+  prefs: []
+  type: TYPE_NORMAL
+- en: Managing a large number of clusters can become a challenge for platform teams.
+    Each cluster needs to be deployed, tracked, upgraded, etc. Imagine having to remediate
+    a security vulnerability across hundreds of clusters. Investing in advanced tooling
+    is necessary for platform teams to do this effectively.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Even with the drawbacks just mentioned, we have seen many successful implementations
+    of single-tenant clusters in the field. And with cluster life cycle tooling such
+    as [Cluster API](https://oreil.ly/8QRz7) reaching maturity, the single-tenant
+    model has become easier to adopt. With that said, most of our focus in the field
+    has been helping organizations with multitenant clusters, which we’ll discuss
+    next.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Multitenant Clusters
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Clusters that host multiple tenants can address the downsides of single-tenant
+    clusters we previously discussed. Instead of deploying and managing one cluster
+    per tenant, the platform team can focus on a smaller number of clusters, which
+    reduces the resource overhead and management complexity (as seen in [Figure 12-2](#a_single_cluster_shared_by_multiple_tenants)).
+    With that said, there is a trade-off being made. The implementation of multitenant
+    clusters is more complicated and nuanced, as you have to ensure that tenants can
+    coexist without affecting each other.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![prku 1202](assets/prku_1202.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 12-2\. A single cluster shared by multiple tenants (CP represents a control
+    plane node).
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Multitenancy comes in two broad flavors, soft multitenancy and hard multitenancy.
+    *Soft multitenancy*, sometimes referred to as “multiteam,” assumes that some level
+    of trust exists between the tenants on the platform. This model is usually viable
+    when tenants belong to the same organization. For example, an enterprise application
+    platform hosting different tenants can generally assume a soft multitenancy posture.
+    This is because the tenants are incentivized to be good neighbors as they move
+    their organization toward success. Nevertheless, even though the intent is positive,
+    tenant isolation is still necessary given that unintentional issues can arise
+    (e.g., vulnerabilities, bugs, etc.).
+  prefs: []
+  type: TYPE_NORMAL
+- en: On the other hand, the *hard multitenancy* model establishes that there is no
+    trust between tenants. From a security point of view, the tenants are even considered
+    adversaries to ensure the proper isolation mechanisms are put in place. A platform
+    running untrusted code that belongs to different organizations is a good example.
+    In this case, strong isolation between tenants is critical to ensure they can
+    share the cluster safely.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Building on our housing analogy theme from [Chapter 1](ch01.html#chapter1),
+    we can say that the soft multitenancy model is equivalent to a family living together.
+    They share the kitchen, living room, and utilities, but each family member has
+    their own bedroom. In contrast, the hard multitenancy model is better represented
+    by an apartment building. Multiple families share the building, but each family
+    lives behind a locked front door.
+  prefs: []
+  type: TYPE_NORMAL
+- en: While the soft and hard multitenancy models can help guide conversations about
+    multitenant platforms, the implementation is not as clear-cut. The reality is
+    that multitenancy is best described as a spectrum. On the one end, we have no
+    isolation at all. Tenants are free to do anything on the platform and consume
+    all its resources. On the other end, we have full tenant isolation, where tenants
+    are strictly controlled and isolated across all layers of the platform.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As you can imagine, establishing a production multitenant platform with no tenant
+    isolation is not viable. At the same time, building a multitenant platform with
+    complete tenant isolation can be a costly (or even futile) endeavor. Thus, it
+    is important to find the sweet spot in the multitenancy spectrum that will work
+    for your workloads and organization as a whole.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To determine the isolation required for your workloads, you must consider the
+    different layers where you *can* apply isolation in a Kubernetes-based platform:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Workload plane
+  prefs: []
+  type: TYPE_NORMAL
+- en: The workload plane consists of the nodes where the workloads get to run. In
+    a multitenant scenario, workloads are typically scheduled across the shared pool
+    of nodes. Isolation at this level involves fair sharing of node resources, security
+    and network boundaries, etc.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Control plane
+  prefs: []
+  type: TYPE_NORMAL
+- en: The control plane encompasses the components that make up a Kubernetes cluster,
+    such as the API server, the controller manager, and the scheduler. There are different
+    mechanisms available in Kubernetes to segregate tenants at this level, including
+    authorization (i.e., RBAC), admission control, and API priority and fairness.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Platform services
+  prefs: []
+  type: TYPE_NORMAL
+- en: Platform services include centralized logging, monitoring, ingress, in-cluster
+    DNS, and others. Depending on the workloads, these services or capabilities might
+    also require some level of isolation. For example, you might want to prevent tenants
+    from inspecting each other’s logs or discovering each other’s services via the
+    cluster’s DNS server.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Kubernetes provides different primitives you can use to implement isolation
+    at each of these layers. Before digging into them, we will discuss the Kubernetes
+    Namespace, the foundational boundary that allows you to segregate tenants on a
+    cluster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Namespace Boundary
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Namespaces enable a number of different capabilities in the Kubernetes API.
+    They allow you to organize your cluster, enforce policy, control access, etc.
+    More importantly, they are a critical building block when implementing a multitenant
+    Kubernetes platform, as they provide the foundation to onboard and isolate tenants.
+  prefs: []
+  type: TYPE_NORMAL
+- en: When it comes to tenant isolation, however, it is important to keep in mind
+    that the Namespace is a logical construct in the Kubernetes control plane. Without
+    additional policy or configuration, the Namespace has no implications on the workload
+    plane. For example, workloads that belong to different Namespaces are likely to
+    run on the same node unless advanced scheduling constraints are put in place.
+    In the end, the Namespace is merely a piece of metadata attached to resources
+    in the Kubernetes API.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Having said that, many of the isolation mechanisms that we will explore in
+    this chapter hinge on the Namespace construct. RBAC, resource quotas, and network
+    policies are examples of such mechanisms. Thus, one of the first decisions to
+    make when designing your tenancy strategy is establishing how to leverage Namespaces.
+    When helping organizations in the field, we have seen the following approaches:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Namespace per team
+  prefs: []
+  type: TYPE_NORMAL
+- en: In this model, each team has access to a single Namespace in the cluster. This
+    approach makes it simple to apply policy and quota to specific teams. However,
+    it can be challenging for teams to exist within a single Namespace if they own
+    many services. Overall, we find that this model can be viable for small organizations
+    that are getting started with Kubernetes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Namespace per application
+  prefs: []
+  type: TYPE_NORMAL
+- en: This approach provides a Namespace for each application in the cluster, making
+    it easier to apply application-specific policy and quota. The downside is that
+    this model usually results in tenants having access to multiple Namespaces, which
+    can complicate the tenant onboarding process and the ability to apply tenant-level
+    policy and quota. With that said, this approach is perhaps the most viable for
+    large organizations and enterprises building multitenant platforms.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Namespace per tier
+  prefs: []
+  type: TYPE_NORMAL
+- en: This pattern establishes different runtime tiers (or environments) using Namespaces.
+    We usually avoid this approach, as we prefer to use separate clusters for development,
+    staging, and production tiers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The approach to use largely depends on your isolation requirements and the structure
+    of your organization. If you are leaning toward the Namespace per team model,
+    remember that all resources in the Namespace are accessible by all team members
+    or workloads in the Namespace. For example, assuming Alice and Bob are on the
+    same team, there’s no way to prevent Alice from looking at Bob’s Secrets if they
+    are both authorized to get Secrets in the team’s Namespace.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Multitenancy in Kubernetes
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Up to this point, we have discussed the different tenancy models you can implement
+    when building a Kubernetes-based platform. In the rest of this chapter, we will
+    focus on multitenant clusters and the various Kubernetes capabilities you can
+    leverage to safely and effectively host your tenants. As you read through these
+    sections, you will find that we have covered some of these capabilities in other
+    chapters. In those cases, we will brush up on them once more, but we will focus
+    on the multitenancy aspect of them.
+  prefs: []
+  type: TYPE_NORMAL
+- en: First, we will focus on the isolation mechanisms available in the control plane
+    layer. Mainly, RBAC, resource quotas, and validating admission webhooks. We will
+    then move onto the workload plane, where we will discuss resource requests and
+    limits, Network Policies, and Pod Security Policies. Finally, we will touch on
+    monitoring and centralized logging as example platform services that you can design
+    with multitenancy in mind.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Role-Based Access Control (RBAC)
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: When hosting multiple tenants in the same cluster, you must enforce isolation
+    at the API server layer to prevent tenants from modifying resources that do not
+    belong to them. The RBAC authorization mechanism enables you to configure this
+    policy. As we discussed in [Chapter 10](ch10.html#chapter10), the API server supports
+    different mechanisms to establish a user’s or tenant’s identity. Once established,
+    the tenant’s identity is passed on to the RBAC system, which determines whether
+    the tenant is authorized to perform the requested action.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As you onboard tenants onto the cluster, you can grant them access to one or
+    more Namespaces in which they can create and manage API resources. To authorize
+    each tenant, you must bind Roles or ClusterRoles with their identities. The binding
+    is achieved with the RoleBinding resource. The following snippet shows an example
+    RoleBinding that grants the `app1-viewer` Group view access to the `app1` Namespace.
+    Unless you have a good use case, avoid using ClusterRoleBindings for tenants,
+    as it authorizes the tenant to leverage the bound role across all Namespaces.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You’ll notice in the example that the RoleBinding references a ClusterRole
+    named `view`. This is a built-in role that is available in Kubernetes. Kubernetes
+    provides a set of built-in roles that cover common use cases:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: view
+  prefs: []
+  type: TYPE_NORMAL
+- en: The view role grants tenants read-only access to Namespace-scoped resources.
+    This role can be bound to all the developers in a team, for example, as it allows
+    them to inspect and troubleshoot their resources in production clusters.
+  prefs: []
+  type: TYPE_NORMAL
+- en: edit
+  prefs: []
+  type: TYPE_NORMAL
+- en: The edit role allows tenants to create, modify, and delete Namespace-scoped
+    resources, in addition to viewing them. Given this role’s abilities, binding of
+    this role is highly dependent on your approach to application deployment.
+  prefs: []
+  type: TYPE_NORMAL
+- en: admin
+  prefs: []
+  type: TYPE_NORMAL
+- en: In addition to viewing and editing resources, the admin role can create Roles
+    and RoleBindings. This role is usually bound to the tenant administrator to delegate
+    Namespace-management concerns.
+  prefs: []
+  type: TYPE_NORMAL
+- en: These built-in roles are a good starting point. With that said, they can be
+    considered too broad, as they grant access to a vast number of resources in the
+    Kubernetes API. To follow the principle of least privilege, you can create tightly
+    scoped roles that allow the minimum set of resources and actions required to get
+    the job done. However, keep in mind that this can result in management overhead
+    as you potentially need to manage many unique roles.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: In most Kubernetes deployments, tenants are typically authorized to list all
+    Namespaces on the cluster. This is problematic if you need to prevent tenants
+    from knowing what other Namespaces exist, as there is currently no way of achieving
+    this using the Kubernetes RBAC system. If you do have this requirement, you must
+    build a higher-level abstraction to handle it (OpenShift’s [Project](https://oreil.ly/xIAT8)
+    resource is an example abstraction that addresses this).
+  prefs: []
+  type: TYPE_NORMAL
+- en: RBAC is a must when running multiple tenants in the same cluster. It provides
+    isolation at the control plane layer, which is necessary to prevent tenants from
+    viewing and modifying each other’s resources. Make sure to leverage RBAC when
+    building a multitenant Kubernetes-based platform.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Resource Quotas
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: As a platform operator offering a multitenant platform, you need to ensure that
+    each tenant gets an appropriate share of the limited cluster resources. Otherwise,
+    nothing prevents an ambitious (or perhaps malicious) tenant from consuming the
+    entire cluster and effectively starving the other tenants.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To place a limit on resource consumption, you can use the resource quotas feature
+    of Kubernetes. Resource quotas apply at the Namespace level, and they can limit
+    two kinds of resources. On one hand, you can control the amount of compute resources
+    available to a Namespace, such as CPU, memory, and storage. On the other hand,
+    you can limit the number of API objects that can be created within a Namespace,
+    such as the number of Pods, Services, etc. A common scenario that calls for limiting
+    API objects is to control the number of LoadBalancer Services in cloud environments,
+    which can get expensive.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Because quotas apply at the Namespace level, your Namespace strategy impacts
+    how you configure quotas. If tenants get access to a single Namespace, applying
+    quotas to each tenant is straightforward, as you can create a ResourceQuota for
+    each tenant in their Namespace. The story is more complicated when tenants have
+    access to multiple Namespaces. In this case, you need extra automation or an additional
+    controller to enforce quota across different Namespaces. (The [Hierarchical Namespace
+    Controller](https://oreil.ly/PyPDK) is an attempt at addressing this issue).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To further explore ResourceQuotas, let’s explore them in action. The following
+    example shows a ResourceQuota that limits the Namespace to consume up to 1 CPU
+    and 512 MiB of memory:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'As Pods in the `app1` Namespace start to get scheduled, the quota is consumed
+    accordingly. For example, if we create a Pod that requests 0.5 CPUs and 256 MiB,
+    we can see the updated quota as follows:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Attempts to consume resources beyond the configured quota are blocked by an
+    admission controller, as shown in the following error message. In this case, we
+    were trying to consume 2 CPUs and 2 GiB of memory but were limited by the quota:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: As you can see, ResourceQuotas give you the ability to control how tenants consume
+    cluster resources. They are critical when running a multitenant cluster, as they
+    ensure tenants can safely share the cluster’s limited resources.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Admission Webhooks
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Kubernetes has a set of built-in admission controllers that you can use to enforce
+    policy. The ResourceQuota functionality we just covered is implemented using an
+    admission controller. While the built-in controllers help solve common use cases,
+    we typically find that organizations need to extend the admission layer to isolate
+    and limit tenants further.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Validating and mutating admission webhooks are the mechanisms that enable you
+    to inject custom logic into the admission pipeline. We will not dig into the implementation
+    details of these webhooks, as we have already covered them in [Chapter 8](ch08.html#chapter8).
+    Instead, we will explore some of the multitenancy use cases we’ve solved in the
+    field with custom admission webhooks:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Standardized labels
+  prefs: []
+  type: TYPE_NORMAL
+- en: You can enforce a standard set of labels across all API objects using a validating
+    admission webhook. For example, you could require all resources to have an `owner`
+    label. Having a standard set of labels is useful, as labels provide a way to query
+    the cluster and even support higher-level features, such as network policies and
+    scheduling constraints.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Require fields
+  prefs: []
+  type: TYPE_NORMAL
+- en: Like enforcing a standard set of labels, you can use a validating admission
+    webhook to mark fields of certain resources as required. For example, you can
+    require all tenants to set the `https` field of their Ingress resources. Or perhaps
+    require tenants to always set readiness and liveness probes in their Pod specifications.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Set guardrails
+  prefs: []
+  type: TYPE_NORMAL
+- en: Kubernetes has a broad set of features that you might want to limit or even
+    disable. Webhooks allow you to set guardrails around specific functionality. Examples
+    include disabling specific Service types (e.g., NodePorts), disallowing node selectors,
+    controlling Ingress hostnames, and others.
+  prefs: []
+  type: TYPE_NORMAL
+- en: MultiNamespace resource quotas
+  prefs: []
+  type: TYPE_NORMAL
+- en: We have experienced cases in the field where organizations needed to enforce
+    resource quotas across multiple Namespaces. You can use a custom admission webhook/controller
+    to implement this functionality, as the ResourceQuota object in Kubernetes is
+    Namespace-scoped.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Overall, admission webhooks are a great way to enforce custom policy in your
+    multi-tenant clusters. And the emergence of policy engines such as [Open Policy
+    Agent (OPA)](https://www.openpolicyagent.org) and [Kyverno](https://github.com/kyverno/kyverno)
+    make it even simpler to implement them. Consider leveraging such engines to isolate
+    and limit tenants in your clusters.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Resource Requests and Limits
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Kubernetes schedules workloads onto a shared pool of cluster nodes. Commonly,
+    workloads from different tenants get scheduled onto the same node and thus share
+    the node’s resources. Ensuring that the resources are shared fairly is one of
+    the most critical concerns when running a multitenant platform. Otherwise, tenants
+    can negatively affect other tenants that are colocated on the same node.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Resource requests and limits in Kubernetes are the mechanisms that isolate tenants
+    from one another when it comes to compute resources. Resource requests are generally
+    fulfilled at the Kubernetes scheduler level (CPU requests are also reflected at
+    runtime, as we will see later). In contrast, resource limits are implemented at
+    the node level using Linux control groups (cgroups) and the Linux Completely Fair
+    Scheduler (CFS).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: While requests and limits provide adequate isolation for production workloads,
+    it should be known that this isolation is not as strict as that provided by a
+    hypervisor. Completely removing noisy neighbor symptoms from workloads can be
+    challenging in containerized environments. Be sure to experiment and understand
+    the implication of multiple workloads under load on a given Kubernetes node.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In addition to providing resource isolation, resource requests and limits determine
+    a Pod’s Quality of Service (QoS) class. The QoS class is important because it
+    determines the order in which the kubelet evicts Pods when a node is running low
+    on resources. Kubernetes offers the following QoS classes:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Guaranteed
+  prefs: []
+  type: TYPE_NORMAL
+- en: Pods with CPU limits equal to CPU requests and memory limits equal to memory
+    requests. This must be true across all containers. The kubelet seldom evicts Guaranteed
+    Pods.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Burstable
+  prefs: []
+  type: TYPE_NORMAL
+- en: Pods that do not qualify as Guaranteed and have at least one container with
+    CPU or memory requests. The kubelet evicts Burstable Pods based on how many resources
+    they are consuming above their requests. Pods bursting higher above their requests
+    are evicted before Pods bursting closer to their requests.
+  prefs: []
+  type: TYPE_NORMAL
+- en: BestEffort
+  prefs: []
+  type: TYPE_NORMAL
+- en: Pods that have no CPU or memory limits or requests. These Pods run on a “best
+    effort” basis. They are the first to be evicted by the kubelet.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Pod eviction is a complex process. In addition to using QoS classes to rank
+    Pods, the kubelet also considers Pod priorities when making eviction decisions.
+    The Kubernetes documentation has an excellent article that discusses [“Out of
+    Resource” handling](https://oreil.ly/LuCD9) in greater detail.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Now that we know that resource requests and limits provide tenant isolation
+    and determine a Pod’s QoS class, let’s dive into the details of resource requests
+    and limits. Even though Kubernetes supports requesting and limiting different
+    resources, we will focus our discussion on CPU and memory, the essential resources
+    that all workloads need at runtime. Let’s discuss memory requests and limits first.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Each container in a Pod can specify memory requests and limits. When memory
+    requests are set, the scheduler adds them up to get the Pod’s overall memory request.
+    With this information, the scheduler finds a node with enough memory capacity
+    to host the Pod. If none of the cluster nodes have enough memory, the Pod remains
+    in a pending state. Once scheduled, though, the containers in the Pod are guaranteed
+    the requested memory.
+  prefs: []
+  type: TYPE_NORMAL
+- en: A Pod’s memory request represents a guaranteed lower bound for the memory resource.
+    However, they can consume additional memory if it’s available on the node. This
+    is problematic because the Pod uses memory that the scheduler can assign to other
+    workloads or tenants. When a new Pod is scheduled onto the same node, the Pods
+    may fight over the memory. To honor the memory requests of both Pods, the Pod
+    consuming memory above its request is terminated. [Figure 12-3](#pod_consuming_memory_above_its_request_is_terminated_to_reclaim_memory_for_the_new_pod)
+    depicts this process.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![prku 1203](assets/prku_1203.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 12-3\. Pod consuming memory above its request is terminated to reclaim
+    memory for the new Pod.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'In order to control the amount of memory that tenants can consume, we must
+    include memory limits on the workloads, which enforce an upper bound on the amount
+    of memory available to a given workload. If the workload attempts to consume memory
+    above the limit, the workload is terminated. This is because memory is a noncompressible
+    resource. There is no way to throttle memory, and thus the process must be terminated
+    when the node’s memory is under contention. The following snippet shows a container
+    that was out-of-memory killed (OOMKilled). Notice the “Reason” in the “Last State”
+    section of the output:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: A common question we encounter in the field is whether one should allow tenants
+    to set memory limits higher than requests. In other words, whether nodes should
+    be oversubscribed on memory. This question boils down to a trade-off between node
+    density and stability. When you oversubscribe your nodes, you increase node density
+    but decrease workload stability. As we’ve seen, workloads that consume memory
+    above their requests get terminated when memory comes under contention. In most
+    cases, we encourage platform teams to avoid oversubscribing nodes, as they typically
+    consider stability more important than tightly packing nodes. This is especially
+    the case in clusters hosting production workloads.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Now that we’ve covered memory requests and limits, let’s shift our discussion
+    to CPU. In contrast to memory, CPU is a compressible resource. You can throttle
+    processes when CPU is under contention. For this reason, CPU requests and limits
+    are somewhat more complex than memory requests and limits.
+  prefs: []
+  type: TYPE_NORMAL
+- en: CPU requests and limits are specified using CPU units. In most cases, 1 CPU
+    unit is equivalent to 1 CPU core. Requests and limits can be fractional (e.g.,
+    0.5 CPU) and they can be expressed using millis by adding an `m` suffix. 1 CPU
+    unit equals 1000m CPU.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'When containers within a Pod specify CPU requests, the scheduler finds a node
+    with enough capacity to place the Pod. Once placed, the kubelet converts the requested
+    CPU units into cgroup CPU shares. CPU shares is a mechanism in the Linux kernel
+    that grants CPU time to cgroups (i.e., the processes within the cgroup). The following
+    are critical aspects of CPU shares to keep in mind:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: CPU shares are relative. 1000 CPU shares does not mean 1 CPU core or 1000 CPU
+    cores. Instead, the CPU capacity is proportionally divided among all cgroups according
+    to their relative shares. For example, consider two processes in different cgroups.
+    If process 1 (P1) has 2000 shares, and process 2 (P2) has 1000 shares, P1 will
+    get twice the CPU time as P2.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: CPU shares come into effect only when the CPU is under contention. If the CPU
+    is not fully utilized, processes are not throttled and can consume additional
+    CPU cycles. Following the preceding example, P1 will get twice the CPU time as
+    P2 only when the CPU is 100% busy.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: CPU shares (CPU requests) provide the CPU resource isolation necessary to run
+    different tenants on the same node. As long as tenants declare CPU requests, the
+    CPU capacity is shared according to those requests. Consequently, tenants are
+    unable to starve other tenants from getting CPU time.
+  prefs: []
+  type: TYPE_NORMAL
+- en: CPU limits work differently. They set an upper bound on the CPU time that each
+    container can use. Kubernetes leverages the bandwidth control feature of the Completely
+    Fair Scheduler (CFS) to implement CPU limits. CFS bandwidth control uses time
+    periods to limit CPU consumption. Each container gets a quota within a configurable
+    period. The quota determines how much CPU time can be consumed in every period.
+    If the container exhausts the quota, the container is throttled for the rest of
+    the period.
+  prefs: []
+  type: TYPE_NORMAL
+- en: By default, Kubernetes sets the period to 100 ms. A container with a limit of
+    0.5 CPUs gets 50 ms of CPU time every 100 ms, as depicted in [Figure 12-4](#cpu_consumption_and_throttling_of_a_process_running).
+    A container with a limit of 3 CPUs gets 300 ms of CPU time in every 100 millisecond
+    period, effectively allowing the container to consume up to 3 CPUs every 100 ms.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![prku 1204](assets/prku_1204.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 12-4\. CPU consumption and throttling of a process running in a cgroup
+    that has a CFS period of 100 milliseconds and a CPU quota of 50 milliseconds.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Due to the nature of CPU limits, they can sometimes result in surprising behavior
+    or unexpected throttling. This is usually the case in multithreaded applications
+    that can consume the entire quota at the very beginning of the period. For example,
+    a container with a limit of 1 CPU will get 100 ms of CPU time every 100 ms. Assuming
+    the container has 5 threads using CPU, the container consumes the 100 ms quota
+    in 20 ms and gets throttled for the remaining 80 ms. This is depicted in [Figure 12-5](#multi_threaded_application_consumes_the_entire).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![prku 1205](assets/prku_1205.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 12-5\. Multithreaded application consumes the entire CPU quota in the
+    first 20 milliseconds of the 100-millisecond period.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Enforcing CPU limits is useful to minimize the variability of an application’s
+    performance, especially when running multiple replicas across different nodes.
+    This variability in performance stems from the fact that, without CPU limits,
+    replicas can burst and consume idle CPU cycles, which *might* be available at
+    different times. By setting the CPU limits equal to the CPU requests, you remove
+    the variability as the workloads get precisely the CPU they requested. (Google
+    and IBM published an excellent [whitepaper](https://oreil.ly/39Pu7) that discusses
+    CFS bandwidth control in more detail.) In a similar vein, CPU limits play a critical
+    role in performance testing and benchmarking. Without any CPU limits, your benchmarks
+    will produce inconclusive results, as the CPU available to your workloads will
+    vary based on the nodes where they got scheduled and the amount of idle CPU available.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If your workloads require predictable access to CPU (e.g., latency-sensitive
+    applications), setting CPU limits equal to CPU requests is helpful. Otherwise,
+    placing an upper bound on CPU cycles is not necessary. When the CPU resources
+    on a node are under contention, the CPU shares mechanism ensures that workloads
+    get their fair share of CPU time, according to their container’s CPU requests.
+    When the CPU is not under contention, the idle CPU cycles are not wasted as workloads
+    opportunistically consume them.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Network Policies
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: In most deployments, Kubernetes assumes all Pods running on the platform can
+    communicate with each other. As you can imagine, this stance is problematic for
+    multitenant clusters, where you might want to enforce network-level isolation
+    between the tenants. The NetworkPolicy API is the mechanism you can leverage to
+    ensure tenants are isolated from each other at the network layer.
+  prefs: []
+  type: TYPE_NORMAL
+- en: We explored Network Policies in [Chapter 5](ch05.html#chapter5), where we discussed
+    the role of the Container Networking Interface (CNI) plug-ins in enforcing network
+    policies. In this section, we will discuss the *default deny-all* network policy
+    model, a common approach to Network Policy, especially in multitenant clusters.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As a platform operator, you can establish a default deny-all network policy
+    across the entire cluster. By doing so, you take the strongest stance regarding
+    network security and isolation, given that tenants are fully isolated as soon
+    as they are onboarded onto the platform. Furthermore, you drive tenants to a model
+    where they have to declare their workloads’ network interactions, which improves
+    their applications’ network security.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'When it comes to implementing a default deny-all policy, you can follow two
+    different paths, each with its pros and cons. The first approach leverages the
+    NetworkPolicy API available in Kubernetes. Because this is a core API, this implementation
+    is portable across different CNI plug-ins. However, given that the NetworkPolicy
+    object is Namespace-scoped, it requires you to create and manage multiple default
+    deny-all NetworkPolicy resources, one per Namespace. Additionally, because tenants
+    need the authorization to create their own NetworkPolicy objects, you must implement
+    additional controls (usually via admission webhooks, as discussed earlier) to
+    prevent tenants from modifying or deleting the default deny-all policy. The following
+    snippet shows a default deny-all NetworkPolicy object. The empty Pod selector
+    selects all the Pods in the Namespace:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The alternative approach is to leverage CNI plug-in-specific Custom Resource
+    Definitions (CRDs). Some CNI plug-ins, such as Antrea, Calico, and Cilium, provide
+    CRDs that enable you to specify cluster-level or “global” network policy. These
+    CRDs help you reduce the implementation and management complexity of the default
+    deny-all policy, but they tie you to a specific CNI plug-in. The following snippet
+    shows an example Calico GlobalNetworkPolicy CRD that implements the default deny-all
+    policy:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Typically, default deny-all network policy implementations make exceptions to
+    allow fundamental network traffic, such as DNS queries to the cluster’s DNS server.
+    Additionally, they are not applied to the kube-system Namespace and any other
+    system-level Namespaces to prevent breaking the cluster. The YAML snippets in
+    the preceding code do not address these concerns.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As with most choices, whether to use the built-in NetworkPolicy object or a
+    CRD results in a trade-off between portability and simplicity. In our experience,
+    we’ve found that the simplicity gained by leveraging the CNI-specific CRD is usually
+    worth the trade-off, given that switching CNI plug-ins is an uncommon event. With
+    that said, you might not have to make this choice in the future, as the Kubernetes
+    Networking Special Interest Group (sig-network) is [looking at evolving](https://oreil.ly/jVP_f)
+    the NetworkPolicy APIs to support cluster-scoped network policies.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Once the default deny-all policy is in place, tenants are responsible for poking
+    holes in the network fabric to ensure their applications can function. They achieve
+    this using the NetworkPolicy resource, in which they specify ingress and egress
+    rules that apply to their workloads. For example, the following snippet shows
+    a NetworkPolicy that could be applied to a web service. It allows Ingress or incoming
+    traffic from the web frontend, and it allows Egress or outgoing traffic to its
+    database:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: Enforcing a default deny-all network policy is a critical tenant isolation mechanism.
+    As you build your platform atop Kubernetes, we strongly encourage you to follow
+    this pattern, especially if you plan to host multiple tenants.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Pod Security Policies
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Pod Security Policies (PSPs) are another important mechanism to ensure tenants
+    can coexist safely on the same cluster. PSPs control critical security parameters
+    of Pods at runtime, such as their ability to run as privileged, access host volumes,
+    bind to the host network, and more. Without PSPs (or a similar policy enforcement
+    mechanism), workloads are free to do virtually anything on a cluster node.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Kubernetes enforces most of the controls implemented via PSPs using an admission
+    controller. (The rule that requires a nonroot user is sometimes enforced by the
+    kubelet, which verifies the runtime user of the container after downloading the
+    image.) Once the admission controller is enabled, attempts to create a Pod are
+    blocked unless they are allowed by a PSP. [Example 12-1](#sample_restrictive_podsecuritypolicy)
+    shows a restrictive PSP that we typically define as the *default* policy in multitenant
+    clusters.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 12-1\. Sample restrictive PodSecurityPolicy
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](assets/1.png)](#co_multitenancy_CO1-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Disallow privileged containers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](assets/2.png)](#co_multitenancy_CO1-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Control the volume types that Pods can use.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![3](assets/3.png)](#co_multitenancy_CO1-3)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Prevent Pods from binding to the underlying host’s network stack.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![4](assets/4.png)](#co_multitenancy_CO1-4)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Ensure that containers run as a nonroot user.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![5](assets/5.png)](#co_multitenancy_CO1-5)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This policy assumes the nodes are using AppArmor rather than SELinux.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![6](assets/6.png)](#co_multitenancy_CO1-6)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Specify the allowed group IDs that containers can use. The root gid (0) is disallowed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![7](assets/7.png)](#co_multitenancy_CO1-7)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Control the group IDs applied to volumes. The root gid (0) is disallowed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The existence of a PSP that allows the Pod is not enough for the Pod to be
+    admitted. The Pod must be authorized to *use* the PSP as well. PSP authorization
+    is handled using RBAC. Pods can use a PSP if their Service Account is authorized
+    to use it. Pods can also use a PSP if the actor creating the Pod is authorized
+    to use the PSP. However, given that Pods are seldom created by cluster users,
+    using Service Accounts for PSP authorization is the more common approach. The
+    following snippet shows a Role and RoleBinding that authorizes a Service Account
+    to use a specific PSP named `sample-psp`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'In most cases, the platform team is responsible for creating and managing the
+    PSPs and enabling tenants to use them. As you design the policies, always follow
+    the principle of least privilege. Only allow the minimum set of privileges and
+    capabilities required for Pods to complete their work. As a starting point, we
+    typically recommend creating the following policies:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Default
+  prefs: []
+  type: TYPE_NORMAL
+- en: The default policy is usable by all tenants on the cluster. It should be a restrictive
+    policy that blocks all privileged operations, drops all Linux capabilities, disallows
+    running as the root user, etc. (See [Example 12-1](#sample_restrictive_podsecuritypolicy)
+    for the YAML definition of this policy.) To make it the default policy, you can
+    authorize all Pods in the cluster to use this PSP using a ClusterRole and ClusterRoleBinding.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Kube-system
+  prefs: []
+  type: TYPE_NORMAL
+- en: The kube-system policy is for the system components that exist within the kube-system
+    Namespace. Due to the nature of these components, this policy needs to be more
+    permissive than the default policy. For example, it must allow Pods to mount `hostPath`
+    volumes and run as root. In contrast to the default policy, the RBAC authorization
+    is achieved using a RoleBinding scoped to all Service Accounts in the kube-system
+    Namespace.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Networking
+  prefs: []
+  type: TYPE_NORMAL
+- en: The networking policy is geared toward the cluster’s networking components,
+    such as the CNI plug-in. These Pods require even more privileges to manipulate
+    the networking stack of cluster nodes. To isolate this policy to networking Pods,
+    create a RoleBinding that authorizes only the networking Pods Service Accounts
+    to use the policy.
+  prefs: []
+  type: TYPE_NORMAL
+- en: With these policies in place, tenants can deploy unprivileged workloads into
+    the cluster. If there is a workload that needs additional privileges, you must
+    determine whether you can tolerate the risk of running that privileged workload
+    in the same cluster. If so, create a different policy tailored to that workload.
+    Grant the privileges required by the workload and only authorize that workload’s
+    Service Account to use the PSP.
+  prefs: []
+  type: TYPE_NORMAL
+- en: PSPs are a critical enforcement mechanism in multitenant platforms. They control
+    what tenants can and cannot do at runtime, as they run alongside other tenants
+    on shared nodes. When building your platform, you should leverage PSPs to ensure
+    tenants are isolated and protected from each other.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The Kubernetes community is [discussing](https://oreil.ly/ayN8j) the possibility
+    of removing the PodSecurityPolicy API and admission controller from the core project.
+    If removed, you can leverage a policy engine such as [Open Policy Agent](https://oreil.ly/wrz23)
+    or [Kyverno](https://oreil.ly/v7C2H) to implement similar functionality.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Multitenant Platform Services
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: In addition to isolating the Kubernetes control plane and workload plane, you
+    can enforce isolation in the different services you offer on the platform. These
+    include services such as logging, monitoring, ingress, etc. A significant determining
+    factor in implementing this isolation is the technology you use to provide the
+    service. In some cases, the tool or technology might support multitenancy out
+    of the box, vastly simplifying your implementation.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Another important consideration to make is whether you *need* to isolate tenants
+    at this layer. Is it okay for tenants to look at each other’s logs and metrics?
+    Is it acceptable for them to freely discover each other’s services over DNS? Can
+    they share the ingress data path? Answering these and similar questions will help
+    clarify your requirements. In the end, it boils down to the level of trust between
+    the tenants you are hosting on the platform.
+  prefs: []
+  type: TYPE_NORMAL
+- en: A typical scenario we run into when helping platform teams is multitenant monitoring
+    with Prometheus. Out of the box, Prometheus does not support multitenancy. Metrics
+    are ingested and stored in a single time-series database, which is accessible
+    by anyone who has access to the Prometheus HTTP endpoint. In other words, if the
+    Prometheus instance is scraping metrics from multiple tenants, there’s no way
+    to prevent different tenants from seeing each other’s data. To address this issue,
+    we need to deploy separate Prometheus instances per tenant.
+  prefs: []
+  type: TYPE_NORMAL
+- en: When approaching this problem, we typically leverage the [prometheus-operator](https://oreil.ly/j38-Q).
+    As discussed in [Chapter 9](ch09.html#observability_chapter), the prometheus-operator
+    allows you to deploy and manage multiple instances of Prometheus using Custom
+    Resource Definitions. With this capability, you can offer a monitoring platform
+    service that can safely support various tenants. Tenants are completely isolated
+    as they get a dedicated monitoring stack that includes Prometheus, Grafana, Alertmanager,
+    etc.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Depending on the platform’s target user experience, you can either allow tenants
+    to deploy their Prometheus instance using the operator, or you can automatically
+    create an instance when you onboard a new tenant. When the platform team has the
+    capacity, we recommend the latter, as it removes the burden from the platform
+    tenants and provides an improved user experience.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Centralized logging is another platform service that you can implement with
+    multi-tenancy in mind. Typically, this involves sending logs for different tenants
+    to different backends or datastores. Most log forwarders have routing features
+    that you can use to implement a multitenant solution.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In the case of Fluentd and Fluent Bit, you can leverage their tag-based routing
+    features when configuring the forwarder. The following snippet shows a sample
+    Fluent Bit output configuration that routes Alice’s logs (Pods in the `alice-ns`
+    Namespace) to one backend and Bob’s logs (Pods in the `bob-ns` Namespace) to another
+    backend:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: In addition to isolating the logs at the backend, you can also implement rate-limiting
+    or throttling to prevent one tenant from hogging the log forwarding infrastructure.
+    Both Fluentd and Fluent Bit have plug-ins you can use to enforce such limits.
+    Finally, if you have a use case that warrants it, you can leverage a logging operator
+    to support more advanced use cases, such as exposing the logging configuration
+    via a Kubernetes CRD.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Multitenancy in the platform services layer is sometimes overlooked by platform
+    teams. As you build your multitenant platform, consider your requirements and
+    their implications on the platform services you want to offer. In some cases,
+    it can drive decisions around approaches and tooling that are fundamental to your
+    platform.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Summary
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Workload tenancy is a crucial concern you must consider when building a platform
+    atop Kubernetes. On one hand, you can operate single-tenant clusters for each
+    of your platform tenants. While this approach is viable, we discussed its downsides,
+    including resource and management overhead. The alternative is multitenant clusters,
+    where tenants share the cluster’s control plane, workload plane, and platform
+    services.
+  prefs: []
+  type: TYPE_NORMAL
+- en: When hosting multiple tenants on the same cluster, you must ensure tenant isolation
+    such that tenants cannot negatively affect each other. We discussed the Kubernetes
+    Namespace as the foundation upon which we can build the isolation. We then discussed
+    many of the isolation mechanisms available in Kubernetes that allow you to build
+    a multitenant platform. These mechanisms are available in different layers, mainly
+    the control plane, the workload plane, and the platform services.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The control plane isolation mechanisms include RBAC to control what tenants
+    can do, resource quotas to divvy up the cluster resources, and admission webhooks
+    to enforce policy. On the workload plane, you can segregate tenants by using Resource
+    Requests and Limits to ensure fair-sharing of node resources, Network Policies
+    to segment the Pod network, and Pod Security Policies to limit Pods capabilities.
+    Finally, when it comes to platform services, you can leverage different technologies
+    to implement multitenant offerings. We explored monitoring and centralized logging
+    as example platform service that you can build to support multiple tenants.
+  prefs: []
+  type: TYPE_NORMAL

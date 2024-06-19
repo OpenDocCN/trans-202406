@@ -1,0 +1,2334 @@
+- en: Chapter 11\. Advanced Topics
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: In this chapter, we’ll do a quick pass through some of the more advanced topics.
+    We’re going to assume that you have a pretty good hold on Docker by now and that
+    you’ve already got it in production or you’re at least a regular user. We’ll talk
+    about how containers work in detail and about some of the aspects of Docker security,
+    Docker networking, Docker plug-ins, swappable runtimes, and other advanced configurations.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Some of this chapter covers configurable changes you can make to your Docker
+    installation. These can be useful, but Docker has good defaults, so as with most
+    software, you should stick to the defaults on your operating system unless you
+    have a good reason to change them and have educated yourself on what those changes
+    mean to you. Getting your installation right for your environment will likely
+    involve some trial and error, tuning, and adjustment over time. However, changing
+    settings from their defaults before understanding them well is not recommended.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Containers in Detail
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'Though we usually talk about Linux containers as a single entity, they are
+    actually implemented through several separate mechanisms built into the Linux
+    kernel that all work together: control groups (cgroups), namespaces, Secure Computing
+    Mode (`seccomp`), and SELinux or AppArmor, all of which serve to *contain* the
+    process. cgroups provide for resource limits, namespaces allow for processes to
+    use identically named resources and isolate them from one another’s view of the
+    system, Secure Computing Mode limits which system calls a process can use, and
+    SELinux or AppArmor provides additional strong security isolation for processes.
+    So, to start, what do cgroups and namespaces do for you?'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Before we launch into detail, an analogy might help you understand how each
+    of these subsystems plays into the way that containers work. Imagine that the
+    typical computer is like a large open warehouse, full of workers (processes).
+    The warehouse is full of space and resources, but it is very easy for the workers
+    to get in one another’s way, and most of the resources are simply used by whomever
+    gets them first.
+  prefs: []
+  type: TYPE_NORMAL
+- en: When you are running Docker and using Linux containers for your workloads, it
+    is like that warehouse has been converted into an office building, where each
+    worker now has their own individual office. Each office has all the normal things
+    that the workers need to accomplish their jobs, and in general, they can now work
+    without worrying much about what other people (processes) are doing.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Namespaces make up the walls of the office and ensure that processes cannot
+    interact with neighboring processes in any way that they are not specifically
+    allowed to. Control groups are a bit like paying rent to receive utilities. When
+    the process is first spun up, it is assigned time on the CPU and storage subsystem
+    that it will be allowed each cycle, in addition to the amount of memory that it
+    will be allowed to use at any moment. This helps ensure that the workers (processes)
+    have the resources they need, without allowing them to use resources or space
+    reserved for others. Imagine the worst kind of noisy neighbors, and you can suddenly
+    truly appreciate good, solid barriers between offices. Finally, Secure Computing
+    Mode, SELinux, and AppArmor are a bit like office security, ensuring that even
+    if something unexpected or untoward happens, it is unlikely to cause much more
+    than the headache of filling out paperwork and filing an incident report.
+  prefs: []
+  type: TYPE_NORMAL
+- en: cgroups
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Traditional distributed system design dictates running each intensive task on
+    its own virtual server. So, for example, you don’t run your applications on the
+    database server because they have competing resource demands, and their resource
+    usage could grow unbounded and begin to dominate the server, starving the database
+    of performance.
+  prefs: []
+  type: TYPE_NORMAL
+- en: On real hardware systems, this could be quite expensive, so solutions like virtual
+    servers are very appealing, in part because you can share expensive hardware between
+    competing applications, and the virtualization layer will handle your resource
+    partitioning. But while it saves money, this is still a fairly expensive approach
+    if you don’t need all the other separation provided by virtualization, because
+    running multiple kernels introduces a reasonable overhead on the applications.
+    Maintaining VMs is also not the cheapest solution. All the same, cloud computing
+    has shown that it’s immensely powerful and, with the right tooling, incredibly
+    effective.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'But if the only kind of isolation you needed was resource partitioning, wouldn’t
+    it be great if you could get that on the same kernel without running another operating
+    system instance? For many years, you could assign a “niceness” value to a process,
+    and it would give the scheduler hints about how you wanted this process to be
+    treated in relation to the others. But it wasn’t possible to impose hard limits
+    like those that you get with VMs. And niceness is not at all fine-grained: you
+    can’t give something more I/O and less CPU than other processes. This fine-grained
+    control, of course, is one of the promises of Linux containers, and the mechanism
+    that they use to provide that functionality is cgroups, which predate Docker and
+    were invented to solve just this problem.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*Control groups* allow you to set limits on resources for processes and their
+    children. This is the mechanism that the Linux kernel uses to control limits on
+    memory, swap, CPU, storage, and network I/O resources. cgroups are built into
+    the kernel and originally shipped in 2007 in Linux 2.6.24\. The official [kernel
+    documentation](https://www.kernel.org/doc/Documentation/cgroup-v2.txt) defines
+    them as “a mechanism to organize processes hierarchically and distribute system
+    resources along the hierarchy in a controlled and configurable manner.” It’s important
+    to note that this setting applies to a process and all of the children that descend
+    from it. That’s exactly how containers are structured.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'It is worth mentioning that there have been at least two major releases of
+    Linux control groups: [v1](https://www.kernel.org/doc/Documentation/cgroup-v1/cgroups.txt)
+    and [v2](https://www.kernel.org/doc/Documentation/cgroup-v2.txt). Make sure that
+    you know which version is being used in production so that you can leverage all
+    the abilities that it provides.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Every Linux container is assigned a cgroup that is unique to that container.
+    All of the processes in the container will be in the same group. This means that
+    it’s easy to control resources for each container as a whole without worrying
+    about what might be running. If a container is redeployed with new processes added,
+    you can have Docker assign the same policy and it will apply to the whole container
+    and all the process containers within it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: We talked previously about the cgroups hooks exposed by Docker via its API.
+    That interface allows you to control memory, swap, and disk usage. But there are
+    lots of other things that you can manage with cgroups, including tagging network
+    packets from a container so that you can use those tags to prioritize traffic.
+    You might find that in your environment you need to use some of these levers to
+    keep your containers under control, and there are a few ways you can go about
+    doing that. By their very nature, cgroups need to do a lot of accounting of resources
+    used by each group. That means that when you’re using them, the kernel has a lot
+    of interesting statistics about how much CPU, RAM, disk I/O, and so on your processes
+    are using. So Docker uses cgroups not just to limit resources but also to report
+    on them. These are many of the metrics you see, for example, in the output of
+    `docker` `container stats`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The /sys filesystem
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: The primary way to control cgroups in a fine-grained manner, even if you configured
+    them with Docker, is to manage them yourself. This is the most powerful method
+    because changes don’t just happen at container creation time—they can be done
+    on the fly.
+  prefs: []
+  type: TYPE_NORMAL
+- en: On systems with `systemd`, there are command-line tools like `systemctl` that
+    you can use to do this. But since cgroups are built into the kernel, the method
+    that works everywhere is to talk to the kernel directly via the */sys* filesystem.
+    If you’re not familiar with */sys*, it’s a filesystem that directly exposes several
+    kernel settings and outputs. You can use it with simple command-line tools to
+    tell the kernel how you would like it to behave.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This method of configuring cgroups controls for containers only works directly
+    on the Docker server, so it is not available remotely via any API. If you use
+    this method, you’ll need to figure out how to script this for your environment.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Changing cgroups values yourself, outside of any Docker configuration, breaks
+    some of the repeatability of a Docker deployment. Unless you implement changes
+    in your deployment process, settings will revert to their defaults when containers
+    are replaced. Some schedulers take care of this for you, so if you run one in
+    production, you might check the documentation to see how to best apply these changes
+    repeatably.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s use an example of changing the CPU cgroups settings for a container we
+    have just started up. We need to get the long ID of the container, and then we
+    need to find it in the */sys* filesystem. Here’s what that looks like:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: Here, we’ve had `docker container run` give us the long ID in the output, and
+    the ID we want is `dcbb…8e86f1dc0a91e7675d3c93895cb6a6d83371e25b7f0bd62803ed8e86`.
+    You can see why Docker normally truncates this.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: In the examples, we may need to truncate the ID to make it fit into the constraints
+    of a standard page. But remember that you will need to use the long ID!
+  prefs: []
+  type: TYPE_NORMAL
+- en: Now that we have the ID, we can find our container’s cgroup in the */sys* filesystem.
+    */sys* is laid out so that each type of setting is grouped into a module, and
+    that module might be exposed at a different place in the */sys* filesystem. So
+    when we look at CPU settings, we won’t see `blkio` settings, for example. You
+    might take a look around in */sys* to see what else is there. But for now we’re
+    interested in the CPU controller, so let’s inspect what that gives us. You need
+    `root` access on the system to do this because you’re manipulating kernel settings.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Remember our `nsenter` trick we originally discussed in [Chapter 3](ch03.html#installing_docker).
+    You can run `docker container run --rm -it --privileged --pid=host debian nsenter
+    -t 1 -m -u -n -i sh` to get access to the Docker host, even if you can’t SSH into
+    the server.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The exact path here may change a bit depending on the Linux distribution your
+    Docker server is running on and what the hash of your container is.
+  prefs: []
+  type: TYPE_NORMAL
+- en: You can see that under cgroups, there is a *docker* directory that contains
+    all of the Linux containers that are running on this host. You can’t set cgroups
+    for things that aren’t running, because they apply only to running processes.
+    This is an important point that you should consider. Docker takes care of reapplying
+    cgroup settings for you when you start and stop containers. Without that mechanism,
+    you are somewhat on your own.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s go ahead and inspect the [CPU weight](https://docs.kernel.org/admin-guide/cgroup-v2.html#cpu-interface-files)
+    for this container. Remember that we explored setting some of these CPU values
+    in [Chapter 5](ch05.html#docker_containers) via the `--cpus` command-line argument
+    to `docker container run`. But for a normal container where no settings were passed,
+    this setting is the default:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: '`100` CPU weight means we are not limited at all. Let’s tell the kernel that
+    this container should be limited to half that:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: In production, you should not use this method to adjust cgroups on the fly,
+    but we are demonstrating it here so that you understand the underlying mechanics
+    that make all of this work. Take a look at [`docker container update`](https://dockr.ly/2PPC4P1)
+    if you’d like to adjust these on a running container. You might also find the
+    [`--cgroup-parent`](https://dockr.ly/2PTLaKK) option to `docker container run`
+    interesting.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'There you have it. We’ve changed the container’s settings on the fly. This
+    method is very powerful because it allows you to set any cgroups setting for the
+    container. But as we mentioned earlier, it’s entirely ephemeral. When the container
+    is stopped and restarted, the setting reverts to the default:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You can see that the directory path doesn’t even exist anymore now that the
+    container is stopped. And when we start it back up, the directory comes back but
+    the setting is back to `100`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: If you were to change these kinds of settings in a production system via the
+    */sys* filesystem directly, you’d want to manage that directly. A daemon that
+    watches the `docker system events` stream and changes settings at container startup,
+    for example, is a possibility.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: It is possible to create custom cgroups outside of Docker and then attach a
+    new container to that cgroup using the `--cgroup-parent` argument to `docker container
+    create`. This mechanism is also used by schedulers that run multiple containers
+    inside the same cgroup (e.g., Kubernetes pods).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Namespaces
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Inside each container, you see a filesystem, network interfaces, disks, and
+    other resources that all appear to be unique to the container despite sharing
+    the kernel with all the other processes on the system. The primary network interface
+    on the actual machine, for example, is a single shared resource. But inside your
+    container, it will look like it has an entire network interface to itself. This
+    is a really useful abstraction: it’s what makes your container feel like a machine
+    all by itself. The way this is implemented in the kernel is with Linux namespaces.
+    Namespaces take a traditionally global resource and present the container with
+    its own unique and unshared version of that resource.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Namespaces cannot be explored on the filesystem quite as easily as cgroups,
+    but most of the details can be found under the */proc/*/ns/** and */proc/*/task/*/ns/**
+    hierarchies. In newer Linux releases, the `lsns` command can also be quite useful.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Rather than just having a single namespace, however, by default containers
+    have a namespace on each of the resources that are currently namespaced in the
+    kernel: mount, UTS, IPC, PID, network, and user namespaces, in addition to the
+    partially implemented time namespace. Essentially, when you talk about a container,
+    you’re talking about several different namespaces that Docker sets up on your
+    behalf. So what do they all do?'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Mount namespaces
+  prefs: []
+  type: TYPE_NORMAL
+- en: Linux uses these primarily to make your container look like it has its own entire
+    filesystem. If you’ve ever used a `chroot` jail, this is its more robust relative.
+    It looks a lot like a `chroot` jail but goes all the way down to the deepest levels
+    of the kernel so that even `mount` and `unmount` system calls are namespaced.
+    If you use `docker container exec` or `nsenter`, which we will discuss later in
+    this chapter, to get into a container, you’ll see a filesystem rooted on */*.
+    But we know that this isn’t the actual root partition of the system. It’s the
+    mount namespace that makes that possible.
+  prefs: []
+  type: TYPE_NORMAL
+- en: UTS namespaces
+  prefs: []
+  type: TYPE_NORMAL
+- en: Named for the kernel structure they namespace, UTS (Unix Time Sharing System)
+    namespaces give your container its own hostname and domain name. This is also
+    used by older systems like NIS to identify which domain a host belongs to. When
+    you enter a container and see a hostname that is not the same as the machine on
+    which it runs, it’s this namespace that makes that happen.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: To have a container use its host’s UTS namespace, you can specify the `--uts=host`
+    option when launching the container with `docker container run`. There are similar
+    commands for sharing the other namespaces as well.
+  prefs: []
+  type: TYPE_NORMAL
+- en: IPC namespaces
+  prefs: []
+  type: TYPE_NORMAL
+- en: These isolate your container’s System V IPC and POSIX message queue systems
+    from those of the host. Some IPC mechanisms use filesystem resources like named
+    pipes, and those are covered by the mount namespace. The IPC namespace covers
+    things like shared memory and semaphores that aren’t filesystem resources but
+    that really should not cross the container wall.
+  prefs: []
+  type: TYPE_NORMAL
+- en: PID namespaces
+  prefs: []
+  type: TYPE_NORMAL
+- en: We have already shown that you can see all of the processes in containers in
+    the Linux `ps` output on the host Linux server. But inside the container, processes
+    have a different PID. This is the PID namespace in action. A process has a unique
+    PID in each namespace to which it belongs. If you look in */proc* inside a container,
+    or run `ps`, you will only see the processes inside the container’s PID namespace.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Network namespaces
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is what allows your container to have its own network devices, ports, and
+    so on. When you run `docker container ls` and see the bound ports for your container,
+    you are seeing ports from both namespaces. Inside the container, your `nginx`
+    might be bound to port 80, but that’s on the namespaced network interface. This
+    namespace makes it possible to have what seems to be a completely separate network
+    stack for your container.
+  prefs: []
+  type: TYPE_NORMAL
+- en: User namespaces
+  prefs: []
+  type: TYPE_NORMAL
+- en: These provide isolation between the user and group IDs inside a container and
+    those on the Linux host. Earlier, when we looked at `ps` output outside and then
+    inside the container, we saw different user IDs; this is how that happened. A
+    new user inside a container is not a new user on the Linux host’s main namespace,
+    and vice versa. There are some subtleties here, though. For example, UID 0 (`root`)
+    in a user namespace is not the same thing as UID 0 on the host, although running
+    as `root` inside the container does increase the risk of potential security exploits.
+    There are concerns about security leakage, which we’ll talk about in a bit, and
+    this is why things like rootless containers are growing in popularity.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Cgroup namespaces
+  prefs: []
+  type: TYPE_NORMAL
+- en: This namespace was introduced in Linux kernel 4.6 in 2016 and is intended to
+    hide the identity of the cgroup of which the process is a member. A process checking
+    which cgroup any process is part of would see a path that is relative to the cgroup
+    set at creation time, hiding its true cgroup position and identity.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Time namespaces
+  prefs: []
+  type: TYPE_NORMAL
+- en: Time has historically not been namespaced since it is so integral to the Linux
+    kernel, and providing full namespacing would be very complex. However, with the
+    release of Linux kernel 5.6 in 2020, support was added for a [time namespace](https://man7.org/linux/man-pages/man7/time_namespaces.7.html)
+    that allows containers to have their own unique clock offsets.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: At the time of this writing, Docker still does not have direct support for setting
+    the time offset, but like everything else, it can be set directly, if required.
+  prefs: []
+  type: TYPE_NORMAL
+- en: So by combining all of these namespaces, Linux can provide the visual and, in
+    many cases, the functional isolation that makes a container look like a VM even
+    though it’s running on the same kernel. Let’s explore what some of the namespacing
+    that we just described looks like in more detail.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: There is a lot of ongoing work trying to make containers more secure. The community
+    is actively looking into ways to improve support for [rootless containers](https://rootlesscontaine.rs),
+    which enables regular users to create, run, and manage containers locally without
+    needing special privileges. In Docker, this can now be achieved via [rootless
+    mode](https://docs.docker.com/engine/security/rootless). New container runtimes
+    like [Google gVisor](https://github.com/google/gvisor) are also trying to explore
+    better ways to create much more secure container sandboxes without losing most
+    of the advantages of containerized workflows.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Exploring namespaces
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'One of the easiest namespaces to demonstrate is UTS, so let’s use `docker container
+    exec` to get a shell in a container and take a look. From within the Docker server,
+    run the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Again, remember that you can use the `docker container run --rm -it --privileged
+    --pid=host debian nsenter -t 1 -m -u -n -i sh` command that we originally discussed
+    in [Chapter 3](ch03.html#installing_docker) to get access to the Docker host,
+    even if you can’t SSH into the server.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'And then on your local system, run the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: That `docker container run` command line gets us an interactive session (`-ti`)
+    and then executes the `hostname` command via `/bin/bash` inside the container.
+    Since the `hostname` command is run inside the container’s namespace, we get back
+    the short container ID, which is used as the hostname by default. This is a pretty
+    simple example, but it should clearly show that we’re not in the same namespace
+    as the host.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Another example that’s easy to understand and demonstrate involves PID namespaces.
+    Let’s create a new container:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'And now let’s get Docker to show us the process IDs from the host’s perspective:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: What we can see here is that from inside our container, the original command
+    run by Docker is `sleep 240`, and it has been assigned PID `1` inside the container.
+    You might recall that this is the PID normally used by the `init` process on Unix
+    systems. In this case, the `sleep 240` command that we started the container with
+    is the first process, so it gets PID `1`. But in the Docker server’s main namespace,
+    we can see that the PID there is not `1` but `31396`, and it’s a child of process
+    ID `31370`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If you are curious, you can run a command like this to determine what PID `31370`
+    is:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Now we can go ahead and remove the container we started in the last example
+    by running the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: The other namespaces work in essentially the same manner, and you probably get
+    the idea by now. It’s worth pointing out here that when we were first working
+    with `nsenter` back in [Chapter 3](ch03.html#installing_docker), we had to pass
+    what appeared to be some pretty arcane arguments to the command when we ran it
+    to enter a container from the Docker server. Let’s go ahead and look at the `nsenter`
+    portion of the command `docker container run --rm -it --privileged --pid=host
+    debian nsenter -t 1 -m -u -n -i sh`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: It turns out that `nsenter -t 1 -m -u -n -i sh` is exactly the same as `nsenter
+    --target 1 --mount --uts --net -ipc sh`. So this command really just says, look
+    at PID `1` and then open up a shell in the same `mount`, `uts`, `net`, and `ipc`
+    namespaces of that process.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Now that we’ve explained namespaces in detail, this probably makes a lot more
+    sense to you. It can also be educational to use `nsenter` to try entering different
+    sets of namespaces in a throwaway container to see what you get and simply explore
+    how all of this works in some more detail.
+  prefs: []
+  type: TYPE_NORMAL
+- en: When it comes down to it, namespaces are the primary things that make a container
+    look like a container. Combine them with cgroups, and you have reasonably robust
+    isolation between processes on the same kernel.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Security
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: We’ve spent a good bit of space now talking about how Docker provides containment
+    for applications, allows you to constrain resource utilization, and uses namespaces
+    to give the container a unique view of the world. We have also briefly mentioned
+    the need for technologies like Secure Computing Mode, SELinux, and AppArmor. One
+    of the advantages of containers is the ability to replace VMs in several use cases.
+    So let’s take a look at what isolation we get by default and what we don’t.
+  prefs: []
+  type: TYPE_NORMAL
+- en: You are undoubtedly aware by now that the isolation you get from a container
+    is not as strong as that from a VM. We’ve been reinforcing the idea from the start
+    of this book that containers are just processes running on the Linux server. Despite
+    the isolation provided by namespaces, containers are not as secure as you might
+    imagine, especially if you are still mentally comparing them to lightweight VMs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: One of the big boosts in performance for containers, and one of the things that
+    makes them lightweight, is that they share the kernel of the Linux server. This
+    is also the source of the greatest security concern around Linux containers. The
+    main reason for this concern is that not everything in the kernel is namespaced.
+    We have talked about all of the namespaces that exist and how the container’s
+    view of the world is constrained by the namespaces it runs in. However, there
+    are still lots of places in the kernel where no real isolation exists, and namespaces
+    constrain the container only if it does not have the power to tell the kernel
+    to give it access to a different namespace.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Containerized applications are more secure than noncontainerized applications
+    because cgroups and standard namespaces provide some important isolation from
+    the host’s core resources. But you should not think of containers as a substitute
+    for good security practices. If you think about how you would run an application
+    on a production system, that is really how you should run all your containers.
+    If your application would traditionally run as a nonprivileged user on a server,
+    then it should be run in the same manner inside the container. It is very easy
+    to tell Docker to run your container processes as a nonprivileged user, and in
+    almost all cases, this is what you should be doing.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The `--userns-remap` argument to the `dockerd` command and rootless mode both
+    make it possible to force all containers to run within a user and group context
+    that is unprivileged on the host system. These approaches help protect the host
+    from many potential security exploits.
+  prefs: []
+  type: TYPE_NORMAL
+- en: For more information about `userns-remap`, read through the official [feature](https://dockr.ly/2BYfWze)
+    and [Docker daemon](https://dockr.ly/2LE9gG2) documentation.
+  prefs: []
+  type: TYPE_NORMAL
+- en: You can learn more about rootless mode in the section [“Rootless Mode”](#rootless_mode).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Let’s look at some common security risks and controls.
+  prefs: []
+  type: TYPE_NORMAL
+- en: UID 0
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The first and most overarching security risk in a container is that, unless
+    you are using rootless mode or the `userns-remap` functionality in the Docker
+    daemon, the `root` user in the container is actually the `root` user on the system.
+    There are extra constraints on `root` in a container, and namespaces do a good
+    job of isolating `root` in the container from the most dangerous parts of the
+    */proc* and */sys* filesystems. But if you are UID 0, you have `root` access,
+    so if you somehow get access to protected resources on a file mount or outside
+    of your namespace, then the kernel will treat you as `root` and therefore give
+    you access to the resource. Unless otherwise configured, Docker starts all services
+    in containers as `root`, which means you are responsible for managing privileges
+    in your applications just like if you are on any standard Linux system. Let’s
+    explore some of the limits on `root` access and look at some obvious holes. This
+    is not intended to be an exhaustive statement on container security but rather
+    an attempt to give you a healthy understanding of some of the classes of security
+    risks.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'First, let’s fire up a container and get a `bash` shell using the public Ubuntu
+    image shown in the following code. Then we’ll see what kinds of access we have,
+    after installing some tools we want to run:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: In Docker Desktop, you may only see a few modules in the list, but on a normal
+    Linux system, this list can be very long. Using `lsmod`, we’ve just asked the
+    kernel to tell us what modules are loaded. It is not that surprising that we get
+    this list from inside our container, since a normal user can always do this. If
+    you run this listing on the Docker server itself, it will be identical, which
+    reinforces the fact that the container is talking to the same Linux kernel that
+    is running on the server. So we can see the kernel modules; what happens if we
+    try to unload the `floppy` module?
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  prefs: []
+  type: TYPE_PRE
+- en: That’s the same error message we would get if we were a nonprivileged user trying
+    to tell the kernel to remove a module. This should give you a good sense that
+    the kernel is doing its best to prevent us from doing things we shouldn’t. And
+    because we’re in a limited namespace, we can’t get the kernel to give us access
+    to the top-level namespace either. We are essentially relying on the hope that
+    there are no bugs in the kernel that allow us to escalate our privileges inside
+    the container. Because if we do manage to do that, we are `root`, which means
+    that we will be able to make changes if the kernel allows us to.
+  prefs: []
+  type: TYPE_NORMAL
+- en: We can contrive a simple example of how things can go wrong by starting a `bash`
+    shell in a container that has had the Docker server’s */etc* bind-mounted into
+    the container’s namespace. Keep in mind that anyone who can start a container
+    on your Docker server can do what we’re about to do any time they like because
+    you can’t configure Docker to prevent it, so you must instead rely on external
+    tools like SELinux to avoid exploits like this.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: This example assumes that you are running the `docker` CLI on a Linux system,
+    which has an */etc/shadow* file. This file will not exist on Windows or macOS
+    hosts running something like Docker Desktop.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE14]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Here we’ve used the `-v` switch to tell Docker to mount a host path into the
+    container. The one we’ve chosen is */etc*, which is a very dangerous thing to
+    do. But it serves to prove a point: we are `root` in the container, and `root`
+    has file permissions in this path. So we can look at the */etc/shadow* file on
+    the Linux server, which contains the encrypted passwords for all the users. There
+    are plenty of other things you could do here, but the point is that by default
+    you’re only partly constrained.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: It is a bad idea to run your container processes with UID 0\. This is because
+    any exploit that allows the process to somehow escape its namespaces will expose
+    your host system to a fully privileged process. You should always run your standard
+    containers with a nonprivileged UID.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The easiest way to deal with the potential problems surrounding the use of UID
+    0 inside containers is to always tell Docker to use a different UID for your container.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You can do this by passing the `-u` argument to `docker container run`. In
+    the next example, we run the `whoami` command to show that we are `root` by default
+    and that we can read the */etc/shadow* file that is inside this container:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE15]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'In this example, when you add `-u 500`, you will see that we become a new,
+    unprivileged user and can no longer read the same */etc/shadow* file:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE16]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Another highly recommended approach is to add the `USER` directive to your
+    *Dockerfile*s so that containers created from them will launch using a nonprivileged
+    user by default:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE17]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'If you create this *Dockerfile*, and then build and run it, you will see that
+    `whoami` returns `myuser` instead of `root`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE18]'
+  prefs: []
+  type: TYPE_PRE
+- en: Rootless Mode
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: One of the primary security challenges with containers is that they often require
+    some root-privileged processes to launch and manage them. Even when you use the
+    `--userns-remap` feature of the Docker daemon, the daemon itself still runs as
+    a privileged process, even though the containers that it launches will not.
+  prefs: []
+  type: TYPE_NORMAL
+- en: With [rootless mode](https://docs.docker.com/engine/security/rootless), it is
+    possible to run the daemon and all containers without root privileges, which can
+    do a great deal to improve the security of the underlying system.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Rootless mode requires a Linux system, and Docker recommends Ubuntu, so let’s
+    run through an example using a new Ubuntu 22.04 system.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: These steps assume that you are logging in a regular unprivileged user and that
+    you already have [Docker Engine installed](https://docs.docker.com/engine/install/ubuntu).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The first thing we need to do is make sure that `dbus-user-session` and `uidmap`
+    are installed. If `dbus-user-session` isn’t already installed, then we need to
+    log out and log back in after running the following command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE19]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Although, it is not strictly required, if the system-wide Docker daemon is
+    set up to run, it is a very good idea to disable it and then reboot:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE20]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Once the system is back up, you can SSH back into the server as a regular user
+    and confirm that */var/run/docker.sock* is no longer on the system:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE21]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The next step is to run the rootless mode installation script, which is installed
+    in */usr/bin* by the Docker installer:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE22]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The `` UID` `` in the `` DOCKER_HOST` `` variable here should match the UID
+    of the user who ran the script. In this case, the `UID` is `1000`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This script ran a few checks to ensure that our system was ready and then installed
+    and started a user-scoped `systemd` service file into `${HOME}/.config/systemd/user/docker.service`.
+    Each and every user on the system could do the same thing, if desired.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The user Docker daemon can be controlled, like most `systemd` services. A few
+    basic examples are shown here:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE23]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'To allow the user Docker daemon to run when the user is not logged in, the
+    user needs to use `sudo` to enable a `systemd` feature called `linger`, and then
+    you can also enable the Docker daemon to start whenever the system boots up:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE24]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This would be a good time to go ahead and add those environment variables to
+    our shell startup files, but at a minimum we need to make sure both of these environment
+    variables are set in our current terminal:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE25]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'We can easily run a standard container:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE26]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'However, you will notice that some of the more privileged containers that we
+    have used in earlier sections will not work in this environment:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE27]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'And this is because, in rootless mode, the container cannot have more privileges
+    than the user who is running the container, even though, on the surface, the container
+    appears to still have full `root` privileges:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE28]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Let’s explore this just a little bit more by launching a small container that
+    is running `sleep 480s`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE29]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'If we look at the processes inside the container, we see that they all appear
+    to be running with the user `root`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE30]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'However, if we look at the processes on the Linux system, we see that the `sleep`
+    command is actually being run by the local user, named `me`, and not by `root`
+    at all:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE31]'
+  prefs: []
+  type: TYPE_PRE
+- en: The `root` user inside a rootless container is actually mapped to the user themself.
+    The container processes cannot use any privileges that the user running the daemon
+    does not already have, and because of this, they are a very safe way to allow
+    users on a multiuser system to run containers without granting any of them elevated
+    privileges on the system.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: There are directions to [uninstall rootless mode](https://docs.docker.com/engine/security/rootless/#uninstall)
+    on the Docker website.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Privileged Containers
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: There are times when you need your container to have special [kernel capabilities](https://man7.org/linux/man-pages/man7/capabilities.7.html)
+    that would normally be denied to the container. These could include mounting a
+    USB drive, modifying the network configuration, or creating a new Unix device.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In the following code, we try to change the MAC address of our container:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE32]'
+  prefs: []
+  type: TYPE_PRE
+- en: As you can see, it doesn’t work. This is because the underlying Linux kernel
+    blocks the nonprivileged container from doing this, which is exactly what we’d
+    normally want. However, assuming that we need this functionality for our container
+    to work as intended, the easiest way to significantly expand a container’s privileges
+    is by launching it with the `--privileged=true` argument.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: We don’t recommend running the `ip link set eth0 address` command in the next
+    example, since this will change the MAC address on the container’s network interface.
+    We show it to help you understand the mechanism. Try it at your own risk.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE33]'
+  prefs: []
+  type: TYPE_PRE
+- en: In the preceding output, you will notice that we no longer get the error, and
+    the `link/ether` entry for `eth0` has been changed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The problem with using the `--privileged=true` argument is that you are giving
+    your container very broad privileges, and in most cases, you likely need only
+    one or two kernel capabilities to get the job done.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If we explore our privileged container some more, we will discover that we
+    have capabilities that have nothing to do with changing the MAC address. We can
+    even do things that could cause issues with both Docker and the host system. In
+    the following code, we are going to mount a disk partition from the underlying
+    host system, list all of the underlying Docker-based Linux containers on the system,
+    and explore some of their critical files:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE34]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE35]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE36]'
+  prefs: []
+  type: TYPE_PRE
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Do not change or delete any of these files. It could have an unpredictable impact
+    on the containers or the underlying Linux system.
+  prefs: []
+  type: TYPE_NORMAL
+- en: So, as we’ve seen, people can run commands and get access to things that they
+    shouldn’t from a fully privileged container.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To change the MAC address, the only kernel capability we need is `CAP_NET_ADMIN`.
+    Instead of giving our container the full set of privileges, we can give it this
+    one privilege by launching our Linux container with the `--cap-add` argument,
+    as shown here:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE37]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You should also notice that although we can change the MAC address, we can
+    no longer use the `mount` command inside our container:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE38]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'It is also possible to remove specific capabilities from a container. Imagine
+    for a moment that your security team requires that `tcpdump` be disabled in all
+    containers, and when you test some of your containers, you find that `tcpdump`
+    is installed and can easily be run:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE39]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You could remove `tcpdump` from your images, but there is very little preventing
+    someone from reinstalling it. The most effective way to solve this problem is
+    to determine what capability `tcpdump` needs to operate and remove that from the
+    container. In this case, you can do so by adding `--cap-drop=NET_RAW` to your
+    `docker container run` command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE40]'
+  prefs: []
+  type: TYPE_PRE
+- en: By using both the `--cap-add` and `--cap-drop` arguments to `docker container
+    run`, you can finely control your container’s [Linux kernel capabilities](https://man7.org/linux/man-pages/man7/capabilities.7.html).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Be aware that in addition to providing access to system calls, there are actually
+    some other things that enabling a specific Linux capability can provide. This
+    might include visibility of all the devices on the system or the ability to change
+    the time on the system.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Secure Computing Mode
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: When Linux kernel version 2.6.12 was released in 2005, it included a new security
+    feature called Secure Computing Mode, or `seccomp` for short. This feature enables
+    a process to make a one-way transition into a special state, where it will only
+    be allowed to make the system calls `exit()`, `sigreturn()`, and `read()` or `write()`
+    to already-open file descriptors.
+  prefs: []
+  type: TYPE_NORMAL
+- en: An extension to `seccomp`, called `seccomp-bpf`, utilizes the Linux version
+    of [Berkeley Packet Filter (BPF)](https://www.kernel.org/doc/Documentation/networking/filter.txt)
+    rules to allow you to create a policy that will provide an explicit list of system
+    calls that a process can utilize while running under Secure Computing Mode. The
+    Docker support for Secure Computing Mode utilizes `seccomp-bpf` so that users
+    can create profiles that give them very fine-grained control of which kernel system
+    calls their containerized processes are allowed to make.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: By default, all containers use Secure Computing Mode and have the default profile
+    attached to them. You can [read more about Secure Computing Mode](https://docs.docker.com/engine/security/seccomp)
+    and which system calls the default profile blocks in the documentation. You can
+    also examine the [default policy’s JSON file](https://github.com/moby/moby/blob/master/profiles/seccomp/default.json)
+    to see what a policy looks like and understand exactly what it defines.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To see how you could use this, let’s use the program `strace` to trace the system
+    calls that a process is making when we try to unmount a filesystem with the `umount`
+    command.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: These examples are here to prove a point, but you obviously shouldn’t be unmounting
+    filesystems out of your container without knowing exactly what is going to happen.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE41]'
+  prefs: []
+  type: TYPE_PRE
+- en: We already know that mount-related commands do not work in a container with
+    standard permissions, and `strace` makes it clear that the system returns an “Operation
+    not permitted” error message when the `umount` command tries to use the `umount2`
+    system call.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You could potentially fix this by giving your container the `SYS_ADMIN` capability,
+    like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE42]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'However, remember that using `--cap-add=SYS_ADMIN` will make it possible for
+    us to do many other things, including mounting system partitions using a command
+    like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE43]'
+  prefs: []
+  type: TYPE_PRE
+- en: You can solve this problem with a more focused approach by using a `seccomp`
+    profile. Unlike `seccomp`, `--cap-add` will enable a whole set of system calls
+    and some additional privileges, and you almost certainly don’t need them all.
+    `CAP_SYS_ADMIN` is particularly powerful and provides way more privileges than
+    any one capability should. With a `seccomp` profile, however, you can be very
+    specific about exactly what system calls you want to be enabled or disabled.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If we take a look at the default `seccomp` profile, we’ll see something like
+    this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE44]'
+  prefs: []
+  type: TYPE_PRE
+- en: This JSON file provides a list of supported architectures, a default ruleset,
+    and groups of system calls that fall within the scope of each capability. In this
+    case, the default action is `SCMP_ACT_ERRNO` and will generate an error if an
+    unspecified call is attempted.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you examine the default profile in detail, you’ll notice that `CAP_SYS_ADMIN`
+    controls access to 37 system calls, a huge number that is even larger than the
+    4-6 system calls included in most other capabilities.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the current use case, we actually need some of the special functionality
+    provided by `CAP_SYS_ADMIN`, but we do not need all of those system calls. To
+    ensure that we are adding only the one additional system call that we need, we
+    can create our own Secure Computing Mode policy, based on the default policy that
+    Docker provides.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'First, pull down the default policy and make a copy of it:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE45]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The URL has been continued on the following line so that it fits in the margins.
+    You may find that you need to reassemble the URL and remove the backslashes for
+    the command to work properly in your environment.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Then edit the file and remove a bunch of the system calls that `CAP_SYS_ADMIN`
+    normally provides. In this case, we actually need to retain two system calls to
+    ensure that both `strace` and `umount` work correctly.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The section of the file that we are targeting ends with this JSON block:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE46]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This `diff` shows the exact changes that need to be made in this use case:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE47]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE48]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You are now ready to test your new finely tuned `seccomp` profile to ensure
+    that it can run `umount` but cannot run `mount`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE49]'
+  prefs: []
+  type: TYPE_PRE
+- en: If everything went according to plan, your `strace` of the `umount` program
+    should have run perfectly and the `mount` command should have been blocked. In
+    the real world, it would be much safer to consider redesigning your applications
+    so that they do not need these special privileges, but when it cannot be avoided,
+    you should be able to use these tools to help ensure that your containers remain
+    as secure as possible while still doing their jobs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: You could completely disable the default Secure Computing Mode profile by setting
+    `--security-opt seccomp=unconfined`; however, running a container unconfined is
+    a very bad idea in general and is probably only useful when you are trying to
+    figure out exactly what system calls you may need to define in your profile.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The strength of Secure Computing Mode is that it allows users to be much more
+    selective about what a container can and can’t do with the underlying Linux kernel.
+    Custom profiles are not required for most containers, but they are an incredibly
+    handy tool when you need to carefully craft a powerful container and ensure that
+    you maintain the overall security of the system.
+  prefs: []
+  type: TYPE_NORMAL
+- en: SELinux and AppArmor
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Earlier, we talked about how containers primarily leverage cgroups and namespaces
+    for their functionality. [SELinux](https://www.redhat.com/en/topics/linux/what-is-selinux)
+    and [AppArmor](https://apparmor.net) are security layers in the Linux ecosystem
+    that can be used to increase the security of containers even further. In this
+    section, we are going to discuss these two systems a bit. SELinux and AppArmor
+    allow you to apply security controls that extend beyond those normally supported
+    by Unix systems. SELinux originated in the US National Security Agency, was strongly
+    adopted by Red Hat, and supports very fine-grained control. AppArmor is an effort
+    to achieve many of the same goals while being a bit more user-friendly than SELinux.
+  prefs: []
+  type: TYPE_NORMAL
+- en: By default, Docker ships with reasonable profiles enabled on platforms that
+    support either of these systems. You can further configure these profiles to enable
+    or prevent all sorts of features, and if you’re running Docker in production,
+    you should do a risk analysis to determine if there are additional considerations
+    that you should be aware of. We’ll give a quick outline of the benefits you are
+    getting from these systems.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Both systems provide *mandatory access control*, a class of security system
+    where a systemwide security policy grants users (or “initiators”) access to a
+    resource (or “target”). This allows you to prevent anyone, including `root`, from
+    accessing a part of the system that they should not have access to. You can apply
+    the policy to a whole container so that all processes are constrained. Many chapters
+    would be required to provide a clear and detailed overview of how to configure
+    these systems. The default profiles are performing tasks like blocking access
+    to parts of the */proc* and */sys* filesystems that would be dangerous to expose
+    in the container, even though they show up in the container’s namespace. The default
+    profiles also provide more narrowly scoped mount access to prevent containers
+    from getting hold of mount points they should not see.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you are considering using Linux containers in production, it is worth seriously
+    considering going through the effort to enable AppArmor or SELinux on these systems.
+    For the most part, both systems are reasonably equivalent. But in the Docker context,
+    one notable limitation of SELinux is that it only works fully on systems that
+    support filesystem metadata, which means that it won’t work with all Docker storage
+    drivers. AppArmor, on the other hand, does not use filesystem metadata and therefore
+    works on all of the Docker backends. Which one you use is somewhat distribution-centric,
+    so you may be forced to choose a filesystem backend that also supports the security
+    system that you use.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Docker Daemon
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: From a security standpoint, the Docker daemon and its components are the only
+    completely new risk you are introducing to your infrastructure. Your containerized
+    applications are not any less secure and are, at least, a little more secure than
+    they would be if deployed outside of containers. But without the containers, you
+    would not be running `dockerd`, the Docker daemon. You can run Docker such that
+    it doesn’t expose any ports on the network. This is highly recommended and the
+    default for most Docker installations.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The default configuration for Docker, on most distributions, leaves Docker isolated
+    from the network with only a local Unix socket exposed. Since you cannot remotely
+    administer Docker when it is set up this way, it is not uncommon to see people
+    simply add the nonencrypted port 2375 to the configuration. This may be great
+    for getting started with Docker, but it is not what you should do in any environment
+    where you care about the security of your systems. You should not open Docker
+    up to the outside world at all unless you have a very good reason to. If you do,
+    you should also commit to properly securing it. Most scheduler systems run their
+    services on each node and expect to talk to Docker over the Unix domain socket
+    instead of over a network port.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you do need to expose the daemon to the network, you can do a few things
+    to tighten Docker down in a way that makes sense in most production environments.
+    But no matter what you do, you are relying on the Docker daemon itself to be resilient
+    against threats like buffer overflows and race conditions, two of the more common
+    classes of security vulnerabilities. This is true of any network service. The
+    risk is a lot higher with the Docker daemon because it is normally run as `root`,
+    it can run anything on your system, and it has no integrated role-based access
+    controls.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The basics of locking Docker down are common with many other network daemons:
+    encrypt your traffic and authenticate users. The first is reasonably easy to set
+    up on Docker; the second is not as easy. If you have SSL certificates you can
+    use for protecting HTTP traffic to your hosts, such as a wildcard certificate
+    for your domain, you can turn on TLS support to encrypt all of the traffic to
+    your Docker servers, using port 2376\. This is a good first step. The [Docker
+    documentation](https://docs.docker.com/engine/security/protect-access) will walk
+    you through doing this.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Authenticating users is more complicated. Docker does not provide any kind
+    of fine-grained authorization: you either have access or you don’t. But the authentication
+    control it does provide—signed certificates—is reasonably strong. Unfortunately,
+    this also means that you don’t get a cheap step from no authentication to some
+    authentication without also having to set up a certificate authority in most cases.
+    If your organization already has one, then you are in luck. Certificate management
+    needs to be implemented carefully in any organization, both to keep certificates
+    secure and to distribute them efficiently. So, given that, here are the basic
+    steps:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Set up a method of generating and signing certificates.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Generate certificates for the server and clients.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Configure Docker to require certificates with `--tlsverify`.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Detailed instructions on getting a server and client set up, as well as a simple
+    certificate authority, are included in the [Docker documentation](https://docs.docker.com/engine/security/protect-access).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Because it’s a daemon that almost always runs with privilege, and because it
+    has direct control of your applications, it is a bad idea to expose Docker directly
+    on the internet. If you need to talk to your Docker hosts from outside your network,
+    consider something like a VPN or an SSH tunnel to a secure jump host.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Advanced Configuration
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Docker has a very clean external interface, and on the surface, it looks pretty
+    monolithic. But there are actually a lot of things going on behind the scenes
+    that are configurable, and the logging backends we described in [“Logging”](ch06.html#docker_logs)
+    are a good example. You can also do things like change out the storage backend
+    for container images for the whole daemon, use a completely different runtime,
+    or configure individual containers to run on a different network configuration.
+    Those are powerful switches, and you’ll want to know what they do before turning
+    them on. First, we’ll talk about the network configuration, then we’ll cover the
+    storage backends, and finally, we’ll try out a completely different container
+    runtime to replace the default `runc` supplied with Docker.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Networking
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Early on, we described the layers of networking between a Linux container and
+    the real, live network. Let’s take a closer look at how that works. Docker supports
+    a rich set of network configurations, but let’s start with the default setup.
+    [Figure 11-1](#figure11-1) shows a drawing of a typical Docker server, where three
+    containers are running on their private network, shown on the right. One of them
+    has a public port (TCP port 10520) that is exposed on the Docker server. We’ll
+    track how an inbound request gets to the Linux container and also how a Linux
+    container can make an outbound connection to the external network.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![The network on a typical Docker server](assets/dur3_1101.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 11-1\. The network on a typical Docker server
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: If we have a client somewhere on the network that wants to talk to the `nginx`
+    server running on TCP port 80 inside Container 1, the request will come into the
+    `eth0` interface on the Docker server. Because Docker knows this is a public port,
+    it has spun up an instance of `docker-proxy` to listen on port 10520\. So our
+    request is passed to the `docker-proxy` process, which then forwards the request
+    to the correct container address and port on the private network. Return traffic
+    from the request flows through the same route.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Outbound traffic from the container follows a different route in which the `docker-proxy`
+    is not involved at all. In this case, Container 3 wants to contact a server on
+    the public internet. It has an address on the private network of 172.16.23.1,
+    and its default route is the `docker0` interface 172.16.23.7\. So it sends the
+    traffic there. The Docker server now sees that this traffic is outbound and that
+    it has traffic forwarding enabled. And since the virtual network is private, it
+    wants to send the traffic from its public address instead. So the request is passed
+    through the kernel’s network address translation (NAT) layer and put onto the
+    external network via the `eth0` interface on the server. Return traffic passes
+    through the same route. The NAT is one-way, so containers on the virtual network
+    will see real network addresses in response packets.
+  prefs: []
+  type: TYPE_NORMAL
+- en: You’ve probably noticed that it’s not a simple configuration. It’s a fair amount
+    of complexity, but it makes Docker seem pretty transparent. It also contributes
+    to the security posture of the Docker stack because the containers are namespaced
+    into individual network namespaces, are on individual private networks, and don’t
+    have access to things like the main system’s DBus (Desktop Bus) or iptables.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s examine what’s happening at a more detailed level. The interfaces that
+    show up in `ifconfig` or `ip addr show` in the Linux container are actually virtual
+    Ethernet interfaces on the Docker server’s kernel. They are then mapped into the
+    container’s network namespace and given the names that you see inside the container.
+    Let’s take a look at what we might see when running `ip addr show` on a Docker
+    server. We’ll shorten the output a little for clarity and spaces, as shown here:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE50]'
+  prefs: []
+  type: TYPE_PRE
+- en: What this tells us is that we have the normal loopback interface, our real Ethernet
+    interface `eth0`, and then the Docker bridge interface, `docker0`, that we described
+    earlier. This is where all the traffic from the Linux containers is picked up
+    to be routed outside the virtual network. The surprising thing in this output
+    is the `veth772de2a` interface. When Docker creates a container, it creates two
+    virtual interfaces, one of which sits on the server side and is attached to the
+    `docker0` bridge, and one that is attached to the container’s namespace. What
+    we’re seeing here is the server-side interface. Did you notice how it doesn’t
+    show up as having an IP address assigned to it? That’s because this interface
+    is just joined to the bridge. This interface will have a different name in the
+    container’s namespace as well.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As with so many pieces of Docker, you can replace the proxy with a different
+    implementation. To do so, you would use the `--userland-proxy-path=<path>` setting,
+    but there are probably not that many good reasons to do this unless you have a
+    very specialized network. However, the `--userland-proxy=false` flag to `dockerd`
+    will completely disable the `userland-proxy` and instead rely on hairpin [NAT](https://www.geeksforgeeks.org/network-address-translation-nat)
+    functionality to route traffic between local containers. If you need higher-throughput
+    services, this might be right for you.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: A hairpin NAT is typically used to describe services inside a NATed network
+    that address one another with their public IP addresses. This causes traffic from
+    the source service to route out to the internet, hit the external interface for
+    the NAT router, and then get routed back into the original network to the destination
+    service. The traffic is shaped like the letter U or a standard hairpin.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Host networking
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: As we’ve noted, there is a lot of complexity involved in the default implementation.
+    You can, however, run a container without the whole networking configuration that
+    Docker puts in place for you. And the `docker-proxy` can also limit the throughput
+    for very high-volume data services by requiring all the network traffic to pass
+    through the `docker-proxy` process before being received by the container. So
+    what does it look like if we turn off the Docker network layer? Since the beginning,
+    Docker has let you do this on a per-container basis with the `--net=host` command-line
+    switch. There are times, like when you want to run high-throughput applications,
+    when you might want to do this. But you lose some of Docker’s flexibility when
+    you do. Let’s examine how this mechanism works.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Like others we discuss in this chapter, this is not a setting you should take
+    lightly. It has operational and security implications that might be outside your
+    tolerance level. It can be the right thing to do, but you should understand the
+    consequences.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s start a container with `--net=host` and see what happens:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE51]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'That should look pretty familiar. That’s because when we run a container with
+    the host networking option, the container is running in both the host server’s
+    network and UTS namespaces. Our server’s hostname is `docker-desktop`, and from
+    the shell prompt, we can tell that our container has the same hostname:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE52]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'If we run the `mount` command to see what’s mounted, though, we see that Docker
+    is still maintaining our */etc/resolv.conf*, */etc/hosts*, and */etc/hostname*
+    directories. And as expected, the */etc/hostname* directory simply contains the
+    server’s hostname:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE53]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Just to prove that we can see all the normal networking on the Docker server,
+    let’s look at the output from `ss` to see if we can see the sockets that Docker
+    is utilizing:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE54]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: If the Docker daemon was listening on a TCP port, like 2375, you could have
+    looked for that as well. Feel free to look for another TCP port on your server
+    port that you know is in use.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If you search for `docker` in the output of a normal container within its own
+    namespace, you will notice that you get no results:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE55]'
+  prefs: []
+  type: TYPE_PRE
+- en: So we are indeed in the server’s network namespace. What all of this means is
+    that if we were to launch a high-throughput network service, we could expect network
+    performance from it that is essentially native. But it also means we could try
+    to bind to ports that would collide with those on the server, so if you do this,
+    you should be careful about how you allocate port assignments.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Configuring networks
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: There is more to networking than just the default network or host networking,
+    however. The `docker network` command lets you create multiple networks backed
+    by different drivers. It also allows you to view and manipulate the Docker network
+    layers and how they are attached to containers that are running on the system.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Listing the networks available from Docker’s perspective is easily accomplished
+    with the following command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE56]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You can then find out more details about any individual network by using the
+    `docker network inspect` command along with the network ID:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE57]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE58]'
+  prefs: []
+  type: TYPE_PRE
+- en: Docker networks can be created and removed, as well as attached and detached
+    from individual containers, with the `network` subcommand.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'So far, we’ve set up a bridged network, no Docker network, and a bridged network
+    with hairpin NAT. There are a few other drivers that you can use to create different
+    topologies using Docker as well, with the `overlay` and `macvlan` drivers being
+    the most common. Let’s take a brief look at what these can do for you:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`overlay`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This driver is used in Swarm mode to generate a network overlay between the
+    Docker hosts, creating a private network between all the containers that run on
+    top of the real network. This is useful for Swarm but not in scope for general
+    use with non-Swarm containers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`macvlan`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This driver creates a real MAC address for each of your containers and then
+    exposes them on the network via the interface of your choice. This requires that
+    you switch gears to support more than one MAC address per physical port on the
+    switch. The result is that all the containers appear directly on the underlying
+    network. When you’re moving from a legacy system to a container-native one, this
+    can be a really useful step. There are drawbacks here, such as making it harder
+    when debugging to identify which host the traffic is really coming from, overflowing
+    the MAC tables in your network switches, excessive ARPing by container hosts,
+    and other underlying network issues. For this reason, the `macvlan` driver is
+    not recommended unless you have a good understanding of your underlying network
+    and can manage it effectively.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'There are a few sets of configurations that are possible here, but the basic
+    setup is easy to configure:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE59]'
+  prefs: []
+  type: TYPE_PRE
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: You can prevent Docker from allocating specific addresses by specifying them
+    as named auxiliary addresses, `--aux-address="my-router=172.16.16.129"`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: There is a lot more you can configure with the Docker network layer. However,
+    the defaults, host networking, and userland proxyless mode are the ones that you’re
+    most likely to use or encounter in the wild. Some of the other options you can
+    configure include the container’s DNS nameservers, resolver options, and default
+    gateways, among other things. The networking section of the [Docker documentation](https://docs.docker.com/network)
+    gives an overview of how to do some of this configuration.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: For advanced network configuration of Docker, check out [Weave](https://github.com/weaveworks/weave)—a
+    well-supported overlay network tool for spanning containers across multiple Docker
+    hosts, similar to the `overlay` driver but much more configurable and without
+    the Swarm requirement. Another offering is [Project Calico](https://www.tigera.io/project-calico).
+    If you’re running Kubernetes, which has its own networking configuration, you
+    might also want to familiarize yourself with the [Container Network Interface
+    (CNI)](https://www.cni.dev) and then look at [Cilium](https://cilium.io), which
+    provides robust eBPF-based networking for containers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Storage
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'Backing all of the images and containers on your Docker server is a storage
+    backend that handles reading and writing all of that data. Docker has some strenuous
+    requirements on its storage backend: it has to support layering, the mechanism
+    by which Docker tracks changes and reduces both how much disk a container occupies
+    and how much is shipped over the wire to deploy new images. Using a copy-on-write
+    strategy, Docker can start up a new container from an existing image without having
+    to copy the whole image. The storage backend supports that. The storage backend
+    is what makes it possible to export images as groups of changes in layers and
+    also lets you save the state of a running container. In most cases, you need the
+    kernel’s help in doing this efficiently. That’s because the filesystem view in
+    your container is generally a union of all of the layers below it, which are not
+    actually copied into your container. Instead, they are made visible to your container,
+    and only when you make changes does anything get written to your container’s filesystem.
+    One place this layering mechanism is exposed to you is when you upload or download
+    a new image from a registry like Docker Hub. The Docker daemon will push or pull
+    each layer separately, and if some of the layers are the same as others it has
+    already stored, it will use the cached layer instead. In the case of a push to
+    a registry, it will sometimes even tell you which image they are mounted from.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Docker relies on an array of possible kernel drivers to handle the layering.
+    The Docker codebase contains code that can handle interacting with many of these
+    backends, and you can configure the decision about which to use on daemon restart.
+    So let’s look at what is available and some of the pluses and minuses of each.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Various backends have different limitations that may or may not make them your
+    best option. In some cases, your choices of which backend to use are limited by
+    what your distribution of Linux supports. Using the drivers that are built into
+    the kernel shipped with your distribution will always be the easiest approach.
+    It’s generally best to stay close to the well-tested path. We’ve seen all manner
+    of oddities from various backends since Docker’s release. And, as usual, the common
+    case is always the best-supported one. Different backends also report different
+    statistics through the Docker Remote API (*/info* endpoint). This can be very
+    useful for monitoring your Docker systems. However, not all backends are created
+    equal, so let’s see how they differ:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*Overlay*'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Overlay](https://www.kernel.org/doc/html/latest/filesystems/overlayfs.html)
+    (formerly OverlayFS) is a union filesystem where multiple layers are mounted together
+    so that they appear as a single filesystem. The Overlay filesystem is the most
+    recommended choice for Docker storage these days and works on most major distributions.
+    If you are running on a Linux kernel older than 4.0 (or 3.10.0-693 for RHEL),
+    then you won’t be able to take advantage of this backend. The reliability and
+    performance are good enough that it might be worth updating your OS for Docker
+    hosts to support it, even if your company standard is an older distribution. The
+    Overlay filesystem is part of the mainline Linux kernel and has become increasingly
+    stable over time. Being in the mainline means that long-term support is virtually
+    guaranteed, which is another nice advantage. Docker supports two versions of the
+    Overlay backend, `overlay` and `overlay2`. As you might expect, you are strongly
+    advised to use `overlay2` as it is faster, more efficient with inode usage, and
+    more robust.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The Docker community is frequently improving support for a variety of filesystem
+    backends. For more details about the supported filesystems, take a look at the
+    [official documentation](https://docs.docker.com/storage/storagedriver).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*AuFS*'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Although at the time of this writing it is no longer recommended, `aufs` is
+    the original backend for Docker. [AuFS (Advanced multilayered unification filesystem)](https://aufs.sourceforge.net)
+    is a union filesystem driver with reasonable support on various popular Linux
+    distributions. It was never accepted into the mainline kernel, however, and this
+    has limited its availability on various distributions. It is not supported on
+    recent versions of Red Hat or Fedora, for example. It is not shipped in the standard
+    Ubuntu distribution but is in the Ubuntu `linux-image-extra` package.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Its status as a second-class citizen in the kernel has led to the development
+    of many of the other backends now available. If you are running an older distribution
+    that supports AuFS, you might consider it, but you should upgrade to a kernel
+    version that natively supports Overlay or Btrfs, which is discussed next.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*Btrfs*'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[B-Tree File System (Btrfs)](https://btrfs.wiki.kernel.org/index.php/Main_Page)
+    is fundamentally a copy-on-write filesystem, which means it’s a pretty good fit
+    for the Docker image model. Like `aufs` and unlike `devicemapper`, Docker is using
+    the backend in the way it was intended. That means it’s both pretty stable in
+    production and also a good performer. It scales reasonably to thousands of containers
+    on the same system. A drawback for Red Hat–based systems is that Btrfs does not
+    support SELinux. If you can use the `btrfs` backend, it is worth exploring another
+    option, after the `overlay2` driver. One popular way to run `btrfs` backends for
+    Linux containers without having to give over a whole volume to this filesystem
+    is to make a Btrfs filesystem in a file and loopback-mount it with something like
+    `mount -o loop file.btrs /mnt`. Using this method, you could build a 50 GB Linux
+    container storage filesystem even on cloud-based systems without having to give
+    over all your precious local storage to Btrfs.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*Device Mapper*'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Originally written by Red Hat to support their distributions, which lacked AuFS
+    in Docker’s early days, Device Mapper became the default backend on all Red Hat–based
+    distributions of Linux. Depending on the version of Red Hat Linux that you are
+    using, this may be your only option. Device Mapper itself has been built into
+    the Linux kernel for ages and is very stable. The way the Docker daemon uses it
+    is a bit unconventional, though, and in the past, this backend was not that stable.
+    This checkered past means that we recommend picking a different backend when possible.
+    If your distribution supports only the `devicemapper` driver, then you will likely
+    be fine. But it’s worth considering using `overlay2` or `btrfs`. By default, `devicemapper`
+    utilizes the `loop-lvm` mode, which has zero configuration and is very slow and
+    generally only useful for development. If you decide to use the `devicemapper`
+    driver, you must make sure it is configured to use `direct-lvm` mode for all nondevelopment
+    environments.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: You can find out more about using the various `devicemapper` modes with Docker
+    in the [official documentation](https://docs.docker.com/storage/storagedriver/device-mapper-driver).
+    A 2014 [blog article](https://developers.redhat.com/blog/2014/09/30/overview-storage-scalability-docker)
+    also provides some interesting history about the various Docker storage backends.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*VFS*'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Of the supported drivers, the Virtual File System (`vfs`) driver is the simplest,
+    and slowest, to start up. It doesn’t actually support copy-on-write. Instead,
+    it makes a new directory and copies over all of the existing data. It was originally
+    intended for use in tests and for mounting host volumes. The `vfs` driver is very
+    slow to create new containers, but runtime performance is native, which is a real
+    benefit. Its mechanism is very simple, which means there is less to go wrong.
+    Docker, Inc., does not recommend it for production use, so proceed with caution
+    if you think it’s the right solution for your production environment.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*ZFS*'
+  prefs: []
+  type: TYPE_NORMAL
+- en: ZFS, which was created by Sun Microsystems, is the most advanced open source
+    filesystem available on Linux. Due to licensing restrictions, it does not ship
+    in mainline Linux. However, the [ZFS on Linux project](https://zfsonlinux.org)
+    has made it pretty easy to install. Docker can then run on top of the ZFS filesystem
+    and use its advanced copy-on-write facilities to implement layering. Given that
+    ZFS is not in the mainline kernel and not available off the shelf in the major
+    commercial distributions, going this route requires some extended effort. However,
+    if you are already running ZFS in production, this may be your very best option.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Storage backends can have a big impact on the performance of your containers.
+    And if you swap the backend on your Docker server, all of your existing images
+    will disappear. They are not gone, but they will not be visible until you switch
+    the driver back. Caution is advised.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You can use `docker system info` to see which storage backend your system is
+    running:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE60]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE61]'
+  prefs: []
+  type: TYPE_PRE
+- en: As you can see, Docker will also tell you what the underlying or “backing” filesystem
+    is if there is one. Since we’re running `overlay2` here, we can see it’s backed
+    by an `ext` filesystem. In some cases, like with `devicemapper` on raw partitions
+    or with `btrfs`, there won’t be a different underlying filesystem.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Storage backends can be swapped via the `daemon-json` configuration file or
+    via command-line arguments to `dockerd` on startup. If we wanted to switch our
+    Ubuntu system from `aufs` to `devicemapper`, we could do so like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE62]'
+  prefs: []
+  type: TYPE_PRE
+- en: That will work on pretty much any Linux system that can support Docker because
+    `devicemapper` is almost always present. The same is true for `overlay2` on modern
+    Linux kernels. However, you will need to have the actual underlying dependencies
+    in place for the other drivers. For example, without `aufs` in the kernel—​usually
+    via a kernel module—​Docker will not start up with `aufs` set as the storage driver,
+    and the same is true for Btrfs or ZFS.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Getting the appropriate storage driver for your systems and deployment needs
+    is one of the more important technical points to get right when you’re taking
+    Docker to production. Be conservative: make sure the path you choose is well supported
+    in your kernel and distribution. Historically, this was a pain point, but most
+    of the drivers have reached reasonable maturity. Remain cautious for any newly
+    appearing backends, however, as this space continues to change. Getting new backend
+    drivers to work reliably for production systems takes quite some time, in our
+    experience.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: nsenter
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: '`nsenter`, which is short for “namespace enter,” allows you to enter any Linux
+    namespace and is part of the core `util-linux` package from [kernel.org](https://mirrors.edge.kernel.org/pub/linux/utils/util-linux).
+    Using `nsenter`, we can get into a Linux container from the server itself, even
+    in situations where the `dockerd` server is not responding and we can’t use `docker
+    container exec`. It can also be used to manipulate things in a container as `root`
+    on the server that would otherwise be prevented by `docker container exec`. This
+    can be truly useful when you are debugging. Most of the time, `docker container
+    exec` is all you need, but you should have `nsenter` in your tool belt.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Most Linux distributions ship with a new-enough `util-linux` package that it
+    will contain `nsenter`. If you are on a distribution that does not have it, the
+    easiest way to get hold of `nsenter` is to install it via the third-party [Linux
+    container](https://github.com/jpetazzo/nsenter).
+  prefs: []
+  type: TYPE_NORMAL
+- en: This container works by pulling a Docker image from the Docker Hub registry
+    and then running a Linux container that will install the `nsenter` command-line
+    tool into */usr/local/bin*. This might seem strange at first, but it’s a clever
+    way to allow you to install `nsenter` to any Docker server remotely using nothing
+    more than the `docker` command.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Unlike `docker container exec`, which can be run remotely, `nsenter` requires
+    that you run it on the server itself, directly or via a container. For our purposes,
+    we’ll use a specially crafted container to run `nsenter`. As with the `docker
+    container exec` example, we need to have a container running:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE63]'
+  prefs: []
+  type: TYPE_PRE
+- en: '`docker container exec` is pretty simple, but `nsenter` is a little inconvenient
+    to use. It needs to have the PID of the actual top-level process in your container,
+    which is not obvious to find. Let’s go ahead and run `nsenter` by hand so you
+    can see what’s going on.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'First, we need to find out the ID of the running container, because `nsenter`
+    needs to know that to access it. We can easily get this using `docker container
+    ls`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE64]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The ID we want is that first field, `fd521174d66d`. With that, we can now find
+    the PID we need, like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE65]'
+  prefs: []
+  type: TYPE_PRE
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'You can also get the real PIDs of the processes in your container by running
+    the command `docker container top`, followed by the container ID. In our example,
+    this would look like the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE66]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Make sure to update the `--target` argument in the following command with the
+    process ID that you got from the previous command, then go ahead and invoke `nsenter`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE67]'
+  prefs: []
+  type: TYPE_PRE
+- en: If the result looks a lot like `docker container exec`, that’s because it does
+    almost the same thing under the hood!
+  prefs: []
+  type: TYPE_NORMAL
+- en: The command-line argument `--all` is telling `nsenter` that we want to enter
+    all of the namespaces used by the process specified with `--target`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Debugging Shell-less Containers
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'If you want to troubleshoot a container that does not have a Unix shell, then
+    things get a little trickier, but it is still possible. For this example, we can
+    run a container that has a single executable in it:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE68]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Let’s take a quick look at the processes that are running in this container:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE69]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'If you try to launch a Unix shell in the container, you will get an error:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE70]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'We can then launch a second container that includes a shell and some other
+    useful tools in a way that the new container can see the processes in the first
+    container, is using the same network stack as the first container, and has some
+    extra privileges which will be helpful for our debugging:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE71]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'If you type `ls` in this container, you will see in the filesystem the `spkane/train-os`
+    image, which contains `/bin/sh` and all of our debugging tools, but it does not
+    contain any of the files from our `outyet-small` container:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE72]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'However, if you type `ps -ef`, you will notice that you see all of the processes
+    from the original container. This is because we told Docker to attach to use the
+    namespace from the `outyet-small` container by passing in `--pid=container:outyet-small`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE73]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'And because we are using the same network stack, you can even `curl` the port
+    that the `outyet` service from the first container is bound to:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE74]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE75]'
+  prefs: []
+  type: TYPE_PRE
+- en: At this point, you could use `strace` or whatever else you wanted to debug your
+    application, and then finally `exit` the new debug container, leaving your original
+    container still running on the server.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: If you run `strace`, you will need to type Ctrl-C to exit the `strace` process.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE76]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You’ll notice that we could not see the filesystem in this use case. If you
+    need to view or copy files from the container, you can make use of the `docker
+    container export` command to retrieve a tarball of the container’s filesystem:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE77]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You can then use `tar` to view or extract the files:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE78]'
+  prefs: []
+  type: TYPE_PRE
+- en: When you are finished, go ahead and delete `export.tar`, and then stop the `outyet-small`
+    container with `docker container stop outyet-small`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: You can explore the container’s filesystem from the Docker server by navigating
+    directly to where the filesystem resides on the server’s storage system. This
+    will typically look something like */var/lib/docker/overlay/fd5…* but will vary
+    based on the Docker setup, storage backend, and container hash. You can determine
+    your Docker root directory by running `docker system info`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Structure of Docker
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'What we think of as Docker is made of five major server-side components that
+    present a common front via the API. These parts are `dockerd`, `containerd`, `runc`,
+    `containerd-shim-runc-v2`, and the `docker-proxy` we described in [“Networking”](#docker_net).
+    We’ve spent a lot of time interacting with `dockerd` and the API it presents.
+    It is, in fact, responsible for orchestrating the whole set of components that
+    make up Docker. But when it starts a container, Docker relies on `containerd`
+    to handle instantiating the container. All of this used to be handled in the `dockerd`
+    process itself, but there were several shortcomings to that design:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`dockerd` had a huge number of jobs.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: A monolithic runtime prevented any of the components from being swapped out
+    easily.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`dockerd` had to supervise the lifecycle of the containers themselves, and
+    it couldn’t be restarted or upgraded without losing all the running containers.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Another major motivation for `containerd` was that, as we’ve just shown, containers
+    are not just a single abstraction. On the Linux platform, they are processes involving
+    namespaces, cgroups, and security rules in AppArmor or SELinux. But Docker also
+    runs on Windows and may even work on other platforms in the future. The idea of
+    `containerd` is to present a standard layer to the outside world where, regardless
+    of implementation, developers can think about the higher-level concepts of containers,
+    tasks, and snapshots rather than worry about specific Linux system calls. This
+    simplifies the Docker daemon a lot and enables platforms like Kubernetes to integrate
+    directly into `containerd` rather than using the Docker API. Kubernetes relied
+    on a Docker shim for many years, but nowadays it uses `containerd` directly.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s take a look at the components (shown in [Figure 11-2](#figure11-2)) and
+    see what each of them does:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`dockerd`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: One per server. Serves the API, builds container images, and does high-level
+    network management, including volumes, logging, statistics reporting, and more.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`docker-proxy`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: One per port forwarding rule. Each instance handles the forwarding of the defined
+    protocol traffic (TCP/UDP) from the defined host IP and port to the defined container
+    IP and port.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`containerd`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: One per server. Manages the lifecycle, execution, copy-on-write filesystem,
+    and low-level networking drivers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`containerd-shim-runc-v2`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: One per container. Handles file descriptors passed to the container (e.g., `stdin`/`out`)
+    and reports exit status.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`runc`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Constructs the container and executes it, gathers statistics, and reports events
+    on the lifecycle.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Structure of Docker](assets/dur3_1102.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 11-2\. Structure of Docker
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '`dockerd` and `containerd` speak to each other over a socket, usually a Unix
+    socket, using a [gRPC API](https://grpc.io). `dockerd` is the client in this case,
+    and `containerd` is the server! `runc` is a CLI tool that reads configuration
+    from JSON on disk and is executed by `containerd`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: When we start a new container, `dockerd` will handle making sure that the image
+    is present or will pull it from the repository specified in the image name. (In
+    the future, this responsibility may shift to `containerd`, which already supports
+    image pulls.) The Docker daemon also does most of the rest of the setup around
+    the container, like launching `docker-proxy` to set up port forwarding. It then
+    talks to `containerd` and asks it to run the container. `containerd` will take
+    the image and apply the container configuration passed in from `dockerd` to generate
+    an [OCI bundle](https://www.opencontainers.org) that `runc` can execute.^([1](ch11.html#idm46803124791184))
+    It will then execute `containerd-shim-runc-v2` to start the container. This will
+    in turn execute `runc` to construct and start the container. However, `runc` will
+    not stay running, and the `containerd-shim-runc-v2` will be the actual parent
+    process of the new container process.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If we launch a container and then look at the output of `ps axlf` on the Docker
+    server, we can see the parent/child relationship between the various processes.
+    PID 1 is `/sbin/init` and is the parent process for `containerd`, `dockerd`, and
+    the `containerd-shim-runc-v2`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Docker Desktop’s VM contains minimal versions of most Linux tools, and some
+    of these commands may not produce the same output that you will get if you use
+    a standard Linux server as the Docker daemon host.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE79]'
+  prefs: []
+  type: TYPE_PRE
+- en: So what happened to `runc`? Its job is to construct the container and start
+    it running, then it leaves and its children are inherited by its parent, the `containerd-shim-runc-v2`.
+    This leaves the minimal amount of code in memory necessary to manage the file
+    descriptors and exit status for `containerd`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To help you understand what’s going on here, let’s take a deeper look at what
+    happens when we start a container. We’ll just reuse the `nginx` container that
+    we already have running for this since it’s very lightweight and the container
+    stays running when backgrounded:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE80]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Let’s use the `runc` runtime CLI tool to take a look at its view of the system.
+    We could see a similar view from `ctr`, the CLI client for `containerd`, but `runc`
+    is nicer to work with, and it’s at the lowest level:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE81]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'We normally need root privileges to run this command. Unlike with the Docker
+    CLI, we can’t rely on the Docker daemon’s permissions to let us access lower-level
+    functionality. With `runc` we need direct access to these privileges. What we
+    can see in the output from `runc` is our container! This is the actual OCI runtime
+    bundle that represents our container, with which it shares an ID. Notice that
+    it also gives us the PID of the container; that’s the PID on the host of the application
+    running inside the container:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE82]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'If we look in the bundle, we’ll see a set of named pipes for our container:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE83]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You can find a lot of additional files related to your container underneath
+    */run/containerd/io.containerd.runtime.v2.task/moby*:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE84]'
+  prefs: []
+  type: TYPE_PRE
+- en: The *config.json* file is a very verbose equivalent of what Docker shows in
+    `docker container inspect`. We are not going to reproduce it here due to size,
+    but we encourage you to dig around and see what’s in the config. You may, for
+    example, note all the entries for the [“Secure Computing Mode”](#seccomp) that
+    are present in it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If you want to explore `runc` some more, you can experiment with the CLI tool.
+    Most of this is already available in Docker, usually on a higher and more useful
+    level than the one available in `runc`. But it can be useful to explore so that
+    you can better understand how containers and the Docker stack are put together.
+    It’s also interesting to watch the events that `runc` reports about a running
+    container. We can hook into those with the `runc events` command. During the normal
+    operations of a running container, there is not a lot of activity in the events
+    stream. But `runc` regularly reports runtime statistics, which we can see in JSON
+    format:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE85]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE86]'
+  prefs: []
+  type: TYPE_PRE
+- en: To conserve space, we have removed much of the output from the previous command,
+    but this might look familiar to you now that we’ve spent some time looking at
+    `docker container stats`. Guess where Docker gets those statistics by default.
+    That’s right, `runc`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: At this point, you can go ahead and stop the example container by running `docker
+    container stop nginx-test`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Swapping Runtimes
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: As we mentioned in [Chapter 2](ch02.html#docker_glance), there are a few other
+    native OCI-compliant runtimes that can be substituted in place of `runc`. As an
+    example, there is [crun](https://github.com/containers/crun), which describes
+    itself as “a fast and low-memory footprint OCI Container Runtime fully written
+    in C.” Some other alternative native runtimes, like `railcar` and `rkt`, have
+    been deprecated and largely abandoned. In the next section, we’ll talk about a
+    sandboxed runtime from Google, called [gVisor](https://gvisor.dev), which provides
+    a user space runtime for untrusted code.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '[Kata Containers](https://github.com/kata-containers) is a very interesting
+    open source project that provides a runtime capable of using VMs as an isolation
+    layer for containers. At the time of this writing, version 3 of Kata works with
+    Kubernetes but does not work with Docker. The Kata developers [are working with
+    the Docker developers](https://github.com/kata-containers/kata-containers/issues/5321)
+    to try and improve this situation and create better documentation. This may be
+    resolved when Docker 22.06 is publicly released.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: gVisor
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: In mid-2018, Google released gVisor, which is a completely new take on a runtime.
+    It’s OCI compliant and can therefore also be used with Docker. However, gVisor
+    also runs in user space and isolates the application by implementing system calls
+    there rather than relying on Kernel isolation mechanisms. It doesn’t redirect
+    the calls to the kernel; rather, it implements them itself using kernel calls.
+    The most obvious win from this approach is security isolation since gVisor itself
+    is running in user space and thus is isolated from the kernel. Any security issues
+    are still trapped in user space, and all of the kernel security controls we’ve
+    mentioned still apply. The downside is that it typically performs worse than Kernel
+    or VM-based solutions.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you have processes that do not require massive scaling but do require highly
+    secure isolation, gVisor may be an ideal solution for you. A common use case for
+    gVisor is when your containers will be running code provided by your end users
+    and you cannot guarantee that the code is benign. Let’s run a quick demo so you
+    can see how gVisor works.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Installation is covered in the [gVisor documentation](https://gvisor.dev/docs/user_guide/quick_start/docker).
+    It is written in Go and is delivered as a single executable with no packages required.
+    Once it’s installed, you can start containers with the `runsc` runtime. To demonstrate
+    the different isolation levels offered by gVisor, we’ll run a shell using it and
+    compare that to one using a standard container.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'First, let’s start a shell on gVisor and look around a bit:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE87]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'That will drop us into a shell running in an Alpine Linux container. One very
+    revealing difference is apparent when you look at the output of the `mount` command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE88]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'There is not very much in there! Compare that with the output from a traditional
+    container launched with `runc`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE89]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This output was 24 lines long, so we truncated it a lot. It should be pretty
+    clear that there is a lot of system detail here. That detail represents the kernel
+    footprint exposed to the container in one way or another. The contrast with the
+    very short output from gVisor should give you an idea of the differing level of
+    isolation. We won’t spend a lot more time on it, but it’s also worth looking at
+    the output of `ip addr show` as well. On gVisor:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE90]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'And in a normal Linux container:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE91]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Even the Linux */proc* filesystem exposes a lot less in the gVisor container:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE92]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Once more comparing this to a normal Linux container:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE93]'
+  prefs: []
+  type: TYPE_PRE
+- en: Aside from being more isolated, the experience inside the gVisor container is
+    interesting because it looks a lot more like what you might expect to see in an
+    isolated environment. Sandboxed runtimes like gVisor provide a lot of potential
+    for securely running untrusted workloads by providing a much stronger barrier
+    between the application and the underlying kernel.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Wrap-Up
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: That’s a quick tour of some of the more advanced concepts of Docker. Hopefully,
+    it has expanded your knowledge of what is happening behind the scenes and has
+    opened up some avenues for you to continue your exploration. As you build and
+    maintain a production platform, this background should provide you with a broad
+    enough perspective of Docker to know where to start when you need to customize
+    the system.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '^([1](ch11.html#idm46803124791184-marker)) To quote the OCI website: “The Open
+    Container Initiative (OCI) is a lightweight, open governance structure (project),
+    formed under the auspices of the Linux Foundation, for the express purpose of
+    creating open industry standards around container formats and runtime. The OCI
+    was launched on June 22nd, 2015 by Docker, CoreOS and other leaders in the container
+    industry.”'
+  prefs: []
+  type: TYPE_NORMAL

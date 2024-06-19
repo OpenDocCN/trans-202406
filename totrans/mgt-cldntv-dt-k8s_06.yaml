@@ -1,0 +1,1264 @@
+- en: Chapter 5\. Automating Database Management on Kubernetes with Operators
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: In this chapter, we’ll continue our exploration of running databases on Kubernetes,
+    but shift our focus from installation to operations. It’s not enough just to know
+    how the elements of a database application map onto the primitives provided by
+    Kubernetes for an initial deployment. You also need to know how to maintain that
+    infrastructure over time in order to support your business-critical applications.
+    In this chapter, we’ll take a look at the Kubernetes approach to operations so
+    that you can keep databases running effectively.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Operations for databases and other data infrastructure consist of a common
+    list of “day two” tasks, including the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Scaling capacity up and down, including reallocating workload across resized
+    clusters
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Monitoring database health and replacing failed (or failing) instances
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Performing routine maintenance tasks, such as repair operations in Apache Cassandra
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Updating and patching software
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Maintaining secure access keys and other credentials that may expire over time
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Performing backups, and using them to restore data in disaster recovery
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'While the details of how these tasks are performed may vary among technologies,
+    the common concern is how we can use automation to reduce the workload on human
+    operators and enable us to operate infrastructure at larger and larger scales.
+    How can we incorporate the knowledge that human operators have built up around
+    these tasks? While traditional cloud operations have used scripting tools that
+    run externally to your cloud infrastructure, a more cloud native approach is to
+    have this database control logic running directly within your Kubernetes clusters.
+    The question we’ll explore in this chapter is: what is the Kubernetes-friendly
+    way to represent this control logic?'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Extending the Kubernetes Control Plane
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The good news is that the designers of Kubernetes aren’t surprised at all by
+    this question. In fact, the Kubernetes control plane and API are designed to be
+    extensible. Kelsey Hightower and others have referred to Kubernetes as [“a platform
+    for building platforms”](https://oreil.ly/pFRDO).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Kubernetes provides multiple extension points, primarily related to its control
+    plane. [Figure 5-1](#kubernetes_control_plane_and_extension) includes the [Kubernetes
+    core components](https://oreil.ly/hsxFY) such as the API server, scheduler, Kubelet
+    and `kubectl`, along with indications of the [extension points](https://oreil.ly/UXbo0)
+    they support.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Kubernetes control plane and extension points](assets/mcdk_0501.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 5-1\. Kubernetes control plane and extension points
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Now let’s examine the details of extending the Kubernetes control plane, starting
+    with components on your local client and those within the Kubernetes cluster.
+    Many of these extension points are relevant to databases and data infrastructure.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Extending Kubernetes Clients
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The `kubectl` command-line tool is the primary interface for many users for
+    interacting with Kubernetes. You can extend `kubectl` with [plug-ins](https://oreil.ly/kbh4u)
+    that you download and make available on your system’s `PATH`, or use [Krew](https://krew.dev),
+    a package manager that maintains a [list of `kubectl` plug-ins](https://oreil.ly/iw93T).
+    Plug-ins perform tasks such as bulk actions across [multiple resources](https://oreil.ly/AllQX)
+    or even [multiple clusters](https://oreil.ly/3Bsj2), or assessing the state of
+    a cluster and making [security](https://oreil.ly/BWbpn) or [cost](https://oreil.ly/Exxjp)
+    recommendations. More particularly to our focus in this chapter, several plug-ins
+    are available to manage operators and custom resources.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Extending Kubernetes Control Plane Components
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'The core of the Kubernetes control plane consists of several [control plane
+    components](https://oreil.ly/ZnxfB) including the API server, scheduler, controller
+    manager, Cloud Controller Manager, and etcd. While these components can be run
+    on any node within a Kubernetes cluster, they are typically assigned to a dedicated
+    node which does not run any user application Pods. The components are as follows:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: API server
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This is the primary interface for external and internal clients of a Kubernetes
+    cluster. It exposes RESTful interfaces via an HTTP API. The API server performs
+    a coordination role, routing requests from clients to other components to implement
+    imperative and declarative instructions. The API server supports two types of
+    extensions: custom resources and API aggregation. CRDs allow you to add new types
+    of resources and are managed through `kubectl` without further extension. API
+    aggregation allows you to extend the Kubernetes API with additional REST endpoints,
+    which the API server will delegate to a separate API server provided as a plug-in.
+    Custom resources are the more commonly used extension mechanism and will be a
+    major focus throughout the remainder of the book.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Scheduler
+  prefs: []
+  type: TYPE_NORMAL
+- en: This determines the assignment of Pods to Worker Nodes, considering factors
+    including the load on each Worker Node, as well as affinity rules, taints, and
+    tolerations (as discussed in [Chapter 4](ch04.html#automating_database_deployment_on_kuber)).
+    The scheduler can be extended with plug-ins that override default behavior at
+    multiple points in its decision-making process. For example, a *scheduling plug-in*
+    could filter out nodes for a specific type of Pod or set the relative priority
+    of nodes by assigning a score. *Binding plug-ins* can customize the logic that
+    prepares a node for running a scheduled Pod, such as mounting a network volume
+    the Pod needs. Data infrastructure such as Apache Spark that relies on running
+    a lot of short-lived tasks may benefit from this ability to exercise more fine-grained
+    control over scheduling decisions, as we’ll discuss in [“Alternative Schedulers
+    for Kubernetes”](ch09.html#alternative_schedulers_for_kubernetes).
+  prefs: []
+  type: TYPE_NORMAL
+- en: etcd
+  prefs: []
+  type: TYPE_NORMAL
+- en: This distributed key-value store is used by the API server to persist information
+    about the cluster’s configuration and status. As resources are added, removed
+    and updated, the API server updates the metadata in etcd accordingly, so that
+    if the API server crashes or needs to be restarted, it can easily recover its
+    state. As a strongly consistent data store that supports high availability, etcd
+    is frequently used by other data infrastructure that runs on Kubernetes, as we’ll
+    see frequently throughout the book.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Controller manager and Cloud Controller Manager
+  prefs: []
+  type: TYPE_NORMAL
+- en: The controller manager and Cloud Controller Manager incorporate multiple control
+    loops called *controllers*. These managers contain multiple logically separate
+    controllers compiled into a single executable to simplify the ability of Kubernetes
+    to manage itself. The controller manager includes controllers which manage built-in
+    resource types such as Pods, StatefulSets, and more. The Cloud Controller Manager
+    includes controllers that differ among Kubernetes providers to enable the management
+    of platform-specific resources such as load balancers or VMs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Extending Kubernetes Worker Node Components
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Some elements of the Kubernetes control plane run on every node in the cluster.
+    These [Worker Node components](https://oreil.ly/KmmkS) include the Kubelet, kube-proxy,
+    and container runtime:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Kubelet
+  prefs: []
+  type: TYPE_NORMAL
+- en: This manages the Pods running on a node assigned by the scheduler, including
+    the containers that run within a Pod. The Kubelet restarts containers when needed,
+    provides access to container logs, and more.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Compute, network, and storage plug-ins
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Kubelet can be extended with plug-ins that take advantage of unique compute,
+    networking, and storage capabilities provided by the underlying environment on
+    which it is running. Compute plug-ins include container runtimes, and [device
+    plug-ins](https://oreil.ly/cdqrT) that expose specialized hardware capabilities
+    such as GPUs or field-programmable gate arrays (FPGA). [Network plug-ins](https://oreil.ly/aMdKH),
+    including those that comply with the Container Network Interface (CNI), can provide
+    features beyond Kubernetes built-in networking, such as bandwidth management or
+    network policy management. We’ve previously discussed storage plug-ins in [“Kubernetes
+    Storage Architecture”](ch02.html#kubernetes_storage_architecture), including those
+    that conform to the CSI.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Kube-proxy
+  prefs: []
+  type: TYPE_NORMAL
+- en: This maintains network routing for the Pods running on a Worker Node so that
+    they can communicate with other Pods running inside your Kubernetes cluster, or
+    clients and services running outside of the cluster. Kube-proxy is part of the
+    implementation of Kubernetes Services, providing the mapping of virtual IPs to
+    individual Pods on a Worker Node.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Container runtime
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Kubelet uses the container runtime to execute containers on the worker’s
+    operating system. Supported container runtimes for Linux include [containerd](https://oreil.ly/6ylhH)
+    and [CRI-O](https://oreil.ly/8fk2x). [Docker](https://oreil.ly/col9R) runtime
+    support was deprecated in Kubernetes 1.20 and removed entirely in 1.24.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Custom controllers and operators
+  prefs: []
+  type: TYPE_NORMAL
+- en: These controllers are responsible for managing applications installed on a Kubernetes
+    cluster using custom resources. Although these controllers are extensions to the
+    Kubernetes control plane, they can run on any Worker Node.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Operator Pattern
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'With this context, we’re ready to examine one of the most common patterns for
+    extending Kubernetes: the *operator pattern*. This pattern combines custom resources
+    with controllers that operate on those resources. Let’s examine each of these
+    concepts in more detail to see how they apply to data infrastructure, and then
+    you’ll be ready to dig into an example operator for MySQL.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Controllers
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The concept of a controller originates from the domain of electronics and electrical
+    engineering, in which a controller is a device that operates in a continuous loop.
+    On each iteration through the loop, the device receives an input signal, compares
+    that with a set point value, and generates an output signal intended to produce
+    a change in the environment that can be detected in future inputs. A simple example
+    is a thermostat, which powers up your air conditioner or heater when the temperature
+    in a space is too high or low.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'A *Kubernetes controller* implements a similar [control loop](https://oreil.ly/LKefh),
+    consisting of the following steps:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Reading the current state of resources
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Making changes to the state of resources
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Updating the status of resources
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Repeat
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'These steps are embodied both by Kubernetes built-in controllers that run in
+    the controller manager and Cloud Controller Manager, as well as *custom controllers*
+    that are provided to run applications on top of Kubernetes. Let’s look at some
+    examples of what these steps might entail for controllers that manage data infrastructure:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Reading the current state of resources
+  prefs: []
+  type: TYPE_NORMAL
+- en: A controller tracks the state of one or more resource types, including built-in
+    resources like Pods, PersistentVolumes, and Services, as well as custom resources
+    (which we discuss in the next section). Controllers are driven asynchronously
+    by notification from the API server. The API server sends [*watch events*](https://oreil.ly/UvOJY)
+    to controllers to notify them of changes in state for resource types for which
+    they have registered interest, such as the creation or deletion of a resource,
+    or an event occurring on the resource.
+  prefs: []
+  type: TYPE_NORMAL
+- en: For data infrastructure, these changes could include a change in the number
+    of requested replicas for a cluster, or a notification that a Pod containing a
+    database replica has died. Because many such updates could be occurring in a large
+    cluster, controllers frequently use caching.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Making changes to the state of resources
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is the core business logic of a controller—comparing the state of resources
+    to their desired state and executing actions to change the state to the desired
+    state. In the Kubernetes API, the current state is captured in `.status` fields
+    of resources, and the desired state is expressed in terms of the `.spec` field.
+    The changes could include invocations of the Kubernetes API to modify other resources,
+    administrative actions on the application being managed, or even interactions
+    outside of the Kubernetes cluster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: For example, consider a controller managing a distributed database with multiple
+    replicas. When the database controller receives a notification that the desired
+    number of replicas has increased, the controller could scale an underlying Deployment
+    or StatefulSet that it is using to manage replicas. Later, when receiving a notification
+    that a Pod has been created to host a new replica, the controller could initiate
+    an action on one or more replicas in order to rebalance the workload across those
+    replicas.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Updating the status of resources
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the final step of the control loop, the controller updates the `.status`
+    fields of the resource using the API server, which in turn updates that state
+    in etcd. You’ve viewed the status of resources like Pods and PersistentVolumes
+    in previous chapters using the `kubectl get` and `kubectl describe` commands.
+    For example, the status of a Pod includes its overall state (`Pending`, `Running`,
+    `Succeeded`, `Failed`, etc.), the most recent time at which various conditions
+    were noted (`PodScheduled`, `ContainersReady`, `Initialized`, `Ready`), as well
+    as the state of each of its containers (`Waiting`, `Running`, `Terminated`). Custom
+    resources can define their own status fields as well. For example, a custom resource
+    representing a cluster might have status values reflecting the overall availability
+    of the cluster and its current topology.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Events
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: A controller can also produce *events* via the Kubernetes API for consumption
+    by human operators or other applications. These are distinct from the watcher
+    events described previously that the Kubernetes API uses to notify controllers
+    of changes, which are not exposed to other clients.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Writing a Custom Controller
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: While you may not ever need to write your own controller, being familiar with
+    the concepts involved is helpful. [*Programming Kubernetes*](https://oreil.ly/Ad4Ga)
+    is a great resource for those interested in digging deeper.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The [controller-runtime project](https://oreil.ly/VjP9w) provides a common set
+    of libraries to help aid the process of writing controllers, including registering
+    for notifications from the API server, caching resource status, implementing reconciliation
+    loops, and more. Controller-runtime libraries are implemented in the Go programming
+    language, so it’s no surprise that most controllers are implemented in Go.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Go](https://go.dev) was first developed at Google in 2007 and used in many
+    cloud native applications including Borg, the predecessor to Kubernetes, and then
+    in Kubernetes itself. Go is a strongly typed, compiled language (as opposed to
+    interpreted languages like Java and JavaScript) with a high value on usability
+    and developer productivity (in reaction to the higher learning curve of C/C++).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you’ve ever misconfigured a Pod specification and observed a `CrashLoopBackOff`
+    status, you may have encountered events. Using the `kubectl describe pod` command,
+    you can observe events such as a container being started and failing, followed
+    by a backoff period, followed by the container restarting. Events expire from
+    the API server in an hour, but common Kubernetes monitoring tools provide capabilities
+    to track them. Controllers can also create events for custom resources.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Custom Resources
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: As we’ve discussed, controllers can operate on built-in Kubernetes resources
+    as well as [custom resources](https://oreil.ly/62uQj). We’ve briefly mentioned
+    this concept, but let’s take this opportunity to define what custom resources
+    are and how they extend the Kubernetes API.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Fundamentally, a *custom resource* is a piece of configuration data that Kubernetes
+    recognizes as part of its API. While a custom resource is similar to a ConfigMap,
+    it has a structure similar to built-in resources: metadata, specification, and
+    status. The specific attributes of a particular custom resource type are defined
+    in a CRD. A CRD is itself a Kubernetes resource that is used to describe a custom
+    resource.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: In this book, we’ve been discussing how Kubernetes enables you to move beyond
+    managing VMs and containers to managing virtual datacenters. CRDs provide the
+    flexibility that helps make this a practical reality. Instead of being limited
+    to the resources that Kubernetes provides off the shelf, you can create additional
+    abstractions to extend Kubernetes for your own purposes. This is a critical component
+    in a fast-moving ecosystem.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s see what you can learn about CRDs from the command line. Use `kubectl
+    api-resources` to get a listing of all of the resources defined in your cluster:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'As you look through the output, you’ll see many resource types introduced in
+    previous chapters, along with their short names: StorageClass (`sc`), PersistentVolumes
+    (`pv`), Pods (`po`), StatefulSets (`sts`), and so on. The API versions provide
+    some clues as to the origins of each resource type. For example, resources with
+    version `v1` are core Kubernetes resources. Other versions such as `apps/v1`,
+    `networking.k8s.io/v1`, or `storage.k8s.io/v1` indicate resources that are defined
+    by various Kubernetes SIGs.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Depending on the configuration of the Kubernetes cluster you are using, you
+    may have some CRDs defined already. If any are present, they will appear in the
+    output of the `kubectl api-resources` command. They’ll stand out by their API
+    version, which will typically include a path other than `k8s.io`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Since a CRD is itself a Kubernetes resource, you can also use the command `kubectl
+    get crd` to list custom resources installed in your Kubernetes cluster. For example,
+    after installing the Vitess Operator referenced in the following section, you
+    would see several CRDs:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'We’ll introduce the usage of these custom resources later, but for now let’s
+    focus on the mechanics of a specific CRD to see how it extends Kubernetes. You
+    use the `kubectl describe crd` or `kubectl get crd` commands to see the definition
+    of a CRD. For example, to get a YAML-formatted description for the `vitesskeyspace`
+    custom resource, you could run this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Looking at the [original YAML configuration](https://oreil.ly/5ml3q) for this
+    CRD, you’ll see something like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: From this part of the definition, you can see the declaration of the custom
+    resource’s name or kind and `shortName`. The `scope` designation of `Namespaced`
+    means that custom resources of this type are confined to a single Namespace.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The longest part of the definition is the `validation` section, which we’ve
+    omitted due to its considerable size. Kubernetes supports the definition of attributes
+    within custom resource types, and the ability to define legal values for these
+    types using the [OpenAPI v3 schema](https://oreil.ly/b13qP) (which is used to
+    document RESTful APIs, which in turn uses [JSON schema](http://json-schema.org)
+    to describe rules used to validate JSON objects). Validation rules ensure that
+    when you create or update custom resources, the definitions of the objects are
+    valid and can be understood by the Kubernetes control plane. The validation rules
+    are used to generate the documentation you use as you define instances of these
+    custom resources in your application.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Once a CRD has been installed in your Kubernetes cluster, you can create and
+    interact with the resources using `kubectl`. For example, `kubectl get vitesskeyspaces`
+    will return a list of Vitess keyspaces. You create an instance of a Vitess keyspace
+    by providing a compliant YAML definition to the `kubectl apply` command.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Operators
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Now that you’ve learned about custom controllers and custom resources, let’s
+    tie these threads back together. An [*operator*](https://oreil.ly/BXc35) is a
+    combination of custom resources and custom controllers that maintain the state
+    of those resources and manage an application (or *operand)* in Kubernetes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As we’ll see in examples throughout the rest of the book, this simple definition
+    can cover a pretty wide range of implementations. The recommended pattern is to
+    provide a custom controller for each custom resource, but beyond that, the details
+    vary. A simple operator might consist of a single resource and controller, while
+    a more complex operator might have multiple resources and controllers. Those multiple
+    controllers might run in the same process space or be broken into separate Pods.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Controllers Versus Operators
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: While technically operators and controllers are distinct concepts in Kubernetes,
+    the terms are frequently used interchangeably. It’s common to refer to a deployed
+    controller or collection of controllers as “the operator,” and you’ll see this
+    usage reflected both in this book and the community in general.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To unpack this pattern and see how the different elements of an operator and
+    the Kubernetes control plane work together, let’s consider the interactions of
+    a notional operator, the DBCluster operator, as shown in [Figure 5-2](#interaction_between_kubernetes_controll).
+  prefs: []
+  type: TYPE_NORMAL
+- en: After an administrator installs the DBCluster operator and `db-cluster` custom
+    resource in the cluster, users can then create instances of the `db-cluster` resource
+    using `kubectl` (1), which registers the resource with the API server (2), which
+    in turns stores the state in etcd (3) to ensure high availability (other interactions
+    with etcd are omitted from this sequence for brevity).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Interaction between Kubernetes controllers and operators](assets/mcdk_0502.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 5-2\. Interaction between Kubernetes controllers and operators
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The DBCluster controller (part of the operator) is notified of the new `db-cluster`
+    resource (4) and creates additional Kubernetes resources using the API server
+    (5), which could include StatefulSets, Services, PersistentVolumes, PersistentVolumeClaims,
+    and more, as we’ve seen in previous examples of deploying databases on Kubernetes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Focusing on the StatefulSet path, the StatefulSet controller running as part
+    of the Kubernetes controller manager is notified of a new StatefulSet (6) and
+    creates new Pod resources (7). The API server asks the scheduler to assign each
+    Pod to a Worker Node (8) and communicates with the Kubelet on the chosen Worker
+    Nodes (9) to start each of the required Pods (10).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'As you see, creating a `db-cluster` resource sets off a chain of interactions
+    as various controllers are notified of changes to Kubernetes resources and initiate
+    changes to bring the state of the cluster in line with the desired state. The
+    sequence of interactions appears complex from a user perspective, but the design
+    demonstrates strong encapsulation: the responsibilities of each controller are
+    well bounded and independent of other controllers. This separation of concerns
+    is what makes the Kubernetes control plane so extensible.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Managing MySQL in Kubernetes Using the Vitess Operator
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'Now that you understand how operators, custom controllers, and custom resources
+    work, it’s time to get some hands-on experience with an operator for the database
+    we’ve been using as our primary relational database example: MySQL. MySQL examples
+    in previous chapters were confined to simple deployments of a single primary replica
+    and a couple of secondary replicas. While this could provide a sufficient amount
+    of storage for many cloud applications, managing a larger cluster can quickly
+    become quite complex, whether it runs on bare-metal servers or as a containerized
+    application in Kubernetes.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Vitess Overview
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '[*Vitess*](https://oreil.ly/7I0vO) is an open source project started at YouTube
+    in 2010\. Before the company was acquired by Google, YouTube was running on MySQL,
+    and as YouTube scaled up, it reached a point of daily outages. Vitess was created
+    as a layer to abstract application access to databases by making multiple instances
+    appear to be a single database, routing application requests to the appropriate
+    instances using a sharding approach. Before we explore deploying Vitess on Kubernetes,
+    let’s take some time to explore its architecture. We’ll start with the high-level
+    concepts shown in [Figure 5-3](#vitess_cluster_topology_cellscomma_keys): cells,
+    keyspaces, shards, and primary and replica tablets.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Vitess cluster topology: cells, keyspaces, and shards](assets/mcdk_0503.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: 'Figure 5-3\. Vitess cluster topology: cells, keyspaces, and shards'
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'At a high level, a Vitess cluster consists of multiple MySQL instances called
+    *tablets* which may be spread across multiple datacenters, or *cells*. Each MySQL
+    instance takes on a role as either a primary or replica, and may be dedicated
+    to a specific slice of a database known as a *shard*. Let’s consider the implications
+    of each of these concepts for reading and writing data in Vitess:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Cell
+  prefs: []
+  type: TYPE_NORMAL
+- en: A typical production deployment of Vitess is spread across multiple failure
+    domains in order to provide high availability. Vitess refers to each of these
+    failure domains as a [*cell*](https://oreil.ly/2VDke). The recommended topology
+    is a cell per datacenter or cloud provider zone. While writes and replication
+    involve communication across cell boundaries, Vitess reads are confined to the
+    local cell to optimize performance.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Keyspace
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is a logical database consisting of one or more tables. Each keyspace in
+    a cluster can be *sharded* or *unsharded*. An unsharded keyspace has a primary
+    cell where a MySQL instance designated as the *primary* will reside, while other
+    cells will contain *replicas*. In the unsharded keyspace shown on the left side
+    of [Figure 5-3](#vitess_cluster_topology_cellscomma_keys), writes from client
+    applications are routed to the primary and replicated to the replica nodes in
+    the background. Reads can be served from the primary or replica nodes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Shard
+  prefs: []
+  type: TYPE_NORMAL
+- en: The real power of Vitess comes from its ability to scale by spreading the contents
+    of a keyspace across multiple replicated MySQL databases known as *shards*, while
+    providing the abstraction of a single database to client applications. The client
+    on the right side of [Figure 5-3](#vitess_cluster_topology_cellscomma_keys) is
+    not aware of how data is sharded. On writes, Vitess determines what shards are
+    involved and then routes the data to the appropriate primary instances. On reads,
+    Vitess gathers data from primary or replica nodes in the local cell.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The sharding rules for a keyspace are specified in a [Vitess Schema (VSchema)](https://oreil.ly/wDmQa),
+    an object that contains the sharding key (known in Vitess as the *keyspace ID*)
+    used for each table. To provide maximum flexibility over the way data is sharded,
+    Vitess allows you to specify which columns in a table are used to calculate the
+    keyspace ID, as well as the algorithm (or *VIndex*) used to make the calculation.
+    Tables can also have secondary VIndexes to support more-efficient queries across
+    multiple keyspace IDs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To understand how Vitess manages shards and how it routes queries to the various
+    MySQL instances, you’ll want to get to know the components of a Vitess cluster
+    shown in [Figure 5-4](#vitess_architecture_including_vtgatecom), including VTGate,
+    VTTablet, and the Topology Service.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Vitess architecture including VTGate, VTTablets, Topology Service](assets/mcdk_0504.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 5-4\. Vitess architecture including VTGate, VTTablets, and the Topology
+    Service
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Let’s walk through these components to learn what they do and how they interact:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: VTGate
+  prefs: []
+  type: TYPE_NORMAL
+- en: A Vitess gateway (VTGate) is a proxy server that provides the SQL binary endpoint
+    used by client applications, making the Vitess cluster appear as a single database.
+    Vitess clients generally connect to a VTGate running in the same cell (datacenter).
+    The VTGate parses each incoming read or write query and uses its knowledge of
+    the VSchema and cluster topology to create a query execution plan. The VTGate
+    executes queries for each shard, assembles the result set, and returns it to the
+    client. The VTGate can detect and limit queries that will impact memory or CPU
+    utilization, providing high reliability and helping to ensure consistent performance.
+    Although VTGate instances do cache cluster metadata, they are stateless, so you
+    can increase the reliability and scalability of your cluster by running multiple
+    VTGate instances per cell.
+  prefs: []
+  type: TYPE_NORMAL
+- en: VTTablet
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'A Vitess tablet (VTTablet) is an agent that runs on the same compute instance
+    as a single MySQL database, managing access to it and monitoring its health. Each
+    VTTablet takes on a specific role in the cluster, such as the primary for a shard,
+    or one of its replicas. There are two types of replica: those that can be promoted
+    to replace a primary and those that cannot. The latter are typically used to provide
+    additional capacity for read-intensive use cases such as analytics. The VTTablet
+    exposes a gRPC interface, which the VTGate uses to send queries and control commands
+    that the VTTablet then turns into SQL commands on the MySQL instance. VTTablets
+    maintain a pool of long-lived connections to the MySQL node, leading to improved
+    throughput, reduced latency, and reduced memory pressure.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Topology Service
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Vitess requires a strongly consistent data store to maintain a small amount
+    of metadata describing the cluster topology, including the definition of keyspaces
+    and their VSchema, what VTTablets exist for each shard, and which VTTablet is
+    the primary. Vitess uses a pluggable interface called the Topology Service, with
+    three implementations provided by the project: etcd (the default), ZooKeeper,
+    and Consul. VTGates and VTTablets interface with the Topology Service in the background
+    in order to maintain awareness of the topology, and do not interact with the Topology
+    Service on the query path to avoid performance impact. For multicell clusters,
+    Vitess incorporates both cell-local Topology Services and a global Topology Service
+    with instances in multiple cells that maintains knowledge of the entire cluster.
+    This design provides high availability of topology information across the cluster.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`vtctld` and `vtctlclient`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The Vitess control daemon `vtctld` and its client, `vtctlclient`, provide the
+    control plane used to configure and manage Vitess clusters. `vtctld` is deployed
+    on one or more of the cells in the cluster, while `vtctlclient` is deployed on
+    the client machine of the user administering the cluster. `vtctld` uses a declarative
+    approach similar to Kubernetes to perform its work: it updates the cluster metadata
+    in the Topology Service, and the VTGates and VTTablets pick up changes and respond
+    accordingly.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Now that you understand the Vitess architecture and basic concepts, let’s discuss
+    how they are mapped into a Kubernetes environment. This is an important consideration
+    for any application, but especially for a complex piece of data infrastructure
+    like Vitess.
+  prefs: []
+  type: TYPE_NORMAL
+- en: PlanetScale Vitess Operator
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Over time, Vitess has evolved in a couple of key aspects. First, it can now
+    run additional MySQL-compatible database engines such as Percona. Second, and
+    more important for our investigations, PlanetScale has packaged Vitess as a containerized
+    application that can be deployed to Kubernetes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Evolving Options For Running Vitess in Kubernetes
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The state of the art for running Vitess in Kubernetes has evolved over time.
+    While Vitess once included a Helm chart, this was [deprecated in the 7.0 release](https://oreil.ly/xhUt4)
+    in mid-2020\. The Vitess project also hosted an operator which was [deprecated](https://oreil.ly/4RPMj)
+    around the same time. Both of these options were retired in favor of the PlanetScale
+    operator we examine in this section.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Let’s see how easy it is to deploy a multinode MySQL cluster using the [PlanetScale
+    Vitess Operator](https://oreil.ly/W5Dc2). Since the Vitess project has adopted
+    the PlanetScale Vitess Operator as its officially supported operator, you can
+    reference the [Get Started guide](https://oreil.ly/Nl7e2) in the Vitess project
+    documentation. We’ll walk through a portion of this guide here to get an understanding
+    of the operator’s contents and how it works.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Examples Require Kubernetes Clusters with More Resources
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The examples in previous chapters have not required a large amount of compute
+    resources, and we encouraged you to run them on local distributions such as kind
+    or K3s. Beginning in this chapter, the examples become more complex and may require
+    more resources than you have available on your desktop or laptop. For these cases,
+    we will provide references to documentation or scripts for creating Kubernetes
+    clusters with sufficient resources.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Installing the Vitess Operator
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'You can find the source code used in this section in [this book’s code repository](https://github.com/data-on-k8s-book/examples).
+    The files are copied for convenience from their original source in the [Vitess
+    GitHub repo](https://oreil.ly/Kq7dm). First, install the operator using the provided
+    configuration file:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'As you’ll see in the output of the `kubectl apply` command, this configuration
+    creates several CRDs, as well as a Deployment managing a single instance of the
+    operator. [Figure 5-5](#vitess_operator_and_custom_resource_def) shows many of
+    the elements you’ve just installed, in order to highlight a few interesting details
+    that will not be obvious at first glance:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The operator contains a controller corresponding to each CRD. If you’re interested
+    in seeing what this looks like in the operator source code in Go, compare the
+    [controller implementations](https://oreil.ly/ABID9) with the [custom resource
+    specifications](https://oreil.ly/tUD9z) that are used to generate the CRD configurations
+    introduced in [“Building Operators”](#building_operators).
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The figure depicts a hierarchy of CRDs representing their relationships and
+    intended usage, as described in the operator’s [API reference](https://oreil.ly/25qhN).
+    To use the Vitess Operator, you define a VitessCluster resource which contains
+    the definitions of VitessCells and VitessKeyspaces. VitessKeyspaces, in turn,
+    contain definitions of VitessShards. While you can view the status of each VitessCell,
+    VitessKeyspace, and VitessShard independently, you must update them in the context
+    of the parent VitessCluster resource.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Currently, the Vitess Operator supports only etcd as the Topology Service implementation.
+    The EtcdLockserver CRD is used to configure these etcd clusters.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '![Vitess Operator and Custom Resource Definitions](assets/mcdk_0505.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 5-5\. Vitess Operator and Custom Resource Definitions
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Roles and RoleBindings
+  prefs:
+  - PREF_H4
+  type: TYPE_NORMAL
+- en: 'As shown toward the bottom of [Figure 5-5](#vitess_operator_and_custom_resource_def),
+    installing the operator caused the creation of a ServiceAccount, along with two
+    new resources we have not discussed previously: a Role and a RoleBinding. These
+    additional resources allow the ServiceAccount to access specific resources on
+    the Kubernetes API. First, examine the configuration of the `vitess-operator`
+    Role from the file that you used to [install the operator](https://oreil.ly/q52Iq)
+    (you can search for `kind: Role` to locate the pertinent code):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: This first portion of the Role definition identifies resources that are part
+    of the core Kubernetes distribution, which may be designated by passing the empty
+    string as the `apiGroup` instead of `k8s.io`. The `verbs` correspond to operations
+    the Kubernetes API provides on resources, including `get`, `list`, `watch`, `create`,
+    `update`, `patch`, and `delete`. This Role is given access to all operations using
+    the wildcard `*`. If you follow the URL in the example and examine more of the
+    code, you’ll also see how the Role is given access to other resources, including
+    Deployments and ReplicaSets, and resources in the `apiGroup planetscale.com`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The RoleBinding associates the ServiceAccount with the Role:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: Least Privilege for Operators
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: As a creator or consumer of operators, exercise care in choosing which permissions
+    are granted to operators, and be conscious of the implications for what an operator
+    is allowed to do.
+  prefs: []
+  type: TYPE_NORMAL
+- en: PriorityClasses
+  prefs:
+  - PREF_H4
+  type: TYPE_NORMAL
+- en: 'Another detail is not depicted in [Figure 5-4](#vitess_architecture_including_vtgatecom):
+    installing the operator created two PriorityClass resources. [PriorityClasses](https://oreil.ly/dlkRe)
+    provide input to the Kubernetes scheduler to indicate the relative priority of
+    Pods. The priority is an integer value, where higher values indicate higher priority.
+    Whenever a Pod resource is created and is ready to be assigned to a Worker Node,
+    the Scheduler takes the Pod’s priority into account as part of its decisions.
+    When multiple Pods are awaiting scheduling, higher-priority Pods are assigned
+    before lower-priority Pods. When a cluster’s nodes are running low on compute
+    resources, lower-priority Pods may be stopped or *evicted* in order to make room
+    for higher-priority Pods, a process known as *preemption*.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'A PriorityClass is a convenient way to set a priority value referenced by multiple
+    Pods or other workload resources such as Deployments and StatefulSets. The Vitess
+    Operator creates two PriorityClasses: `vitess-operator-control-plane` defines
+    a higher priority used for the operator and `vtctld` Deployments, while the `vitess`
+    class is used for the data plane components such as the VTGate and VTTablet Deployments.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Kubernetes Scheduling Complexity
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Kubernetes provides multiple constraints that influence Pod scheduling, including
+    prioritization and preemption, affinity and anti-affinity, and scheduler extensions,
+    as discussed in [“Extending Kubernetes Clients”](#extending_kubernetes_clients).
+    The interaction of these constraints may not be predictable, especially in large
+    clusters shared across multiple teams. As resources in a cluster become scarce,
+    Pods can be preempted or fail to be scheduled in ways you don’t expect. It’s a
+    best practice to maintain awareness of the various scheduling needs and constraints
+    across the workloads in your cluster to avoid surprises.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Creating a VitessCluster
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'Now let’s create a VitessCluster and put the operator to work. The code sample
+    contains a configuration file defining a very simple cluster named `example`,
+    with a VitessCell `zone1`, keyspace `commerce`, and single shard, which the operator
+    gives the name `x-x`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: The output of the command indicates a couple of items that are created directly.
+    But more is going on behind the scenes, as the operator detects the creation of
+    the VitessCluster and begins provisioning other resources, as summarized in [Figure 5-6](#resources_managed_by_the_vitesscluster).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Resources managed by the VitessCluster example](assets/mcdk_0506.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 5-6\. Resources managed by the VitessCluster `example`
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'By comparing the configuration script with [Figure 5-6](#resources_managed_by_the_vitesscluster),
+    you can make several observations about this simple VitessCluster. First, the
+    top-level configuration allows you to specify the name of the cluster and the
+    container images that will be used for the various components:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Next, the VitessCluster configuration provides a definition of the VitessCell
+    `zone1`. The values provided for `gateway` specify a single VTGate instance to
+    be allocated for this cell, with specific compute resource limits:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: The Vitess Operator uses this information to create a VTGate Deployment prefixed
+    with `example-zone1-vtgate` containing a single replica, and a Service that provides
+    access. The access credentials for the VTGate instance are provided in the `example-cluster-config`
+    Secret. This Secret is used to secure other configuration values, as you’ll see.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The next section of the VitessCluster configuration specifies the creation
+    of a single `vtctld` instance (a *dashboard*) with permission to control `zone1`.
+    The Vitess Operator uses this information to create a Deployment to manage the
+    dashboard using the specified resource limits, and a Service to provide access
+    to the VTGate:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The VitessCluster also defines the `commerce` keyspace, which contains a single
+    shard (essentially, an unsharded keyspace). This single shard has a pool of two
+    VTTablets in the cell `zone1`, each of which will be allocated 10 GB of storage:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: As shown in [Figure 5-6](#resources_managed_by_the_vitesscluster), the Vitess
+    Operator manages a Pod for each VTTablet and creates a Service to manage access
+    across the tablets. The operator does not use a StatefulSet because the VTTablets
+    have distinct roles, with one as the primary and the other as a replica. Each
+    VTTablet Pod contains multiple containers, including the `vttablet` sidecar which
+    configures and controls the `mysql` container. The `vttablet` sidecar initializes
+    the `mysql` instance using a script contained in the `example-cluster-config`
+    Secret.
+  prefs: []
+  type: TYPE_NORMAL
+- en: While this configuration doesn’t specifically include details about etcd, the
+    Vitess Operator uses its default settings to create a three-node etcd cluster
+    to serve as the Topology Service for the VitessCluster. Because of the shortcomings
+    of the StatefulSets, the operator manages each Pod and PersistentVolumeClaim individually.
+    This points to the possibility for future improvements as Kubernetes and the operator
+    mature; perhaps the Kubernetes API server can one day serve the role of the Topology
+    Service in the Vitess architecture.
+  prefs: []
+  type: TYPE_NORMAL
+- en: At this point, you have a VitessCluster with all of its infrastructure provisioned
+    in Kubernetes. The next steps are to create the database schema and configure
+    your applications to access the cluster using the VTGate Service. You can follow
+    the steps in Alkin Tezuysal’s 2020 blog post [“Vitess Operator for Kubernetes”](https://oreil.ly/543Y8),
+    which also describes other use cases for managing a Vitess installation on Kubernetes,
+    including schema migration, backup, and restore.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The backup/restore capabilities leverage VitessBackupStorage and VitessBackup
+    CRDs, which you may have noticed during installation. VitessBackupStorage resources
+    represent locations where backups can be stored. After you configure the backup
+    section of a VitessCluster and point to a backup location, the operator creates
+    VitessBackup resources as a record of each backup it performs. When you add additional
+    replicas to a VitessCluster, the operator initializes their data by performing
+    a restore from the most recent backup.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Visualizing Larger Kubernetes Applications
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: It’s a good exercise to use the `kubectl get` and `kubectl` describe commands
+    to explore all of the resources that were created when you installed the operator
+    and created a cluster. However, you may find it easier to use a tool such as [Lens](https://github.com/lensapp/lens),
+    which offers a friendly graphical interface enabling you to click through the
+    resources more quickly, or [K9s](https://k9scli.io), which provides a command-line
+    interface.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Resharding is another interesting use case, which you might need to perform
+    when a cluster becomes unbalanced and one or more shards run out of capacity more
+    quickly than others. You’ll need to modify the VSchema using `vtctlclient`, and
+    then [update the VitessCluster resource](https://oreil.ly/i0n5S) with additional
+    VitessShards so that the operator provisions the required infrastructure. This
+    highlights the division of responsibility: the Vitess Operator manages Kubernetes
+    resources, while the Vitess control daemon (`vtctld`) provides more application-specific
+    behavior.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: A Growing Ecosystem of Operators
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The operator pattern has become quite popular in the Kubernetes community, aided
+    in part by the development of the [Operator Framework](https://operatorframework.io),
+    an ecosystem for creating and distributing operators. In this section, we’ll examine
+    the Operator Framework and related open source projects.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Choosing Operators
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: While we’ve focused in this chapter on Vitess as an example database operator,
+    operators are clearly relevant to all of the elements of your data stack. In all
+    aspects of cloud native data, we see a growing number of maturing, open source
+    operators to use in your deployments, and we’ll be looking at additional operators
+    as we examine how to run different types of data infrastructure on Kubernetes
+    in upcoming chapters.
+  prefs: []
+  type: TYPE_NORMAL
+- en: You should consider multiple aspects in choosing an operator. What are its features?
+    How much does it automate? How well supported is it? Is it proprietary or open
+    source? The Operator Framework provides a great resource, the [Operator Hub](https://operatorhub.io),
+    which you should consider as your first stop when looking for an operator. Operator
+    Hub is a well-organized list of various operators that cover every aspect of cloud
+    native software. It does rely on maintainers to submit their operators for listing,
+    which means that many existing operators may not be listed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Operator Framework also contains the Operator Lifecycle Manager (OLM), an
+    operator for installing and managing other operators in your cluster. You can
+    curate your own custom catalog of operators that are permitted in your environment,
+    or use catalogs provided by others. For example, Operator Hub can itself be [treated
+    as a catalog](https://oreil.ly/ble8P).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Part of the curation the Operator Hub provides is rating the capability of each
+    operator according to the [Operator Capability Model](https://oreil.ly/eYVEA).
+    The levels in this capability model are summarized in [Table 5-1](#operator_capability_levels_applied_to_d),
+    with additional commentary we’ve added to highlight considerations for database
+    operators. The examples are not prescriptive but indicate the type of capabilities
+    expected at each level.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 5-1\. Operator capability levels applied to databases
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Capability level | Characteristics | Database operator examples | Tools |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Level 1: Basic install | Installation and configuration of Kubernetes and
+    workloads | The operator uses custom resources to provide a central point of configuration
+    for a database cluster. The operator deploys the database by creating resources
+    such as Deployments, ServiceAccounts, RoleBindings, PersistentVolumeClaims, and
+    Secrets, and helps initialize the database schema. | Helm, Ansible, Go |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Level 2: Seamless updates | Upgrade of the managed workload and operator
+    | The operator can update an existing database to a newer version without data
+    loss (or, hopefully, downtime). The operator can be replaced with a newer version
+    of itself. | Helm, Ansible, Go |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Level 3: Full lifecycle | Ability to create and restore from backups, ability
+    to fail over or replace portions of a clustered application, ability to scale
+    the application | The operator provides a way to create a consistent backup across
+    multiple data nodes and the ability to use those backups to restore or replace
+    failed database nodes. The operator can respond to a configuration change to add
+    or remove database nodes or perhaps even datacenters. | Ansible, Go |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Level 4: Deep insights | Providing capabilities including alerting, monitoring,
+    events, or metering | The operator monitors metrics and logging output by the
+    database software and uses this information to implement health and readiness
+    checks. The operator pushes metrics and alerts to other infrastructure. | Ansible,
+    Go |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Level 5: Auto-pilot | Providing capabilities including auto-scaling, auto-healing,
+    auto-tuning | The operator auto-scales the number of database nodes in the cluster
+    up or down to meet performance requirements. The operator might also dynamically
+    resize PVs or change the StorageClass used for various database nodes. The operator
+    automatically performs database maintenance such as rebuilding indexes to improve
+    slow response times.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The operator detects abnormal workload patterns and takes action such as resharding
+    to balance workloads. | Ansible, Go |
+  prefs: []
+  type: TYPE_NORMAL
+- en: These levels are useful both for evaluating operators you might want to use,
+    and for providing targets for operator developers to aim for. They also provide
+    an opinionated view on what Helm-based operators can accomplish, limiting them
+    to Level 2\. For full lifecycle management and automation, more direct involvement
+    with the Kubernetes control plane is needed. For a Level 5 operator, the goal
+    is a complete hands-off Deployment.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s take a quick look at a few of the available operators for popular open
+    source databases:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Cass Operator
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In 2021, several companies in the Cassandra community that had developed their
+    own operators [came together](https://oreil.ly/AS16G) in support of an operator
+    built by DataStax, known primarily by its nickname: [Cass Operator](https://oreil.ly/ueyGZ).
+    Cass Operator was inspired by the best features of the community operators as
+    well as DataStax experience running Astra, a Cassandra-based database as a service
+    (DBaaS). The operator has been donated to the [K8ssandra project](https://k8ssandra.io),
+    where it is part of a larger ecosystem for deploying Cassandra on Kubernetes.
+    We’ll take a deeper look at K8ssandra and Cass Operator in [Chapter 7](ch07.html#the_kubernetes_native_database).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: PostgreSQL operators
+  prefs: []
+  type: TYPE_NORMAL
+- en: Several operators are available for PostgreSQL, which is not surprising given
+    that it is the second most popular open source database after MySQL. Two of the
+    most popular operators are the [Zalando Postgres Operator](https://oreil.ly/i6Us5),
+    and [PGO](https://oreil.ly/A40Qf) (which stands for Postgres Operator) from Crunchy
+    Data. Read Nikolay Bogdanov’s blog post [“Comparing Kubernetes Operators for PostgreSQL”](https://oreil.ly/AQcvB)
+    for a helpful comparison of these and other operators.
+  prefs: []
+  type: TYPE_NORMAL
+- en: MongoDB Kubernetes Operator
+  prefs: []
+  type: TYPE_NORMAL
+- en: MongoDB is the most popular document database, beloved by developers for its
+    ease of use. The MongoDB Community Kubernetes Operator provides basic support
+    for creating and managing MongoDB ReplicaSets, scaling up and down, and upgrades.
+    This operator is available on [GitHub](https://oreil.ly/dAhuV) but not yet listed
+    on Operator Hub, possibly because MongoDB also offers a separate operator for
+    its enterprise version.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Redis Operator
+  prefs: []
+  type: TYPE_NORMAL
+- en: Redis is an in-memory key-value store that has a broad set of use cases. Application
+    developers typically use Redis as an adjunct to other data infrastructure when
+    ultra-low latency is required. It excels at caching, counting, and shared data
+    structures. The [Redis Operator](https://oreil.ly/SKLSz) covers the basic install
+    and upgrade but also manages harder operations such as cluster failover and recovery.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As you can see, operators are available for many popular open source databases,
+    although it’s unfortunate that some vendors have tended to think of Kubernetes
+    operators primarily as a feature differentiator for paid enterprise versions.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Building Operators
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'While there is broad consensus in the Kubernetes community that you should
+    *use* operators for distributed data infrastructure whenever possible, there are
+    a variety of opinions about who exactly should be *building* operators. If you
+    don’t happen to work for a data infrastructure vendor, this can be a challenging
+    question. Mary Branscombe’s blog post [“When to Use, and When to Avoid, the Operator
+    Pattern”](https://oreil.ly/hd8FE) provides some excellent questions to consider,
+    which we’ll summarize here:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: What is the scale of the deployment? If you’re deploying only a single instance
+    of the database application, building and maintaining an operator might not be
+    cost-effective.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Do you have the expertise in the database? The best operators tend to be built
+    by companies running databases at scale in production, including vendors that
+    are providing DBaaS solutions.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Do you need higher levels of application awareness and automation, or would
+    deployment with a Helm chart and standard Kubernetes resources be sufficient?
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Are you trying to make the operator manage resources that are external to Kubernetes?
+    Consider a solution that runs closer to the resources being managed with an API
+    you can access from your Kubernetes application.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Have you considered security implications? Since operators are extensions of
+    the Kubernetes control plane, you’ll want to carefully manage what resources your
+    operator can access.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'If you decide to write an operator, several great tools and resources are available:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Operator SDK](https://oreil.ly/HtSZt)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This software development kit, included in the Operator Framework, contains
+    tools to build, test, and package operators. Operator SDK uses templates to autogenerate
+    new operator projects and provides APIs and abstractions to simplify common aspects
+    of building operators, especially interactions with the Kubernetes API. The SDK
+    supports the creation of operators using Go, Ansible, or Helm.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Kubebuilder](https://book.kubebuilder.io)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This toolkit for building operators is managed by the Kubernetes API Machinery
+    SIG. Similarly to Operator SDK, Kubebuilder provides tools for project generation,
+    testing, and publishing controllers and operators. Both Kubebuilder and Operator
+    SDK are built on the Kubernetes [controller-runtime](https://oreil.ly/XR9y4),
+    a set of Go libraries for building controllers. Wei Tei’s blog post [“Kubebuilder
+    vs. Operator SDK”](https://oreil.ly/NKC8d) provides a concise summary of the differences
+    between these toolkits.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Kubernetes Universal Declarative Operator (KUDO)](https://kudo.dev)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This operator allows you to create operators declaratively using YAML files.
+    This is an attractive approach for some developers as it eliminates the need to
+    write Go. Dmytro Vedetskyi’s blog post [“How to Deploy Your First App with Kudo
+    Operator on K8S”](https://oreil.ly/K71fK) provides a helpful introduction to using
+    KUDO and discusses some of the pros and cons of the declarative approach.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Finally, the O’Reilly books [*Kubernetes Operators*](https://oreil.ly/rWIM0)
+    by Jason Dobies and Joshua Wood and [*Programming Kubernetes*](https://oreil.ly/iczyv)
+    are great resources for understanding the operator ecosystem and getting into
+    the details of writing operators and controllers in Go.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As you can see, the state of the art in Kubernetes operators is continuing to
+    mature. Whether the goal is to build a unified operator or just to make it easier
+    to build database-specific operators, it’s clear that great progress can be made
+    as multiple communities begin to collaborate on common CRDs to address problems
+    like cluster membership, topology awareness, and leader election.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Summary
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: In this chapter, you’ve learned about several ways of extending the Kubernetes
+    control plane, especially operators and custom resources. The operator pattern
+    provides the critical breakthrough that enables us to simplify database operations
+    in Kubernetes through automation. While you should definitely be using operators
+    to run distributed databases in Kubernetes, think carefully before starting to
+    write your own operator. If building an operator is the right course for you,
+    there are plenty of resources and frameworks to help you along the way. There
+    are certainly ways in which Kubernetes itself could improve to make writing operators
+    easier, as you’ve learned from the experts we spoke to in this chapter.
+  prefs: []
+  type: TYPE_NORMAL
+- en: While we’ve spent the past couple of chapters focusing primarily on running
+    databases on Kubernetes, let’s expand our focus to consider how those databases
+    interact with other infrastructure.
+  prefs: []
+  type: TYPE_NORMAL

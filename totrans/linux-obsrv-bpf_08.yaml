@@ -1,0 +1,1090 @@
+- en: Chapter 7\. Express Data Path
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Express Data Path (XDP) is a safe, programmable, high-performance, kernel-integrated
+    packet processor in the Linux network data path that executes BPF programs when
+    the NIC driver receives a packet. This allows XDP programs to make decisions regarding
+    the received packet (drop, modify, or just allow it) at the earliest possible
+    point in time.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The execution point is not the only aspect that makes XDP programs fast; other
+    design decisions play a role in that:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: There are no memory allocations while doing packet processing with XDP.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: XDP programs work only with linear, unfragmented packets and have the start
+    and end pointers of the packet.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: There’s no access to full packet metadata, which is why the input context this
+    kind of program receives will be of type `xdp_buff` instead of the `sk_buff` struct
+    you encountered in [Chapter 6](ch06.html#linux_networking).
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Because they are eBPF programs, XDP programs have a bounded execution time,
+    and the consequence of this is that their usage has a fixed cost in the networking
+    pipeline.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: When talking about XDP, it is important to remember that it is not a kernel
+    bypass mechanism; it is designed to be integrated with other kernel components
+    and the internal Linux security model.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The `xdp_buff` struct is used to present a packet context to a BPF program that
+    uses the direct packet access mechanism provided by the XDP framework. Think of
+    it as a “lightweight” version of the `sk_buff`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The difference between the two is that `sk_buff` also holds and allows you to
+    mingle with the packets’ metadata (proto, mark, type), which is only available
+    at a higher level in the networking pipeline. The fact that `xdp_buff` is created
+    early and doesn’t depend on other kernel layers is one reason it’s faster to obtain
+    and process packets using XDP. The other reason is that `xdp_buff` doesn’t hold
+    references to routes, Traffic Control hooks, or other kind of packet metadata
+    like it would with program types that use an `sk_buff`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In this chapter we explore the characteristics of XDP programs, the different
+    kinds of XDP programs out there, and how they can be compiled and loaded. After
+    that, to give more context, we discuss real-world use cases for it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: XDP Programs Overview
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Essentially, what XDP programs do is that they make determinations about the
+    received packet, and then they can edit the received packet’s content or just
+    return a result code. The result code is used to determine what happens to the
+    packet in the form of an action. You can drop the packet, you can transmit it
+    out the same interface, or you can pass it up to the rest of the networking stack.
+    Additionally, to cooperate with the network stack, XDP programs can push and pull
+    a packet’s headers; for example, if the current kernel does not support an encapsulation
+    format or a protocol, an XDP program can de-encapsulate it or translate the protocol
+    and send the result to the kernel for processing.
+  prefs: []
+  type: TYPE_NORMAL
+- en: But wait, what’s the correlation between XDP and eBPF?
+  prefs: []
+  type: TYPE_NORMAL
+- en: It turns out that XDP programs are controlled through the `bpf` syscall and
+    loaded using the program type `BPF_PROG_TYPE_XDP`. Also, the execution driver
+    hook executes BPF bytecode.
+  prefs: []
+  type: TYPE_NORMAL
+- en: An important concept to understand when writing XDP programs is that the contexts
+    where they will run are also called *operation modes*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Operation Modes
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: XDP has three operation modes to accommodate easily testing functions, custom
+    hardware from vendors, and commonly built kernels without custom hardware. Let’s
+    go over each of them.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Native XDP
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'This is the default mode. In this mode, the XDP BPF program is run directly
+    out of the networking driver’s early receive path. When using this mode, it’s
+    important to check whether the driver supports it. You can check that by executing
+    the following command against the source tree of a given kernel version:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'That produces output like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'From what we can see, kernel 4.18 supports the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Broadcom NetXtreme-C/E network driver `bnxt`
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Cavium `thunderx` driver
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Intel `i40` driver
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Intel `ixgbe` and `ixgvevf` drivers
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Mellanox `mlx4` and `mlx5` drivers
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Netronome Network Flow Processor
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: QLogic `qede` NIC Driver
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: TUN/TAP
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Virtio
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: With a clear idea of the native operation mode, we can proceed to see how XDP
+    program duties can be directly handled by network cards by using offloaded XDP.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Offloaded XDP
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: In this mode the XDP BPF program is directly offloaded into the NIC instead
+    of being executed on the host CPU. By pushing execution off of the CPU, this mode
+    has high-performance gains over native XDP.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'We can reuse the kernel source tree we just cloned to check what NIC drivers
+    in 4.18 support hardware offload by looking for `XDP_SETUP_PROG_HW`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'That should output something like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: That shows only the Netronome Network Flow Processor (`nfp`) meaning that it
+    can operate in both modes by also supporting hardware offload along with native
+    XDP.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Now a good question for yourself might be, what do I do when I don’t have network
+    cards and drivers to try my XDP programs? The answer is easy, generic XDP!
+  prefs: []
+  type: TYPE_NORMAL
+- en: Generic XDP
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: This is provided as a test-mode for developers who want to write and run XDP
+    programs without having the capabilities of native or offloaded XDP. Generic XDP
+    has been supported since kernel version 4.12\. You can use this mode, for example,
+    on `veth` devices—we use this mode in the subsequent examples to show the capabilities
+    of XDP without requiring you to buy specific hardware to follow along.
+  prefs: []
+  type: TYPE_NORMAL
+- en: But who is the actor responsible for the coordination between all of the components
+    and the operation modes? Continue to the next section to learn about the packet
+    processor.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Packet Processor
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The actor that makes it possible to execute BPF programs on XDP packets and
+    that coordinates the interaction between them and the network stack is the XDP
+    packet processor. The packet processor is the in-kernel component for XDP programs
+    that processes packets on the receive (RX) queue directly as they are presented
+    by the NIC. It ensures that packets are readable and writable and allows you to
+    attach post-processing verdicts in the form of packet processor actions. Atomic
+    program updates and new program loads to the packet processor can be done at runtime
+    without any service interruption in terms of networking and associated traffic.
+    While operating, XDP can be used in “busy polling” mode, allowing you to reserve
+    the CPUs that will have to deal with each RX queue; this avoids context switches
+    and allows immediate packet reactivity upon arrival regardless of IRQ affinities.
+    The other mode XDP can be used in is the “interrupt driven” mode that, on the
+    other hand, does not reserve the CPU but instructs an interrupt acting as an event
+    medium to inform the CPU that it has to deal with a new event while still doing
+    normal processing.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In [Figure 7-1](#xdp-interaction) you can see in the interaction points between
+    RX/TX, applications, the packet processor, and the BPF programs applied to its
+    packets.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Notice that there are a few squares with a string prepended by `XDP_` in [Figure 7-1](#xdp-interaction).
+    Those are the XDP result codes, which we cover next.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Interaction between the XDP packet processor and the network stack, dashed
+    lines represent the packets flow, the bold full line represent the loading of
+    the BPF program in the XDP packet processor.](assets/lbpf_0701.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 7-1\. The packet processor
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: XDP result codes (packet processor actions)
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'After a decision is made about the packet in the packet processor, it can be
+    expressed using one of the five return codes that then can instruct the network
+    driver on how to process the packet. Let’s dive into the actions that the packet
+    processor performs:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Drop (`XDP_DROP`)
+  prefs: []
+  type: TYPE_NORMAL
+- en: Drops the packet. This happens at the earliest RX stage in the driver; dropping
+    a packet simply implies recycling it back into the RX ring queue it just “arrived”
+    on. Dropping the packet as early as possible is key for the denial-of-service
+    (DoS) mitigation use cases. This way, dropped packets use as little CPU processing
+    time and power as possible.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Forward (`XDP_TX`)
+  prefs: []
+  type: TYPE_NORMAL
+- en: Forwards the packet. This can happen before or after the packet has been modified.
+    Forwarding a packet implies bouncing the received packet page back out the same
+    NIC it arrived on.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Redirect (`XDP_REDIRECT`)
+  prefs: []
+  type: TYPE_NORMAL
+- en: Similar to `XDP_TX` in that it is able to transmit the XDP packet, but it does
+    so through another NIC or into a BPF `cpumap`. In the case of a BPF `cpumap`,
+    the CPUs serving XDP on the NIC’s receive queues can continue to do so and push
+    the packet for processing the upper kernel stack to a remote CPU. This is similar
+    to `XDP_PASS`, but with the ability that the XDP BPF program can keep serving
+    the incoming high load as opposed to temporarily spending work on the current
+    packet for pushing into the upper layers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Pass (`XDP_PASS`)
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Passes the packet to the normal network stack for processing. This is equivalent
+    to the default packet handling behavior without XDP. This can be done in one of
+    two ways:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*Normal receive* allocates metadata (`sk_buff`), receives the packet onto the
+    stack, and steers the packet to another CPU for processing. It allows for raw
+    interfaces to user-space. This can happen before or after the packet has been
+    modified.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '*Generic receive offload* (GRO) can perform a receive of large packets and
+    combines packets of the same connection. GRO eventually passes the packet through
+    the “normal receive” flow after processing.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Code error (`XDP_ABORTED`)
+  prefs: []
+  type: TYPE_NORMAL
+- en: Denotes an eBPF program error and results in the packet being dropped. It is
+    not something a functional program should ever use as a return code. For example,
+    `XDP_ABORTED` would be returned if the program divided by zero. `XDP_ABORTED`’s
+    value will always be zero. It passes the `trace_xdp_exception` tracepoint, which
+    can be additionally monitored to detect misbehavior.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'These action codes are expressed in the `linux/bpf.h` header file as follows:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: Because XDP actions determine different behaviors and are an internal mechanism
+    of the packet processor, you can look at a simplified version of [Figure 7-1](#xdp-interaction)
+    focused on only the return actions (see [Figure 7-2](#xdp-result)).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Interaction between XDP actions triggered by a BPF program and the network
+    stack](assets/lbpf_0702.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 7-2\. XDP action codes
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: An interesting thing about XDP programs is that you don’t usually need to write
+    a loader to load them. There is a good loader in most Linux machines implemented
+    by the `ip` command. The next section describes how to use it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: XDP and iproute2 as a Loader
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The `ip` command, available in [iproute2](https://oreil.ly/65zuT), has the ability
+    to act as a frontend to load XDP programs compiled into an ELF file and has full
+    support for maps, map relocation, tail call and object pinning.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Because loading an XDP program can be expressed as a configuration of an existing
+    network interface, the loader is implemented as part of the `ip link` command,
+    which is the one that does network device configuration.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The syntax to load the XDP program is simple:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Let’s analyze this command parameter by parameter:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`ip`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This invokes the `ip` command.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`link`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Configures network interfaces.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`set`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Changes device attributes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`dev eth0`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Specifies the network device on which we want to operate and load the XDP program.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`xdp obj program.o`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Loads an XDP program from the ELF file (object) named `program.o`. The `xdp`
+    part of this command tells the system to use the native driver when it is available
+    and fallback to generic otherwise. You can force using a mode or another by using
+    a more specific selector:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`xdpgeneric` to use generic XDP'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`xdpdrv` to use native XDP'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`xdpoffload` to use offloaded XDP'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`sec mysection`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Specifies the section name `mysection` containing the BPF program to use from
+    the ELF file; if this is not specified, the section named `prog` will be used.
+    If no section is specified in the program, you have to specify `sec .text` in
+    the `ip` invocation.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Let’s see a practical example.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The scenario is that we have a system with a web server on port 8000 for which
+    we want to block any access to its pages on the public-facing NIC of the server
+    by disallowing all the TCP connections to it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The first thing that we will need is the web server in question; if you don’t
+    already have one, you can start one with `python3`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: After your webserver is started, its open port will be shown in the open sockets
+    using `ss`. As you can see the webserver is bound to any interface, `*:8000`,
+    so as of now, any external caller with access to our public interfaces will be
+    able to see its content!
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Socket statistics, `ss` in the terminal, is a command-line utility used to investigate
+    network sockets in Linux. It is effectively a modern version of `netstat`, and
+    its user experience is similar to Netstat, meaning that you can pass the same
+    arguments and get comparable results.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'At this point, we can inspect the network interfaces on the machine that’s
+    running our HTTP server:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Notice that this machine has three interfaces, and the network topology is
+    simple:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`lo`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is just the loopback interface for internal communication.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`enp0s3`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is the management network tier; administrators will use this interface
+    to connect to the web server to do their operations.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`enp0s8`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is the interface open to the public, our web server will need to be hidden
+    from this interface.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Now, before loading any XDP program, we can check open ports on the server from
+    another server that can access its network interface, in our case, with IPv4 `192.168.33.11`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You can check open ports on a remote host by using `nmap` as follows:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: Good! Port 8000 is right there, at this point we need to block it!
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Network Mapper (`nmap`) is a network scanner that can do host, service, network,
+    and port discovery along with operating system detection. Its main use cases are
+    security auditing and network scanning. When scanning a host for open ports, `nmap`
+    will try every port in the specified (or full) range.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Our program will consist of a single source file named *program.c*, so let’s
+    see what we need to write.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'It needs to use the IPv4 `iphdr` and Ethernet Frame `ethhdr` header structs
+    and also protocol constants and other structs. Let’s include the needed headers,
+    as shown here:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: After the headers are included, we can declare the `SEC` macro we already met
+    in the previous chapters, used to declare ELF attributes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Now we can declare the main entry point for our program, `myprogram`, and its
+    ELF section name, `mysection`. Our program takes as input context an `xdp_md`
+    struct pointer, the BPF equivalent of the in-driver `xdp_buff`. By using that
+    as the context, we then define the variables we will use next such as the data
+    pointers, the Ethernet, and IP layer structs:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Because `data` contains the Ethernet frame, we can now extract the IPv4 layer
+    from it. We also check that the offset where we look for the IPv4 layer doesn’t
+    exceed the whole pointer space so that the static verifier stays happy. When the
+    address space is exceeded we just drop the packet:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Now, after all the verifications and setup, we can implement the real logic
+    for the program, which basically drops every TCP packet while allowing anything
+    else:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE14]'
+  prefs: []
+  type: TYPE_PRE
+- en: Now that our program is done, we can save it as *program.c.*
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The next step is to compile the ELF file *program.o* out of our program using
+    Clang. We can do this compilation step outside the target machine because BPF
+    ELF binaries are not platform dependent:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE15]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Now back on the machine hosting our web server, we can finally load `program.o`
+    against the public network interface `enp0s8` using the `ip` utility with the
+    `set` command, as described earlier:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE16]'
+  prefs: []
+  type: TYPE_PRE
+- en: As you might notice, we select the section `mysection` as the entry point for
+    the program.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'At this stage, if that command returned zero as the exit code with no errors,
+    we can check the network interface to see whether the program had been loaded
+    correctly:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE17]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'As you can see, our output for `ip a` now has a new detail; after the MTU,
+    it shows `xdpgeneric/id:32`, which is showing two interesting bits of information:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The driver that had been used, `xdpgeneric`
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The ID of the XDP program, `32`
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'The last step is to verify that the loaded program is in fact doing what it
+    is supposed to do. We can verify that by executing `nmap` again on an external
+    machine to observe that port 8000 is no longer reachable:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE18]'
+  prefs: []
+  type: TYPE_PRE
+- en: Another test to verify that it all works can be trying to access the program
+    through a browser or doing any HTTP request. Any kind of test should fail when
+    targeting `192.168.33.11` as the destination. Good job and congratulations on
+    loading your first XDP program!
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If you followed all of those steps on a machine that you need to restore to
+    its original state, you can always detach the program and turn off XDP for the
+    device:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE19]'
+  prefs: []
+  type: TYPE_PRE
+- en: Interesting! Loading XDP programs seems easy, doesn’t it?
+  prefs: []
+  type: TYPE_NORMAL
+- en: At least when using `iproute2` as the loader, you can skip the part of having
+    to write a loader yourself. In this example, our focus was on `iproute2`, which
+    already implements a loader for XDP programs. However, the programs are in fact
+    BPF programs, so even if `iproute2` can be handy sometimes, you should always
+    remember that you can load your programs using BCC, as shown in the next section,
+    or you can use the `bpf` syscall directly. Having a custom loader has the advantage
+    of allowing you to manage the lifecycle of the program and its interactions with
+    user-space.
+  prefs: []
+  type: TYPE_NORMAL
+- en: XDP and BCC
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Like with any other BPF program, XDP programs can be compiled, loaded, and run
+    using BCC. The following example shows an XDP program that is similar to the one
+    we used for `iproute2` but that has a custom user-space loader made with BCC.
+    The loader in this case is needed because we also want to count the number of
+    packets we encounter while dropping TCP packets.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Like before, we create a kernel-space program named *program.c* first.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In the `iproute2` example, our program needed to import the required headers
+    for struct and function definitions related to BPF and protocols. Here we do the
+    same, but we also declare a map of type `BPF_MAP_TYPE_PERCPU_ARRAY` using the
+    `BPF_TABLE` macro. The map will contain a packet counter for each IP protocol
+    index, which is the reason for the size `256` (the IP specification contains only
+    256 values). We want to use a `BPF_MAP_TYPE_PERCPU_ARRAY` type because that’s
+    the one that guarantees atomicity of the counters at CPU level without locking:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE20]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'After that, we declare our main function, `myprogram`, which takes as a parameter
+    the `xdp_md` struct. The first thing this needs to contain is the variable declarations
+    for the Ethernet IPv4 frames:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE21]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'After we have all the variable declarations done and can access the `data`
+    pointer that now contains the Ethernet frame and the `ip` pointer with the IPv4
+    packet, we can check whether the memory space is out of bounds. If it is, we drop
+    the packet. If the memory space is OK, we extract the protocol and lookup the
+    `packetcnt` array to get the previous value of the packet counter for the current
+    protocol in the variable `idx`. Then we increment the counter by one. When the
+    increment is handled, we can proceed and check whether the protocol is TCP. If
+    it is, we just drop the packet without questioning; otherwise, we allow it:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE22]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Now let’s write the loader: `loader.py`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'It is made of two parts: the actual loading logic and the loop that prints
+    the packet counts.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: For the loading logic, we open our program by reading the file *program.c*.
+    With `load_func`, we instruct the `bpf` syscall to use the `myprogram` function
+    as “main” using the program type `BPF.XDP`. That stands for `BPF_PROG_TYPE_XDP`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: After the loading, we gain access to the BPF map named `packetcnt` using `get_table`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Make sure to change the `device` variable from `enp0s8` to the interface you
+    want to work on.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE23]'
+  prefs: []
+  type: TYPE_PRE
+- en: The remaining part we need to write is the actual loop to print out the packet
+    counts. Without this, our program will already be able to drop the packets, but
+    we want to see what’s going on there. We have two loops. The outer loop gets keyboard
+    events and terminates when there’s a signal to interrupt the program. When the
+    outer loop breaks, the `remove_xdp` function is called, and the interface is freed
+    from the XDP program.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Within the outer loop, the inner loop has the duty of getting back the values
+    from the `packetcnt` map and prints them in the format `*protocol*: *counter*
+    pkt/s`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE24]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Good! Now we can test that program by simply executing the loader with root
+    privileges:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE25]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'That will output a line every second with the packet counters:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE26]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'We encountered only two types of packets: `6` stands for TCP, and `17` stands
+    for UDP.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: At this point your brain will probably start thinking about ideas and projects
+    for using XDP, and that’s extremely good! But as always, in software engineering
+    if you want to make a good program, it’s important to write tests first—or at
+    least write tests! The next section covers how you can unit-test XDP programs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Testing XDP Programs
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: When working on XDP programs, the most difficult part is that in order to test
+    the actual packet flow, you need to reproduce an environment in which all of the
+    components are aligned to provide the correct packets. Although it’s true that
+    with virtualization technologies nowadays, creating a working environment can
+    be an easy task, it’s also true that a complicated setup can limit the reproducibility
+    and programmability of the test environment. In addition to that, when analyzing
+    the performance aspects of high-frequency XDP programs in a virtualized environment,
+    the cost of virtualization makes the test ineffective because it’s much more substantial
+    than the actual packet processing.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Fortunately, kernel developers have a solution. They have implemented a command
+    that can be used to test XDP programs, called `BPF_PROG_TEST_RUN`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Essentially, `BPF_PROG_TEST_RUN` gets an XDP program to execute, along with
+    an input packet and an output packet. When the program is executed, the output
+    packet variable is populated, and the return XDP code is returned. This means
+    you can use the output packet and return code in your test assertions! This technique
+    can also be used for `skb` programs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: For the sake of completeness and to make this example simple, we use Python
+    and its unit testing framework.
+  prefs: []
+  type: TYPE_NORMAL
+- en: XDP Testing Using the Python Unit Testing Framework
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Writing XDP tests with `BPF_PROG_TEST_RUN` and integrating them with the Python
+    unit testing framework `unittest` is a good idea for several reasons:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: You can load and execute BPF programs using the Python *BCC* library.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Python has one of the best packet crafting and introspection libraries available:
+    `scapy`.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Python integrates with C structs using `ctypes`.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'As said, we need to import all of the needed libraries; that’s the first thing
+    we will do in a file named *test_xdp.py*:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE27]'
+  prefs: []
+  type: TYPE_PRE
+- en: After all the needed libraries are imported, we can proceed and create a test
+    case class named `XDPExampleTestCase`. This test class will contain all of our
+    test cases and a member method (`_xdp_test_run`) that we will use to do assertions
+    and call `bpf_prog_test_run`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In the following code you can see what `_xdp_test_run` looks like:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE28]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'It takes three arguments:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`given_packet`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is the packet we test our XDP program against; it is the raw packet received
+    by the interface.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`expected_packet`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is the packet we expect to receive back after the XDP program processes
+    it; when the XDP program returns an `XDP_DROP` or `XDP_ABORT`, we expect this
+    to be `None`; in all the other cases, the packet remains the same as `given_packet`
+    or can be modified.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`expected_return`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is the expected return of the XDP program after processing our `given_packet`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Besides the arguments, the body of this method is simple. It does conversion
+    to C types using the *ctypes* library, and then it calls the `libbcc` equivalent
+    of `BPF_PROG_TEST_RUN`, `libbcc.lib.bpf_prog_test_run`, using as test arguments
+    our packets and their metadata. Then it does all of the assertions based on the
+    results from the test call along with the given values.
+  prefs: []
+  type: TYPE_NORMAL
+- en: After we have that function we can basically just write test cases by crafting
+    different packets to test how they behave when passing through our XDP program,
+    but before doing that, we need to do a `setUp` method for our test.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This part is crucial because the setup does the actual load of our BPF program
+    named `myprogram` by opening and compiling a source file named *program.c* (that’s
+    the file where our XDP code will be):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE29]'
+  prefs: []
+  type: TYPE_PRE
+- en: After the setup is done, the next step is to write the first behavior we want
+    to observe. Without being too imaginative, we want to test that we will drop all
+    TCP packets.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'So we craft a packet in `given_packet`, which is just a TCP packet over IPv4\.
+    Then, using our assertion method, `_xdp_test_run`, we just verify that given our
+    packet, we will get back an `XDP_DROP` with no return packet:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE30]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Because that is not enough, we also want to explicitly test that all UDP packets
+    are allowed. We then craft two UDP packets, one for `given_packet` and one for
+    `expected_packet`, that are essentially the same. In that way we are also testing
+    that UDP packets are not modified while being allowed with `XDP_PASS`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE31]'
+  prefs: []
+  type: TYPE_PRE
+- en: To make things a bit more complicated, we decided that this system will then
+    allow TCP packets on the condition that they go to port 9090\. When they do, they
+    will also be rewritten to change their destination MAC address to redirect to
+    a specific network interface with address `08:00:27:dd:38:2a`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Here’s the test case to do that. The `given_packet` has `9090` as a destination
+    port, and we require the `expected_packet` with the new destination and port `9090`
+    again:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE32]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'With plenty of test cases, we now write the entry point for our test program,
+    which will just call `unittest.main()` that then loads and executes our tests:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE33]'
+  prefs: []
+  type: TYPE_PRE
+- en: We have now written tests for our XDP program first! Now that we have the test
+    acting as a specific example of what we want to have, we can write the XDP program
+    that implements it by creating a file named *program.c*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Our program is simple. It just contains the `myprogram` XDP function with the
+    logic we just tested. As always, the first thing we need to do is to include the
+    needed headers. Those headers are self-explainatory. We have a BPF program that
+    will process TCP/IP flowing over Ethernet:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE34]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Again, as with the other programs in this chapter, we need to check offsets
+    and fill variables for the three layers of our packet: `ethhdr`, `iphdr`, and
+    `tcphdr`, respectively, for Ethernet, IPv4, and TCP:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE35]'
+  prefs: []
+  type: TYPE_PRE
+- en: Once we have the values we can implement our logic.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The first thing we do is to check whether the protocol is TCP `ip->protocol
+    == IPPROTO_TCP`. When it is, we always do an `XDP_DROP`; otherwise, we do an `XDP_PASS`
+    for everything else.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In the check for the TCP protocol, we do another control to check whether the
+    destination port is `9090`, `th->dest == htons(9090)`; if it is, we change the
+    destination MAC address at the Ethernet layer and return `XDP_TX` to bounce the
+    packet through the same NIC:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE36]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Amazing! Now we can just run our tests:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE37]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The output of it will just report that the three tests passed:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE38]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'At this point, breaking things is easier! We can just change the last `XDP_PASS`
+    to `XDP_DROP` in *program.c* and observe what happens:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE39]'
+  prefs: []
+  type: TYPE_PRE
+- en: Our test failed—the status code did not match, and the test framework reported
+    an error. That’s exactly what we wanted! This is an effective testing framework
+    to write XDP programs with confidence. We now have the ability to make assertions
+    on specific steps and change them accordingly to the behavior that we want to
+    obtain. Then we write the matching code to express that behavior in the form of
+    an XDP program.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: MAC address is short for Media Access Controll address. It is a unique identifier
+    made of two groups of hexadecimal digits that every network interface has and
+    is used in the data link layer (layer 2 in the OSI model) to interconnect devices
+    over technologies like Ethernet, Bluetooth, and WiFi.
+  prefs: []
+  type: TYPE_NORMAL
+- en: XDP Use Cases
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: While approaching XDP, it is certainly useful to understand the use cases for
+    which it has been employed by various organizations around the globe. This can
+    help you to imagine why using XDP is better than other techniques such as socket
+    filtering or Traffic Control in certain cases.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s begin with a common one: monitoring.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Monitoring
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Nowadays, most of the network monitoring systems are implemented either by writing
+    kernel modules or by accessing proc files from user-space. Writing, distributing,
+    and compiling kernel modules is not a task for everyone; it’s a dangerous operation.
+    They are not easy to maintain and debug either. However, the alternative might
+    be even worse. To obtain the same kind of information, such as how many packets
+    a card received in a second, you’d need to open and part a file, in this case
+    */sys/class/net/eth0/statistics/rx_packets*. This might seem like a good idea,
+    but it requires a lot of computing just to obtain some simple information, because
+    using the open syscall is not cheap in some cases.
+  prefs: []
+  type: TYPE_NORMAL
+- en: So, we need a solution that allows us to implement features similar to the ones
+    of a kernel module without having to lose on performance. XDP is perfect for that,
+    because we can use an XDP program to send the data we want to extract in a map.
+    Then the map is consumed by a loader that can store the metrics into a storage
+    backend and apply algorithms to it or plot the results in a graph.
+  prefs: []
+  type: TYPE_NORMAL
+- en: DDoS Mitigation
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Being able to see packets at the NIC level ensures that any possible packet
+    is intercepted at the first stage, when the system didn’t spend enough computing
+    power yet to understand whether the packets will be useful for the system. In
+    a typical scenario, a `bpf` map can instruct an XDP program to `XDP_DROP` packets
+    from a certain source. That packet list can be generated in user-space after analyzing
+    packets received via another map. Once there’s a match between a packet flowing
+    into the XDP program and an element of the list, the mitigation occurs. The packet
+    is dropped, and the kernel didn’t even need to spend a CPU cycle to handle it.
+    That has the result of making the attacker goal difficult to achieve because,
+    in this case, it wasn’t able to waste any expensive computing resources.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Load Balancing
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: An interesting use case for XDP programs, is load balancing; however, XDP can
+    retransmit packets only on the same NIC where they arrived. This means that XDP
+    is not the best option to implement a classic load balancer that sits in front
+    of all your servers and forwards traffic to them. However, this does not mean
+    that XDP is not good for this use case. If we move load balancing from an external
+    server to the same machines serving the application, you immediately see how their
+    NICs can be used to do the job.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In that way, we can create a distributed load balancer where each machine hosting
+    the application helps spread the traffic to the appropriate servers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Firewalling
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: When people think of firewalling on Linux, they typically think of `iptables`
+    or `netfilter`. With XDP, you can get the same functionality in a completely programmable
+    way directly in the NIC or its driver. Usually, firewalls are expensive machines
+    sitting on top of the network stack or between nodes to control what their communication
+    looks like. When using XDP, however, it’s immediately clear that because XDP programs
+    are very cheap and fast, we could implement the firewalling logic directly into
+    a nodes’ NICs instead of having a set of dedicated machines. A common use case
+    is to have an XDP loader that controls a map with a set of rules changed with
+    a remote procedure call API. The set of rules in the map then is dynamically passed
+    to the XDP programs loaded into every specific machine, to control what it can
+    receive, from who, and in which situation.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This alternative doesn’t just make firewalling less expensive; it allows every
+    node to deploy its own level of firewalling without relying on user-space software
+    or the kernel to do that. When this is deployed using offloaded XDP as the operation
+    mode, we obtain the maximum advantage because the processing is not even done
+    by the main node CPU.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Conclusion
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: What great skills you have now! I promise that XDP will help you think about
+    network flows in a completely different way from now on. Having to rely on tools
+    like `iptables` or other user-space tools when dealing with network packets is
+    often frustrating and slow. XDP is interesting because it is faster as a result
+    of its direct packet processing capabilities, and because you can write your own
+    logic to deal with the network packets. Because all of that arbitrary code can
+    work with maps and interact with other BPF programs, you have an entire world
+    of possible use cases to invent and explore for your own architectures!
+  prefs: []
+  type: TYPE_NORMAL
+- en: Even though it is not about networking, the next chapter returns to a lot of
+    the concepts covered here and in [Chapter 6](ch06.html#linux_networking). Again,
+    BPF is used to filter some conditions based on a given input and to filter what
+    a program can do. Don’t forget that the *F* in BPF stands for filter!
+  prefs: []
+  type: TYPE_NORMAL

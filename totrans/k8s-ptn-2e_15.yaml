@@ -1,0 +1,529 @@
+- en: Chapter 12\. Stateful Service
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Distributed stateful applications require features such as persistent identity,
+    networking, storage, and ordinality. The *Stateful Service* pattern describes
+    the StatefulSet primitive that provides these building blocks with strong guarantees
+    ideal for the management of stateful applications.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'We have seen many Kubernetes primitives for creating distributed applications:
+    containers with health checks and resource limits, Pods with multiple containers,
+    dynamic cluster-wide placements, batch jobs, scheduled jobs, singletons, and more.
+    The common characteristic of these primitives is that they treat the managed application
+    as a stateless application composed of identical, swappable, and replaceable containers
+    and comply with the [twelve-factor app principles](https://12factor.net).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'It is a significant boost to have a platform taking care of the placement,
+    resiliency, and scaling of stateless applications, but there is still a large
+    part of the workload to consider: stateful applications in which every instance
+    is unique and has long-lived characteristics.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the real world, behind every highly scalable stateless service is a stateful
+    service, typically in the shape of a data store. In the early days of Kubernetes,
+    when it lacked support for stateful workloads, the solution was placing stateless
+    applications on Kubernetes to get the benefits of the cloud native model and keeping
+    stateful components outside the cluster, either on a public cloud or on-premises
+    hardware, managed with the traditional noncloud native mechanisms. Considering
+    that every enterprise has a multitude of stateful workloads (legacy and modern),
+    the lack of support for stateful workloads was a significant limitation in Kubernetes,
+    which was known as a universal cloud native platform.
+  prefs: []
+  type: TYPE_NORMAL
+- en: But what are the typical requirements of a stateful application? We could deploy
+    a stateful application such as Apache ZooKeeper, MongoDB, Redis, or MySQL by using
+    a Deployment, which could create a ReplicaSet with `replicas=1` to make it reliable,
+    use a Service to discover its endpoint, and use PersistentVolumeClaim (PVC) and
+    PersistentVolume (PV) as permanent storage for its state.
+  prefs: []
+  type: TYPE_NORMAL
+- en: While that is mostly true for a single-instance stateful application, it is
+    not entirely true, as a ReplicaSet does not guarantee At-Most-One semantics, and
+    the number of replicas can vary temporarily. Such a situation can be disastrous
+    and lead to data loss for distributed stateful applications. Also, the main challenges
+    arise when it is a distributed stateful service that is composed of multiple instances.
+    A stateful application composed of multiple clustered services requires multifaceted
+    guarantees from the underlying infrastructure. Let’s see some of the most common
+    long-lived persistent prerequisites for distributed stateful applications.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Storage
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: We could easily increase the number of `replicas` in a ReplicaSet and end up
+    with a distributed stateful application. However, how do we define the storage
+    requirements in such a case? Typically, a distributed stateful application such
+    as those mentioned previously would require dedicated, persistent storage for
+    every instance. A ReplicaSet with `replicas=3` and a PVC definition would result
+    in all three Pods attached to the same PV. While the ReplicaSet and the PVC ensure
+    the instances are up and the storage is attached to whichever node the instances
+    are scheduled on, the storage is not dedicated but shared among all Pod instances.
+  prefs: []
+  type: TYPE_NORMAL
+- en: A workaround is for the application instances to share storage and have an in-app
+    mechanism to split the storage into subfolders and use it without conflicts. While
+    doable, this approach creates a single point of failure with the single storage.
+    Also, it is error-prone as the number of Pods changes during scaling, and it may
+    cause severe challenges around preventing data corruption or loss during scaling.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Another workaround is to have a separate ReplicaSet (with `replicas=1`) for
+    every instance of the distributed stateful application. In this scenario, every
+    ReplicaSet would get its PVC and dedicated storage. The downside of this approach
+    is that it is intensive in manual labor: scaling up requires creating a new set
+    of ReplicaSet, PVC, or Service definitions. This approach lacks a single abstraction
+    for managing all instances of the stateful application as one.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Networking
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Similar to the storage requirements, a distributed stateful application requires
+    a stable network identity. In addition to storing application-specific data into
+    the storage space, stateful applications also store configuration details such
+    as hostname and connection details of their peers. That means every instance should
+    be reachable in a predictable address that should not change dynamically, as is
+    the case with Pod IP addresses in a ReplicaSet. Here we could address this requirement
+    again through a workaround: create a Service per ReplicaSet and have `replicas=1`.
+    However, managing such a setup is manual work, and the application itself cannot
+    rely on a stable hostname because it changes after every restart and is also not
+    aware of the Service name it is accessed from.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Identity
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: As you can see from the preceding requirements, clustered stateful applications
+    depend heavily on every instance having a hold of its long-lived storage and network
+    identity. That is because in a stateful application, every instance is unique
+    and knows its own identity, and the main ingredients of that identity are the
+    long-lived storage and the networking coordinates. To this list, we could also
+    add the identity/name of the instance (some stateful applications require unique
+    persistent names), which in Kubernetes would be the Pod name. A Pod created with
+    ReplicaSet would have a random name and would not preserve that identity across
+    a restart.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Ordinality
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: In addition to a unique and long-lived identity, the instances of clustered
+    stateful applications have a fixed position in the collection of instances. This
+    ordering typically impacts the sequence in which the instances are scaled up and
+    down. However, it can also be used for data distribution or access and in-cluster
+    behavior positioning such as locks, singletons, or leaders.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Other Requirements
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Stable and long-lived storage, networking, identity, and ordinality are among
+    the collective needs of clustered stateful applications. Managing stateful applications
+    also carries many other specific requirements that vary case by case. For example,
+    some applications have the notion of a quorum and require a minimum number of
+    instances to always be available; some are sensitive to ordinality, and some are
+    fine with parallel Deployments; and some tolerate duplicate instances, and some
+    don’t. Planning for all these one-off cases and providing generic mechanisms is
+    an impossible task, and that’s why Kubernetes also allows you to create CustomResourceDefinitions
+    (CRDs) and *Operators* for managing applications with bespoke requirements. The
+    *Operator* pattern is explained in [Chapter 28](ch28.html#Operator).
+  prefs: []
+  type: TYPE_NORMAL
+- en: We have seen some common challenges of managing distributed stateful applications
+    and a few less-than-ideal workarounds. Next, let’s check out the Kubernetes native
+    mechanism for addressing these requirements through the StatefulSet primitive.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'To explain what StatefulSet provides for managing stateful applications, we
+    occasionally compare its behavior to the already-familiar ReplicaSet primitive
+    that Kubernetes uses for running stateless workloads. In many ways, StatefulSet
+    is for managing pets, and ReplicaSet is for managing cattle. Pets versus cattle
+    is a famous (but also a controversial) analogy in the DevOps world: identical
+    and replaceable servers are referred to as cattle, and nonfungible unique servers
+    that require individual care are referred to as pets. Similarly, StatefulSet (initially
+    inspired by the analogy and named PetSet) is designed for managing nonfungible
+    Pods, as opposed to ReplicaSet, which is for managing identical replaceable Pods.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Let’s explore how StatefulSets work and how they address the needs of stateful
+    applications. [Example 12-1](#ex-statefulset-example-statefulset) is our random-generator
+    service as a StatefulSet.^([1](ch12.html#idm45902101914272))
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 12-1\. StatefulSet definition for a stateful application
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](assets/1.png)](#co_stateful_service_CO1-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Name of the StatefulSet is used as prefix for the generated node names.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](assets/2.png)](#co_stateful_service_CO1-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: References the mandatory Service defined in [Example 12-2](#ex-statefulset-example-service).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![3](assets/3.png)](#co_stateful_service_CO1-3)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Two Pod members in the StatefulSet named *rg-0* and *rg-1*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![4](assets/4.png)](#co_stateful_service_CO1-4)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Template for creating a PVC for each Pod (similar to the Pod’s template).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Rather than going through the definition in [Example 12-1](#ex-statefulset-example-statefulset)
+    line by line, we explore the overall behavior and the guarantees provided by this
+    StatefulSet definition.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Storage
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: While it is not always necessary, the majority of stateful applications store
+    state and thus require per-instance-based dedicated persistent storage. The way
+    to request and associate persistent storage with a Pod in Kubernetes is through
+    PVs and PVCs. To create PVCs the same way it creates Pods, StatefulSet uses a
+    `volumeClaimTemplates` element. This extra property is one of the main differences
+    between a StatefulSet and a ReplicaSet, which has a `persistentVolumeClaim` element.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Rather than referring to a predefined PVC, StatefulSets create PVCs by using
+    `volumeClaimTemplates` on the fly during Pod creation. This mechanism allows every
+    Pod to get its own dedicated PVC during initial creation as well as during scaling
+    up by changing the `replicas` count of the StatefulSets.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As you probably realize, we said PVCs are created and associated with the Pods,
+    but we didn’t say anything about PVs. That is because StatefulSets do not manage
+    PVs in any way. The storage for the Pods must be provisioned in advance by an
+    admin or provisioned on demand by a PV provisioner based on the requested storage
+    class and ready for consumption by the stateful Pods.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Note the asymmetric behavior here: scaling up a StatefulSet (increasing the
+    `replicas` count) creates new Pods and associated PVCs. Scaling down deletes the
+    Pods, but it does not delete any PVCs (or PVs), which means the PVs cannot be
+    recycled or deleted, and Kubernetes cannot free the storage. This behavior is
+    by design and driven by the presumption that the storage of stateful applications
+    is critical and that an accidental scale-down should not cause data loss. If you
+    are sure the stateful application has been scaled down on purpose and has replicated/drained
+    the data to other instances, you can delete the PVC manually, which allows subsequent
+    PV recycling.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Networking
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Each Pod created by a StatefulSet has a stable identity generated by the StatefulSet’s
+    name and an ordinal index (starting from 0). Based on the preceding example, the
+    two Pods are named `rg-0` and `rg-1`. The Pod names are generated in a predictable
+    format that differs from the ReplicaSet’s Pod-name-generation mechanism, which
+    contains a random suffix.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Dedicated scalable persistent storage is an essential aspect of stateful applications
+    and so is networking.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In [Example 12-2](#ex-statefulset-example-service), we define a *headless* Service.
+    In a headless Service, `clusterIP` is set to `None`, which means we don’t want
+    a kube-proxy to handle the Service, and we don’t want a cluster IP allocation
+    or load balancing. Then why do we need a Service?
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 12-2\. Service for accessing StatefulSet
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](assets/1.png)](#co_stateful_service_CO2-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Declares this Service as headless.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Stateless Pods created through a ReplicaSet are assumed to be identical, and
+    it doesn’t matter on which one a request lands (hence the load balancing with
+    a regular Service). But stateful Pods differ from one another, and we may need
+    to reach a specific Pod by its coordinates.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'A headless Service with selectors (notice `.selector.app == random-generator`)
+    enables exactly this. Such a Service creates endpoint records in the API Server
+    and creates DNS entries to return A records (addresses) that point directly to
+    the Pods backing the Service. Long story short, each Pod gets a DNS entry where
+    clients can directly reach out to it in a predictable way. For example, if our
+    `random-generator` Service belongs to the `default` namespace, we can reach our
+    `rg-0` Pod through its fully qualified domain name: `rg-0.random-generator.default.svc.cluster.local`,
+    where the Pod’s name is prepended to the Service name. This mapping allows other
+    members of the clustered application or other clients to reach specific Pods if
+    they wish to.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'We can also perform DNS lookup for Service (SRV) records (e.g., through `dig
+    SRV random-generator.default.svc.cluster.local`) and discover all running Pods
+    registered with the StatefulSet’s governing Service. This mechanism allows dynamic
+    cluster member discovery if any client application needs to do so. The association
+    between the headless Service and the StatefulSet is not only based on the selectors,
+    but the StatefulSet should also link back to the Service by its name as `serviceName:
+    "random-generator"`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Having dedicated storage defined through `volumeClaimTemplates` is not mandatory,
+    but linking to a Service through `serviceName` field is. The governing Service
+    must exist before the StatefulSet is created and is responsible for the network
+    identity of the set. You can always create other types of Services that also load
+    balance across your stateful Pods if that is what you want.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As [Figure 12-1](#img-stateful-service-application) shows, StatefulSets offer
+    a set of building blocks and guaranteed behavior needed for managing stateful
+    applications in a distributed environment. Your job is to choose and use them
+    in a meaningful way for your stateful use case.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![A Distributed Stateful Application on Kubernetes](assets/kup2_1201.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 12-1\. A distributed stateful application on Kubernetes
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Identity
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '*Identity* is the meta building block all other StatefulSet guarantees are
+    built upon. A predictable Pod name and identity is generated based on StatefulSet’s
+    name. We then use that identity to name PVCs, reach out to specific Pods through
+    headless Services, and more. You can predict the identity of every Pod before
+    creating it and use that knowledge in the application itself if needed.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Ordinality
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: By definition, a distributed stateful application consists of multiple instances
+    that are unique and nonswappable. In addition to their uniqueness, instances may
+    also be related to one another based on their instantiation order/position, and
+    this is where the *ordinality* requirement comes in.
+  prefs: []
+  type: TYPE_NORMAL
+- en: From a StatefulSet point of view, the only place where ordinality comes into
+    play is during scaling. Pods have names that have an ordinal suffix (starting
+    from 0), and that Pod creation order also defines the order in which Pods are
+    scaled up and down (in reverse order, from *n* – 1 to 0).
+  prefs: []
+  type: TYPE_NORMAL
+- en: If we create a ReplicaSet with multiple replicas, Pods are scheduled and started
+    together without waiting for the first one to start successfully (running and
+    ready status, as described in [Chapter 4, “Health Probe”](ch04.html#HealthProbe)).
+    The order in which Pods are starting and are ready is not guaranteed. It is the
+    same when we scale down a ReplicaSet (either by changing the `replicas` count
+    or deleting it). All Pods belonging to a ReplicaSet start shutting down simultaneously
+    without any ordering and dependency among them. This behavior may be faster to
+    complete but is not preferred for stateful applications, especially if data partitioning
+    and distribution are involved among the instances.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To allow proper data synchronization during scale-up and -down, StatefulSet
+    by default performs sequential startup and shutdown. That means Pods start from
+    the first one (with index 0), and only when that Pod has successfully started
+    is the next one scheduled (with index 1), and the sequence continues. During scaling
+    down, the order reverses—first shutting down the Pod with the highest index, and
+    only when it has shut down successfully is the Pod with the next lower index stopped.
+    This sequence continues until the Pod with index 0 is terminated.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Other Features
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'StatefulSets have other aspects that are customizable to suit the needs of
+    stateful applications. Each stateful application is unique and requires careful
+    consideration while trying to fit it into the StatefulSet model. Let’s see a few
+    more Kubernetes features that may turn out to be useful while taming stateful
+    applications:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Partitioned updates
+  prefs: []
+  type: TYPE_NORMAL
+- en: We described earlier the sequential ordering guarantees when scaling a StatefulSet.
+    As for updating an already-running stateful application (e.g., by altering the
+    `.spec.template` element), StatefulSets allow phased rollout (such as a canary
+    release), which guarantees a certain number of instances to remain intact while
+    applying updates to the rest of the instances.
+  prefs: []
+  type: TYPE_NORMAL
+- en: By using the default rolling update strategy, you can partition instances by
+    specifying a `.spec.updateStrategy.rollingUpdate.partition` number. The parameter
+    (with a default value of 0) indicates the ordinal at which the StatefulSet should
+    be partitioned for updates. If the parameter is specified, all Pods with an ordinal
+    index greater than or equal to the `partition` are updated, while all Pods with
+    an ordinal less than that are not updated. That is true even if the Pods are deleted;
+    Kubernetes recreates them at the previous version. This feature can enable partial
+    updates to clustered stateful applications (ensuring the quorum is preserved,
+    for example) and then roll out the changes to the rest of the cluster by setting
+    the `partition` back to 0.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Parallel deployments
+  prefs: []
+  type: TYPE_NORMAL
+- en: When we set `.spec.podManagementPolicy` to `Parallel`, the StatefulSet launches
+    or terminates all Pods in parallel and does not wait for Pods to run and become
+    ready or completely terminated before moving to the next one. If sequential processing
+    is not a requirement for your stateful application, this option can speed up operational
+    procedures.
+  prefs: []
+  type: TYPE_NORMAL
+- en: At-Most-One Guarantee
+  prefs: []
+  type: TYPE_NORMAL
+- en: Uniqueness is among the fundamental attributes of stateful application instances,
+    and Kubernetes guarantees that uniqueness by making sure no two Pods of a StatefulSet
+    have the same identity or are bound to the same PV. In contrast, ReplicaSet offers
+    the *At-Least-X-Guarantee* for its instances. For example, a ReplicaSet with two
+    replicas tries to keep at least two instances up and running at all times. Even
+    if there is occasionally a chance for that number to go higher, the controller’s
+    priority is not to let the number of Pods go below the specified number. It is
+    possible to have more than the specified number of replicas running when a Pod
+    is being replaced by a new one and the old Pod is still not fully terminated.
+    Or, it can go higher if a Kubernetes node is unreachable with `NotReady` state
+    but still has running Pods. In this scenario, the ReplicaSet’s controller would
+    start new Pods on healthy nodes, which could lead to more running Pods than desired.
+    That is all acceptable within the semantics of At-Least-X.
+  prefs: []
+  type: TYPE_NORMAL
+- en: A StatefulSet controller, on the other hand, makes every possible check to ensure
+    there are no duplicate Pods—hence the *At-Most-One Guarantee*. It does not start
+    a Pod again unless the old instance is confirmed to be shut down completely. When
+    a node fails, it does not schedule new Pods on a different node unless Kubernetes
+    can confirm that the Pods (and maybe the whole node) are shut down. The At-Most-One
+    semantics of StatefulSets dictates these rules.
+  prefs: []
+  type: TYPE_NORMAL
+- en: It is still possible to break these guarantees and end up with duplicate Pods
+    in a StatefulSet, but this requires active human intervention. For example, deleting
+    an unreachable node resource object from the API Server while the physical node
+    is still running would break this guarantee. Such an action should be performed
+    only when the node is confirmed to be dead or powered down and no Pod processes
+    are running on it. Or, for example, when you are forcefully deleting a Pod with
+    `kubectl delete pods <pod> --grace-period=0 --force`, which does not wait for
+    a confirmation from the Kubelet that the Pod is terminated. This action immediately
+    clears the Pod from the API Server and causes the StatefulSet controller to start
+    a replacement Pod that could lead to duplicates.
+  prefs: []
+  type: TYPE_NORMAL
+- en: We discuss other approaches to achieving singletons in more depth in [Chapter 10,
+    “Singleton Service”](ch10.html#SingletonService).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: In this chapter, we saw some of the standard requirements and challenges in
+    managing distributed stateful applications on a cloud native platform. We discovered
+    that handling a single-instance stateful application is relatively easy, but handling
+    distributed state is a multidimensional challenge. While we typically associate
+    the notion of “state” with “storage,” here we have seen multiple facets of state
+    and how it requires different guarantees from different stateful applications.
+    In this space, StatefulSets is an excellent primitive for implementing distributed
+    stateful applications generically. It addresses the need for persistent storage,
+    networking (through Services), identity, ordinality, and a few other aspects.
+    It provides a good set of building blocks for managing stateful applications in
+    an automated fashion, making them first-class citizens in the cloud native world.
+  prefs: []
+  type: TYPE_NORMAL
+- en: StatefulSets are a good start and a step forward, but the world of stateful
+    applications is unique and complex. In addition to the stateful applications designed
+    for a cloud native world that can fit into a StatefulSet, a ton of legacy stateful
+    applications exist that have not been designed for cloud native platforms and
+    have even more needs. Luckily Kubernetes has an answer for that too. The Kubernetes
+    community has realized that rather than modeling different workloads through Kubernetes
+    resources and implementing their behavior through generic controllers, it should
+    allow users to implement their custom controllers and even go one step further
+    and allow modeling application resources through custom resource definitions and
+    behavior through operators.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In Chapters [27](ch27.html#Controller) and [28](ch28.html#Operator), you will
+    learn about the related *Controller* and *Operator* patterns, which are better
+    suited for managing complex stateful applications in cloud native environments.
+  prefs: []
+  type: TYPE_NORMAL
+- en: More Information
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: '[Stateful Service Example](https://oreil.ly/FXeca)'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[StatefulSet Basics](https://oreil.ly/NdHnS)'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[StatefulSets](https://oreil.ly/WyxHN)'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[Example: Deploying Cassandra with a Stateful Set](https://oreil.ly/YECff)'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[Running ZooKeeper, a Distributed System Coordinator](https://oreil.ly/WzQXP)'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[Headless Services](https://oreil.ly/7GPda)'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[Force Delete StatefulSet Pods](https://oreil.ly/ZRTlO)'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[Graceful Scaledown of Stateful Apps in Kubernetes](https://oreil.ly/7Zw-5)'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: ^([1](ch12.html#idm45902101914272-marker)) Let’s assume we have invented a highly
+    sophisticated way of generating random numbers in a distributed Random Number
+    Generator (RNG) cluster with several instances of our service as nodes. Of course,
+    that’s not true, but for this example’s sake, it’s a good enough story.
+  prefs: []
+  type: TYPE_NORMAL

@@ -1,0 +1,1527 @@
+- en: Chapter 4\. Access Patterns
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: '*Access patterns* describe how an application uses MySQL to access data. Changing
+    access patterns has a powerful effect on MySQL performance, but it usually requires
+    a greater level of effort than other optimizations. That’s why it’s the last leg
+    of the journey mapped out in [“Improving Query Response Time”](ch01.html#query-optimization):
+    first optimize queries, indexes, and data—then optimize access patterns. Before
+    we begin, let’s think again about the rocks from [Chapter 3](ch03.html#ch03).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Suppose you have a truck, which is analogous to MySQL. If used efficiently,
+    the truck makes moving any pile of rocks uphill easy. But if used inefficiently,
+    the truck provides little value, and it might even make the job take longer than
+    necessary. For example, you could use the truck to haul the cobbles *one by one*
+    up the hill. That’s easy for you (and the truck), but it’s terribly inefficient
+    and time-consuming. A truck is only as useful as the person who uses it. Likewise,
+    MySQL is only as useful as the application that uses it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Sometimes, an engineer puzzles over why MySQL isn’t running faster. For example,
+    when MySQL is executing 5,000 QPS and the engineer wonders why it’s not executing
+    9,000 QPS instead. Or when MySQL is using 50% CPU and the engineer wonders why
+    it’s not using 90% CPU instead. The engineer is unlikely to find an answer because
+    they’re focused on the effect (MySQL) rather than the cause: the application.
+    Metrics like QPS and CPU usage say very little—almost nothing—about MySQL; they
+    only reflect how the application uses MySQL.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: MySQL is only as fast and efficient as the application that uses it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'An application can outgrow the capacity of a *single* MySQL instance, but again:
+    that says more about the application than MySQL because there are innumerable
+    large, high-performance applications using a single MySQL instance. Without a
+    doubt, MySQL is fast enough for the application. The real question is: does the
+    application use MySQL efficiently? After many years with MySQL, hundreds of different
+    applications, and thousands of different MySQL instances, I assure you: MySQL
+    performance is limited by the application, not the other way around.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This chapter centers on data access patterns that determine how you can change
+    the application to use MySQL efficiently. There are six major sections. The first
+    clarifies what MySQL does apart from the application and why it’s important. The
+    second proves that database performance does not scale linearly; instead, there
+    is a limit past which performance destabilizes. The third contemplates why a Ferrari
+    is faster than a Toyota even though both car brands work roughly the same. The
+    answer explains why some applications excel with MySQL while others can’t get
+    out of first gear. The fourth enumerates data access patterns. The fifth presents
+    several application changes to improve or modify data access patterns. The sixth
+    revisits an old friend: better, faster hardware.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: MySQL Does Nothing
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'When the application is idle, MySQL is idle. When the application is busy executing
+    queries, MySQL is busy executing those queries. MySQL has several background tasks
+    (like [“Page flushing”](ch06.html#metrics-page-flushing)), but they are only busy
+    reading and writing data for those queries. In fact, background tasks increase
+    performance by allowing foreground tasks—executing queries—to defer or avoid slow
+    operations. Therefore, if MySQL is running slowly and there are no external issues,
+    the cause can only be what drives MySQL: the application.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: QPS is directly and only attributable to the application. Without the application,
+    QPS is zero.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Some data stores have *ghosts in the machine*: internal processes that can
+    run at any time and degrade performance if they run at the worst time: when the
+    data store is busy executing queries. (Compaction and vacuuming are two examples—MySQL
+    has neither.) MySQL has no ghosts in the machine—unless the application is executing
+    queries that you don’t know about. Knowing this helps you avoid looking for nonexistent
+    causes and, more importantly, focus on what MySQL is busy doing: executing queries.
+    From [Chapter 1](ch01.html#ch01), you know how to see that: [“Query profile”](ch01.html#query-profile).
+    A query profile shows more than just slow queries, it shows what MySQL is busy
+    doing.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Queries affect other queries. The general term for this is *query contention*:
+    when queries compete and wait for shared resources. There are specific types of
+    contention: row lock contention, CPU contention, and so forth. Query contention
+    can make it seem like MySQL is busy doing other things, but don’t be misled: MySQL
+    is only busy executing application queries.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'It’s nearly impossible to see or prove query contention because MySQL reports
+    only one type of contention: row lock contention. (Even row lock contention is
+    difficult to see precisely because row locking is complex.) Moreover, contention
+    is fleeting—almost imperceptible—because the problem is intrinsic to high QPS
+    (where *high* is relative to the application). Query contention is like a traffic
+    jam: it requires a lot of cars on the road. Although it’s nearly impossible to
+    see or prove, you need to be aware of it because it might explain inexplicably
+    slow queries.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Query contention plays a major role when performance is pushed to the limit.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Performance Destabilizes at the Limit
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'At the end of [“MySQL: Go Faster”](ch01.html#mysql-go-faster), I said that
+    MySQL can easily push most modern hardware to its limits. That’s true, but the
+    limit might surprise you. [Figure 4-1](#sys-cap-db-1) illustrates what engineers
+    expect: as load increases, database performance increases until it utilizes 100%
+    of *system capacity*—throughput of the hardware and operating system—then performance
+    remains steady. This is called *linear scaling* (or *linear scalability*), and
+    it’s a myth.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![emsp 0401](assets/emsp_0401.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 4-1\. Expected database performance (linear scalability)
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Linear scaling is the dream of every DBA and engineer, but it cannot happen.
+    Instead, [Figure 4-2](#sys-cap-db-2) illustrates the reality of database performance
+    with respect to load and system capacity.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![emsp 0402](assets/emsp_0402.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 4-2\. Real database performance
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Database performance increases with load only to a limit that is less than
+    100% of system capacity. Realistically, the limit of database performance is 80%
+    to 95% of system capacity. When load increases past the limit, database performance
+    *destabilizes*: throughput, response time, and other metrics fluctuate markedly—sometimes
+    wildly—from their normal value. At best, the result is decreased performance for
+    some (or most) queries; at worst, it causes an outage.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Equation 4-1](#usl) shows the *Universal Scalability Law* articulated by Neil
+    Gunther: an equation that models the scalability of hardware and software systems.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Equation 4-1\. Equation 4-1\. Universal Scalability Law
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: <math><mrow><mi>X</mi> <mrow><mo>(</mo> <mi>N</mi> <mo>)</mo></mrow> <mo>=</mo>
+    <mfrac><mrow><mi>γ</mi><mi>N</mi></mrow> <mrow><mn>1</mn><mo>+</mo><mi>α</mi><mo>(</mo><mi>N</mi><mo>-</mo><mn>1</mn><mo>)</mo><mo>+</mo><mi>β</mi><mi>N</mi><mo>(</mo><mi>N</mi><mo>-</mo><mn>1</mn><mo>)</mo></mrow></mfrac></mrow></math>
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Table 4-1](#usl-coef) outlines what each term in the Universal Scalability
+    Law equation represents.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 4-1\. Universal Scalability Law terms
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Term | Represents |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `X` | Throughput |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `N` | Load: concurrent requests, running processes, CPU cores, nodes in a
+    distributed system, and so on |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `γ` | Concurrency (ideal parallelism) |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `α` | Contention: waiting for shared resources |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `β` | Coherency: coordinating shared resources |'
+  prefs: []
+  type: TYPE_TB
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'A deep dive into the Universal Scalability Law is beyond the scope of this
+    book, so I limit the explanation to the current topic: the limit of database performance.
+    To learn more, read [*Guerrilla Capacity Planning*](https://oreil.ly/WZEd8) by
+    Neil Gunther.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Throughput is a function of load: `X(N)`. Concurrency (`γ`) helps throughput
+    increase as load (`N`) increases. But contention (`α`) and coherency (`β`) reduce
+    throughput as load increases. This precludes linear scalability and limits database
+    performance.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Worse than limiting performance, coherency causes *retrograde performance*:
+    decreasing performance at high load. The term *retrograde* is an understatement.
+    It suggests that MySQL simply reverts to less throughput when it cannot handle
+    the load, but the reality is worse than that. I prefer the terms *instability*
+    and *destabilize* because they convey the reality: the system is breaking down,
+    not just running more slowly.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Universal Scalability Law models real-world MySQL performance surprisingly
+    well.^([1](ch04.html#idm45829111984992)) But as a model, it only describes and
+    predicts the scalability of a workload; it does not say anything about how or
+    why the workload scales (or fails to scale). The USL is primarily used by experts
+    who measure and fit data to the model to determine the parameters (`γ`, `α`, and
+    `β`), then toil heroically to reduce them. Everyone else just watches graphs ([Chapter 6](ch06.html#ch06)
+    covers MySQL metrics) and waits until MySQL performance destabilizes—that’s the
+    limit.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Figure 4-3](#db-perf-limit-charts) shows three charts from a real outage when
+    the application pushed MySQL past the limit.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The outage had three periods:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*The Rise* (6 a.m. to 9 a.m.)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The application was stable at the beginning of the rise, but its developers
+    were beginning to worry because the metrics shown were rising slowly but steadily.
+    In the past, the application had outages that began with steadily rising metrics.
+    In response, the application developers increased transaction throughput to cope
+    with the rising demand. (The application is able to throttle transaction throughput;
+    this isn’t a feature of MySQL.) The rise and the response repeated until it no
+    longer worked: MySQL had reached the limit.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![emsp 0403](assets/emsp_0403.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 4-3\. Database performance past the limit
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '*The Limit* (9 a.m. to noon)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The application was completely unstable and effectively offline during the limit.
+    Although CPU usage and QPS were high and steady, threads running told a different
+    story. The whipsaw pattern of threads running shown in [Figure 4-3](#db-perf-limit-charts)
+    was a telltale sign that MySQL had destabilized. Since one query requires one
+    thread to run, the big swings in threads running indicated that queries were not
+    flowing smoothly through the system. Instead, queries were hammering MySQL in
+    uneven, disconcerted strikes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'High and steady CPU usage and QPS were misleading: steady is only good with
+    a little variation, as seen before and after the limit. Steady with no variation,
+    as seen during the limit, is flatline. To understand why, here’s a strange but
+    effective analogy. Imagine an orchestra. When the orchestra is playing correctly,
+    there are variations in all aspects of the music. In fact, those variations *are*
+    the music: rhythm, tempo, pitch, tone, melody, dynamics, and so forth. A flatline
+    metric is analogous to a deranged clarinetist playing a single, continuous note
+    *fortissimo*: steady, but not music.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'During the limit, application developers kept trying to increase transaction
+    throughput, but it didn’t work. MySQL would not use the last 5% of CPU, QPS would
+    not increase, and threads running would not stabilize. From the USL ([Equation
+    4-1](#usl)), you know why: contention and coherency. As load increased (`N`),
+    transaction throughput (`X`) increased, but so did the limiting effects of contention
+    (`α`) and coherency (`β`) until MySQL reached the limit.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*The Fix* (noon to 3 p.m.)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Since increasing transaction throughput was its own demise, the fix was to
+    *reduce* transaction throughput. That seems counterintuitive, but the math doesn’t
+    lie. At noon, application developers reduced transaction throughput, and the results
+    are clear in the charts: CPU usage dropped to 50%, QPS returned to a steady variation
+    (and even increased a little), and threads running also returned to a steady variation
+    (with a few spikes, which MySQL had spare capacity to absorb).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To imagine how this works, consider another analogy. Imagine a highway. When
+    there are many cars on the road, they all slow down (hopefully) because humans
+    need time to think and react to others cars, especially at highway speeds. When
+    there are too many cars on the road, they cause a traffic jam. The only solution
+    (apart from adding more lanes) is to reduce the number of cars on the highway:
+    fewer cars can drive faster. Reducing transaction throughput is analogous to reducing
+    the number of cars on the highway, which lets the remaining cars go faster and
+    traffic flow smoothly.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This example nicely models the limit of database performance according to the
+    Universal Scalability Law ([Equation 4-1](#usl)), but it’s also an exceptional
+    case because the application was able to push MySQL and the hardware to the limit.
+    More typically, high load destabilizes the application, and that prevents it from
+    increasing load on MySQL. In other words: the application fails before it can
+    push MySQL to the limit. But in this example, the application didn’t fail, it
+    kept scaling up until it pushed MySQL to the limit.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Two more points about MySQL performance at the limit before we turn our attention
+    to the application:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The limit is difficult to reach unless the hardware is blatantly insufficient.
+    As mentioned in [“Better, Faster Hardware!”](ch02.html#better-faster-hardware),
+    this is one of two exceptions for which you should scale up to reasonable hardware.
+    It’s also difficult for an application to fully and *simultaneously* utilize all
+    hardware—CPU, memory, and storage. An application is most likely to incur a bottleneck
+    in one piece of hardware long before it can fully and simultaneously utilize all
+    hardware. When this happens, the application has not reached the limit of database
+    performance, only the limit of that one piece of hardware.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'When high load causes MySQL to respond slowly, this does *not* mean the limit
+    has been reached. The reason is simple: `γ`. Gamma (`γ`) represents concurrency
+    or ideal parallelism. Recall from the Universal Scalability Law equation ([Equation
+    4-1](#usl)) that gamma is in the numerator.^([2](ch04.html#idm45829111946752))
+    Slow database performance does *not* mean the limit has been reached because increasing
+    concurrency (`γ`) raises the limit. Decreasing contention (`α`) also raises the
+    limit. (Coherency [`β`] is out of our control: it’s inherent to MySQL and the
+    operating system, but it’s usually not a problem.)'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'The second point leads to the question: how do we increase concurrency, or
+    decrease contention, or both? That seems like a critically important question,
+    but it’s not: it’s misleading because the North Star of MySQL performance is query
+    response time. The values of concurrency (`γ`) and contention (`α`) are not directly
+    measurable. They are determined by fitting throughput and load measurements to
+    the model. Experts use the Universal Scalability Law to understand system capacity,
+    not to improve performance. And this section has used it to prove that performance
+    destabilizes at the limit.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Toyota and Ferrari
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'Some applications achieve incredible MySQL performance while others struggle
+    with low throughput. Some applications can fully utilize the hardware—up to the
+    limit—while others barely warm the CPUs. Some applications don’t have any performance
+    problems while others continually struggle with slow queries. It’s a sweeping
+    generalization, but I’m going to claim that every engineer wants their application
+    be on the left side of *while*: incredible performance, fully utilizing the hardware,
+    and no problems. The difference between applications on the left of *while* versus
+    those on the right is understood by contemplating why a Ferrari is faster than
+    a Toyota.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Both car brands use roughly the same parts and design, but the top speed of
+    a Toyota is generally 130 MPH, whereas the top speed of a Ferrari is 200 MPH.^([3](ch04.html#idm45829111931920))
+    A Ferrari does not have special parts that make it 70 MPH faster than a Toyota.
+    So why is a Ferrari so much faster than a Toyota? The answer is the difference
+    in engineering *design* and *details*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'A Toyota is not designed for high speed. Achieving high speed (like high performance)
+    requires careful attention to many details. For a car, those details include:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Engine size, configuration, and timing
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Transmission gear ratios, shift points, and timing
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Tire size, traction, and rotational force
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Steering, suspension, and braking
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Aerodynamics
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Both car brands design and engineer for those details, but the exacting level
+    of detail in a Ferrari explains why it achieves greater performance. You can see
+    this in one of those details: aerodynamics. The unique exterior design of a Ferrari
+    is flamboyant but also functional: it lowers the drag coefficient, which increases
+    efficiency.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: High performance, like high speed, is not accomplished accidentally or by brute
+    force. It is the result of meticulous engineering with the goal of high performance.
+    A Ferrari is faster than a Toyota because it’s designed and engineered in every
+    detail to be faster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Is your application designed and engineered in every detail for maximum MySQL
+    performance? If yes, then I suppose you can skip the rest of this chapter. If
+    not, which is the usual answer, then the next section addresses the fundamental
+    technical differences that separate Toyota-like applications from Ferrari-like
+    applications: data access patterns.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Data Access Patterns
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: '*Data access patterns* describe how an application uses MySQL to access data.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The term *data access patterns* (or *access patterns* for short) is commonly
+    used but rarely explained. Let’s change that by clarifying three details about
+    access patterns:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: It’s so common to discuss access patterns in the plural that they begin to blur
+    together. But it’s important to realize that they are not an undifferentiated
+    blob. An application has many access patterns. For convenience, they’re discussed
+    in the plural. But in practice, you modify access patterns individually.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: An access pattern ultimately refers to a query, and you change queries (and
+    the application) to change access patterns, but queries are *not* the focus. In
+    [Go programming language terms](https://golang.org), an access pattern is an interface
+    and a query is an implementation. Focus on the interface, not the implementation.
+    This makes it possible to envision (and possibly apply) access patterns to different
+    data stores. For example, certain access patterns executed on MySQL are better
+    suited for a key-value data store, but that’s difficult to see by focusing on
+    SQL queries that bear no resemblance to key-value queries. In this book, I discuss
+    modifying access patterns, but in practice you modify queries (and the application).
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: An access pattern comprises a name and a list of technical traits. The name
+    is used to identify and communicate the access pattern with other engineers. (Access
+    patterns do not have intrinsic names.) Choose a name that’s succinct and meaningful.
+    The list of technical traits depends on and varies by data store. MySQL data access,
+    for example, is quite different than Redis data access. This section enumerates
+    and explains nine traits for MySQL data access.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'In theory, application developers should identify every individual access pattern,
+    but let’s be honest: that is very tedious. (I’ve never seen it done, and it might
+    not even be feasible if the application changes quickly.) Nevertheless, that is
+    the goal. Here are three reasonable and achievable approaches toward that goal:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Brainstorm with your team to identify the most obvious and common access patterns.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Use the query profile (see [“Query profile”](ch01.html#query-profile)) to identify
+    the top, slowest access patterns.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Peruse the code for lesser-known (or forgotten) access patterns.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'At the very least, you need to follow the first or second approach one time
+    to accomplish the goal of this chapter: indirect query optimization by changing
+    access patterns.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Once you have identified (and named) an access pattern, ascertain the value
+    or answer to each of the following nine traits. Not knowing the value or answer
+    to a trait is a great opportunity to learn and possibly improve part of the application.
+    Don’t leave a trait unknown; find or figure out the value or answer.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Before explaining each of the nine traits, there’s one more question to settle:
+    how do you use access patterns? Access patterns are pure knowledge, and that knowledge
+    forms a bridge between the previous section and the next section. The previous
+    section, [“Toyota and Ferrari”](#toyota-and-ferrari), makes the point that high-performance
+    MySQL requires a high-performance application. The next section, [“Application
+    Changes”](#app-changes), presents common application changes that help re-engineer
+    the application for high performance with respect to the database. Access patterns
+    help decide (and sometimes dictate) how to re-engineer the application from a
+    Toyota to a Ferrari.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Without further ado, let’s examine nine traits of data access patterns for MySQL.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Read/Write
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Does the access read or write data?
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Read access is clear: `SELECT`. Write is less clear when you consider the fine
+    details. For example, `INSERT` is write access, but `INSERT`…`SELECT` is read
+    and write access. Likewise, `UPDATE` and `DELETE` should use a `WHERE` clause,
+    which makes them read and write access, too. For simplicity: `INSERT`, `UPDATE`,
+    and `DELETE` are always considered write access.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Internally, reads and writes are not equal: they have different technical impacts
+    and invoke different internal parts of MySQL. An `INSERT` and a `DELETE`, for
+    example, are different writes under the hood—not simply because the former adds
+    and the latter removes. For simplicity again: all reads are equal and all writes
+    are equal.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The *read/write* trait is one of the most fundamental and ubiquitous because
+    scaling reads and writes requires different application changes. Scaling reads
+    is usually accomplished by offloading reads, which I cover later in [“Offload
+    Reads”](#offload-reads). Scaling write is more difficult, but enqueuing writes
+    is one technique (see [“Enqueue Writes”](#enqueue-writes)), and [Chapter 5](ch05.html#ch05)
+    covers the ultimate solution: sharding.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Although this trait is quite simple, it’s important because knowing if an application
+    is read-heavy or write-heavy quickly focuses your attention on relevant application
+    changes. Using a cache, for example, is not relevant for a write-heavy application.
+    Furthermore, other data stores are optimized for reads or writes, and there is
+    a write-optimized storage engine for MySQL: [MyRocks](https://myrocks.io).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Throughput
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: What is the throughput (in QPS) and variation of the data access?
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'First of all, throughput is *not* performance. Low throughput access—even just
+    1 QPS—can wreak havoc. You can probably imagine how; in case not, here’s an example:
+    a `SELECT`…`FOR UPDATE` statement that does a table scan and locks every row.
+    It’s rare to find access that terrible, but it proves the point: throughput is
+    not performance.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Terrible access notwithstanding, very high QPS (where *high* is relative to
+    the application) is usually an issue to abate for all the reasons eloquently stated
+    in [“Less QPS Is Better”](ch03.html#less-qps-is-better). For example, if the application
+    executes stock trades, it probably has a huge burst of read and write access at
+    9:30 a.m. Eastern Time when the American stock exchanges open. That level of throughput
+    conjures entirely different considerations than a steady 500 QPS.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*Variation*—how QPS increases and decreases—is equally important. The previous
+    paragraph mentioned *burst* and *steady*; another type of variation is *cyclical*:
+    QPS increases and decreases over a period of time. A common cyclical pattern is
+    higher QPS during business hours—9 a.m. to 5 p.m. Eastern Time, for example—and
+    lower QPS in the middle of the night. A common problem is that high QPS during
+    business hours prevents developers from making schema changes (`ALTER TABLE`)
+    or backfilling data.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Data Age
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: What is the age of the data accessed?
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*Age* is relative to access order, not time. If an application inserts one
+    million rows in 10 minutes, the first row is the oldest because it was the last
+    row accessed, not because it’s 10 minutes old. If the application updates the
+    first row, then it becomes the newest because it was the most recent row accessed.
+    And if the application never accesses the first row again, but it continues to
+    access other rows, then the first row becomes older and older.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This trait is important because it affects the working set. Recall from [“Working
+    set size”](ch03.html#working-set-size) that the working set is frequently used
+    index values and the primary key rows to which they refer—which is a long way
+    of saying *frequently accessed data*⁠—and it’s usually a small percentage of the
+    table size. MySQL keeps as much data in memory as possible, and data age affects
+    whether or not the data in memory is part of the working set. It usually is because
+    MySQL is exceptionally good at keeping the working set in memory thanks to a mélange
+    of algorithms and data structures. [Figure 4-4](#data-aging) is a highly simplified
+    illustration of the process.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The rectangle in [Figure 4-4](#data-aging) represents all data. The working
+    set is a small amount of data: from the dashed line to the top. And memory is
+    smaller than both: from the solid line to the top. In MySQL lingo, data is *made
+    young* when accessed. And when data is not accessed, it becomes old and is eventually
+    evicted from memory.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![emsp 0404](assets/emsp_0404.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 4-4\. Data aging
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Since accessing data keeps it young and in memory, the working set stays in
+    memory because it’s frequently accessed. This is how MySQL is very fast with a
+    little memory and a lot of data.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Frequently accessing old data is problematic in more than one way. To explain
+    why, I must delve into technical details beyond the scope of this section, but
+    I clarify later in [“InnoDB”](ch06.html#metrics-innodb). Data is loaded into *free
+    pages* (in memory): pages that don’t already contain data. (A *page* is a 16 KB
+    unit of logical storage inside InnoDB.) MySQL uses all available memory, but it
+    also keeps a certain number of free pages. When there are free pages, which is
+    normal, the problem is only that reading data from storage is slow. When there
+    are zero free pages, which is abnormal, the problem worsens threefold. First,
+    MySQL must evict old pages, which it tracks in a least recently used (LRU) list.
+    Second, if an old page is dirty (has data changes not persisted to disk) MySQL
+    must flush (persist) it before it can evict it, and flushing is slow. Third, the
+    original problem remains: reading data from storage is slow. Long story short:
+    frequently dredging up old data is problematic for performance.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Occasionally accessing old data is not a problem because MySQL is clever: the
+    algorithms driving the process in [Figure 4-4](#data-aging) prevent occasional
+    access of old data from interfering with new (young) data. Therefore, take data
+    age and throughput into consideration together: old and slow access is probably
+    harmless, but old and fast is bound to cause trouble.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Data age is nearly impossible to measure.^([4](ch04.html#idm45829111854048))
+    Fortunately, you only need to estimate the age of the data accessed, which you
+    can do with your understanding of the application, the data, and the access pattern.
+    If, for example, the application stores financial transactions, you know that
+    access is mostly limited to new data: the last 90 days of transactions. Accessing
+    data older than 90 days should be infrequent because transactions have settled
+    and become immutable. By contrast, another part of the same application that manages
+    user profiles might frequently access old data if the percentage of active users
+    is high. Remember: old data is relative to access, not time. The profile of a
+    user who last logged in a week ago isn’t necessarily old by time, but their profile
+    data is relatively old because millions of other profile data have since been
+    accessed, which means their profile data was evicted from memory.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Knowing this trait is a prerequisite for understanding [“Partition Data”](#partition-data)
+    and sharding in [Chapter 5](ch05.html#ch05).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Data Model
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: What data model does the access exhibit?
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Although MySQL is a relational data store, it’s commonly used with other data
+    models: key-value, document, complex analytics, graph, and so forth. You should
+    be keenly aware of nonrelational access because it’s not the best fit for MySQL;
+    therefore, it cannot yield the best performance. MySQL excels with other data
+    models but only to a point. For example, MySQL works well as a key-value data
+    store, but [RocksDB](https://rocksdb.org) is incomparably better because it’s
+    a purpose-built key-value data store.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The data model trait cannot be programmatically measured like other traits.
+    Instead, you need to determine which data model the access exhibits. The verb
+    *exhibits* is meaningful: the access might be relational only because MySQL was
+    the only available data store when the access was created, but it *exhibits* another
+    data model when you consider all data stores. Access is often jammed into the
+    data model of the available data stores. But the best practice is the reverse:
+    determine the ideal data model for the access, then use a data store built for
+    that data model.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Transaction Isolation
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: What transaction isolation does the access require?
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*Isolation* is one of four ACID properties: atomicity, consistency, isolation,
+    and durability. Since the default MySQL storage engine, InnoDB, is transactional,
+    every query executes in a transaction by default—even a single `SELECT` statement.
+    ([Chapter 8](ch08.html#ch08) examines transactions.) Consequently, the access
+    has isolation whether it needs it or not. This trait clarifies whether isolation
+    is required and if so, what level.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'When I ask engineers this question, the answer falls into one of three categories:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: None
+  prefs: []
+  type: TYPE_NORMAL
+- en: No, the access does not require any isolation. It would execute correctly on
+    a nontransactional storage engine. Isolation is just useless overhead, but it
+    doesn’t cause any problems or noticeably impact performance.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Default
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Presumably, the access requires isolation, but it’s unknown or unclear which
+    level is required. The application works correctly with the default transaction
+    isolation level for MySQL: `REPEATABLE READ`. Careful thought would be required
+    to determine if another isolation level—or no isolation—would work correctly.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Specific
+  prefs: []
+  type: TYPE_NORMAL
+- en: Yes, the access requires a specific isolation level because it’s part of a transaction
+    that executes concurrently with other transactions that access the same data.
+    Without the specific isolation level, the access could see incorrect versions
+    of the data, which would be a serious problem for the application.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In my experience, *Default* is the most common category, and that makes sense
+    because the default transaction isolation level for MySQL, `REPEATABLE READ`,
+    is correct for most cases. But the answer to this trait should lead to *None*
+    or *Specific*. If the access does not require any isolation, then it might not
+    require a transactional data store. Else, if the access requires isolation, now
+    you specifically know which isolation level and why.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Other data stores have transactions—even data stores that are not fundamentally
+    transactional. For example, the document store [MongoDB](https://www.mongodb.com)
+    introduced multidocument ACID transactions in version 4.0. Knowing which isolation
+    level is required and why allows you to translate and move access from MySQL to
+    another data store.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Transactions in other data stores can be very different than MySQL transactions,
+    and transactions affect other aspects, like locking.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Read Consistency
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Does the read access require strong or eventual consistency?
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*Strong consistency* (or *strongly consistent reads*) means that a read returns
+    the most current value. Reads on the source MySQL instance (not replicas) are
+    strongly consistent, but the transaction isolation level determines the *current*
+    value. A long-running transaction can read an old value, but it’s technically
+    the current value with respect to the transaction isolation level. [Chapter 8](ch08.html#ch08)
+    delves into these details. For now, remember that strong consistency is the default
+    (and only option) on the source MySQL instance. This is not true for all data
+    stores. [Amazon DynamoDB](https://oreil.ly/EDCme), for example, defaults to eventually
+    consistent reads, and strongly consistent reads are optional, slower, and more
+    expensive.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*Eventual consistency* (or *eventually consistent reads*) means that a read
+    might return an old value, but eventually it will return the current value. Reads
+    on MySQL replicas are eventually consistent because of *replication lag*: the
+    delay between when data is written on the source and when it’s written (applied)
+    on the replica. The duration of *eventually* is roughly equal to replication lag,
+    which should be less than a second. Replicas used to serve read access are called
+    *read replicas*. (Not all replicas serve reads; some are only for high availability,
+    or other purposes.)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the world of MySQL, it’s common for all access to use the source instance,
+    which makes all reads strongly consistent by default. But it’s also common for
+    reads *not* to require strong consistency, especially when replication lag is
+    subsecond. When eventual consistency is acceptable, offloading reads (see [“Offload
+    Reads”](#offload-reads)) becomes possible.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Concurrency
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Is the data accessed concurrently?
+  prefs: []
+  type: TYPE_NORMAL
+- en: Zero concurrency means that the access does not read (or write) the same data
+    at the same time. If it reads (or writes) the same data at *different* times,
+    that’s also zero concurrency. For example, an access pattern that inserts unique
+    rows has zero concurrency.
+  prefs: []
+  type: TYPE_NORMAL
+- en: High concurrency means that the access frequently reads (or writes) the same
+    data at the same time.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Concurrency indicates how important (or troublesome) row locking will be for
+    write access. Unsurprisingly, the higher the write concurrency on the same data,
+    the greater the row lock contention. Row lock contention is acceptable as long
+    as the increased response time that it causes is also acceptable. It becomes unacceptable
+    when it causes lock wait timeouts, which is a query error that the application
+    must handle and retry. When this begins to happen, there are only two solutions:
+    decrease concurrency (change the access pattern), or shard (see [Chapter 5](ch05.html#ch05))
+    to scale out writes.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Concurrency also indicates how applicable a cache might be for read access.
+    If the same data is read with high concurrency but infrequently changed, then
+    it’s a good fit for a cache. I discuss this in [“Offload Reads”](#offload-reads).
+  prefs: []
+  type: TYPE_NORMAL
+- en: As addressed in [“Data Age”](#ap-data-age), concurrency is nearly impossible
+    to measure, but you only need to estimate concurrency, which you can do with your
+    understanding of the application, the data, and the access pattern.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Row Access
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'How are rows accessed? There are three types of row access:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*Point access*'
+  prefs: []
+  type: TYPE_NORMAL
+- en: A single row
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*Range access*'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Ordered rows between two values
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*Random access*'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Several rows in any order
+  prefs: []
+  type: TYPE_NORMAL
+- en: Using the English alphabet (*A* to *Z*), point access is any single character
+    (*A*, for example); range access is any number of characters in order (*ABC*,
+    or *AC* if *B* doesn’t exist); and random access is any number of random characters
+    (*ASMR*).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This trait seems simplistic, but it’s important for write access for two reasons:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Gap locking: range and random access writes that use nonunique indexes exacerbate
+    row lock contention due to gap locks. [“Row Locking”](ch08.html#row-locking) goes
+    into detail.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Deadlocks: random access writes are a setup for *deadlocks*, which is when
+    two transactions hold row locks that the other transaction needs. MySQL detects
+    and breaks deadlocks, but they kill performance (MySQL kills one transaction to
+    break the deadlock) and they’re annoying.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '*Row access* is also important when planning how to shard. Effective sharding
+    requires that access patterns use a single shard. Point access works best with
+    sharding: one row, one shard. Range and random access work with sharding but require
+    careful planning to avoid negating the benefits of sharding by accessing too many
+    shards. [Chapter 5](ch05.html#ch05) covers sharding.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Result Set
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Does the access group, sort, or limit the result set?
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This trait is easy to answer: does the access have a `GROUP BY`, `ORDER BY`,
+    or `LIMIT` clause? Each of these clauses affects if and how the access might be
+    changed or run on another data store. [“Data Access”](ch03.html#data-access) covers
+    several changes. At the very least, optimize access that groups or sorts rows.
+    Limiting rows is not a problem—it’s a benefit—but it works differently on other
+    data stores. Likewise, other data stores may or may not support grouping or sorting
+    rows.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Application Changes
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'You must change the application to change its data access patterns. The changes
+    presented in this section are common, not exhaustive. They are highly effective
+    but also highly dependent on the application: some could work, others might not.
+    (Except the first change, [“Audit the Code”](#audit-the-code): that always works.)
+    Consequently, each change is an idea that needs further discussion and planning
+    with your team.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'All changes except the first have a subtle commonality: they require additional
+    infrastructure. I point that out to mentally prepare you for the fact that, in
+    addition to code changes, you will need infrastructure changes, too. As foretold
+    from the beginning, [“Improving Query Response Time”](ch01.html#query-optimization),
+    indirect query optimization requires a greater level of effort. Whereas changing
+    data ([Chapter 3](ch03.html#ch03)) is potentially work, changing access patterns
+    is certainly work. But it’s worth the effort because these changes are, by definition,
+    *transformative*: how the application changes from a Toyota to a Ferrari.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You might wonder: if these changes are so powerful, why not make them first—before
+    optimizing queries and data? Since the focus of this book is *efficient* MySQL
+    performance, I planned the journey to end with application changes because they
+    require the most effort. By contrast, direct query optimization ([Chapter 2](ch02.html#ch02))
+    and changes to data ([Chapter 3](ch03.html#ch03)) require far less effort, and
+    the former solves a lot of—if not most—performance problems. But if you have the
+    time and energy to jump straight into re-engineering the application, you have
+    my support. Just remember the lesson from [Chapter 2](ch02.html#ch02): indexes
+    provide the most *and the best* leverage. Bad queries ruin wonderful access patterns;
+    or, to quote renowned MySQL expert Bill Karwin:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Your unoptimized queries are killing the database server.
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: Audit the Code
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'You might be surprised by how long code can exist and run without any human
+    looking at it. In a certain sense, that’s a sign of good code: it just works and
+    doesn’t cause problems. But “doesn’t cause problems” does not necessarily mean
+    that the code is efficient or even required.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You don’t have to audit all the code (although that’s not a bad idea), just
+    the code that accesses the database. Look at the actual queries, of course, but
+    also consider the context: the business logic that the queries accomplish. You
+    might realize a different and better way to accomplish the same business logic.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'With respect to queries, look for the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Queries that are no longer needed
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Queries that execute too frequently
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Queries that retry too fast or too often
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Large or complex queries—can they be simplified?
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: If the code uses ORM—or any kind of database abstraction—double check its defaults
+    and configuration. One consideration is that some database libraries execute `SHOW
+    WARNINGS` after every query to check for warnings. That’s usually not a problem,
+    but it’s also quite wasteful. Also double-check the driver defaults, configuration,
+    and release notes. For example, the MySQL driver for the Go programming language
+    has had very useful developments over the years, so Go code should be using the
+    latest version.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Indirectly audit the code by using the query profile to see what queries the
+    application executes—no query analysis required; just use the query profile as
+    an auditing tool. It’s quite common to see unknown queries in the profile. Given
+    [“MySQL Does Nothing”](#mysql-does-nothing), unknown queries likely originate
+    from the application—either your application code or any kind of database abstraction,
+    like ORM—but there is another possibility: ops. *Ops* refers to whoever runs and
+    maintains the data store: DBAs, cloud providers, and so on. If you find unknown
+    queries and you’re certain that the application isn’t executing them, check with
+    whoever operates the data store.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: To make query auditing easier, add application metadata to queries in `/* SQL
+    comments */`. For example, `SELECT`…`/* file:app.go line:75 */` reveals where
+    the query originates in the application source code. SQL comments are removed
+    from digest texts, so your query metric tool must include samples (see [Example 1-1](ch01.html#query-group-ids))
+    or parse metadata from SQL comments.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Lastly and most overlooked: review the [MySQL error log](https://oreil.ly/hmLlY).
+    It should be quiet: no errors, warnings, and so forth. If it’s noisy, look into
+    the errors because they signify a wide array of issues: network, authentication,
+    replication, MySQL configuration, nondeterministic queries, and so forth. These
+    types of problems should be incredibly rare, so don’t ignore them.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Offload Reads
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'By default, a single MySQL instance called *the source* serves all reads and
+    writes. In production, the source should have at least one *replica*: another
+    MySQL instance that replicates all writes from the source. [Chapter 7](ch07.html#ch07)
+    addresses replication, but I mention it here to set the stage for a discussion
+    about offloading reads.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Performance can be improved by offloading reads from the source. This technique
+    uses MySQL replicas or cache servers to serve reads. (More on these two in a moment.)
+    It improves performance in two ways. First, it reduces load on the source, which
+    frees time and system resources to run the remaining queries faster. Second, it
+    improves response time for the offloaded reads because the replicas or caches
+    serving those reads are not loaded with writes. It’s a win-win technique that’s
+    commonly used to achieve high-throughput, low-latency reads.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Data read from a replica or cache is *not* guaranteed to be current (the latest
+    value) because there is inherent and unavoidable delay in MySQL replication and
+    writing to a cache. Consequently, data from replicas and caches is *eventually
+    consistent*: it becomes current after a (hopefully very) short delay. Only data
+    on the source is current (transaction isolation levels notwithstanding). Therefore,
+    before serving reads from a replica or cache, the following must be true: *reading
+    data that is out-of-date (eventually consistent) is acceptable, and it will not
+    cause problems for the application or its users*.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Give that statement some thought because more than once I’ve seen developers
+    think about it and realize, “Yeah, it’s fine if the application returns slightly
+    out-of-date values.” A commonly cited example is the number of “likes” or up-votes
+    on a post or video: if the current value is 100 but the cache returns 98, that’s
+    close enough—especially if the cache returns the current value a few milliseconds
+    later. If that statement is *not* true for your application, do not use this technique.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: In addition to the requirement that eventual consistency is acceptable, offloaded
+    reads must not be part of a multi-statement transaction. Multi-statement transactions
+    must be executed on the source.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Always ensure that offload reads are acceptable with eventual consistency and
+    not part of a multi-statement transaction.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Before serving reads from replicas or caches, thoroughly address this question:
+    *how will the application run degraded when the replicas or caches are offline?*'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The only wrong answer to that question is not knowing. Once an application offloads
+    reads, it tends to depend heavily on the replicas or caches to serve those reads.
+    It’s imperative to design, implement, and test the application to run degraded
+    when the replicas or caches are offline. *Degraded* means that the application
+    is running but noticeably slower, limiting client requests, or not fully functional
+    because some parts are offline or throttled. As long as the application is not
+    *hard down*—completely offline and unresponsive with no human-friendly error message—then
+    you’ve done a good job making the application run degraded.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Last point before we discuss using MySQL replicas versus cache servers: do
+    not offload all reads. Offloading reads improves performance by not wasting time
+    on the source for work that a replica or cache can accomplish. Therefore, start
+    by offloading slow (time-consuming) reads: reads that show up as slow queries
+    in the query profile. This technique is potent, so offload reads one by one because
+    you might only need to offload a few to significantly improve performance.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: MySQL replica
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: Using MySQL replicas to serve reads is common because every production MySQL
+    setup should already have at least one replica, and more than two replicas is
+    common. With the infrastructure (the replicas) already in place, you only have
+    to modify the code to use the replicas for offloaded reads instead of the source.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Before stating why replicas are preferable to cache servers, there’s one important
+    issue to settle: can the application use the replicas? Since replicas are used
+    for high availability, whoever manages MySQL might not intend for replicas to
+    serve reads. Be sure to find out because, if not, replicas might be taken offline
+    without notice for maintenance.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Presuming your replicas can be used to serve reads, they are preferable to
+    cache servers for three reasons:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Availability
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Since replicas are the foundation of high availability, they should have the
+    same availability as the source—99.95% or 99.99% availability, for example. That
+    makes replicas nearly worry-free: whoever manages MySQL is also managing the replicas.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Flexibility
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the previous section, I said that you should start by offloading slow (time-consuming)
+    reads. For caches, this is especially true because the cache server most likely
+    has limited CPU and memory—resources not to be wasted on trivial reads. By contrast,
+    replicas used for high availability should have the same hardware as the source,
+    so they have resources to spare. Offloading trivial reads to a replica doesn’t
+    matter as much, hence the flexibility when choosing what to offload. On the off
+    chance that you have pure *read replicas*—replicas *not* used for high availability—with
+    less powerful hardware, then don’t waste resources on trivial reads. This is more
+    common in the cloud because it’s easy to provision read replicas with large storage
+    but small CPU and memory (to save money).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Simplicity
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The application doesn’t have to do anything to keep replicas in sync with the
+    source—that’s intrinsic to being a replica. With a cache, the application must
+    manage updates, invalidation, and (possibly) eviction. But the real simplicity
+    is that replicas don’t require any query changes: the application can execute
+    the exact same SQL statements on a replica.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Those are three compelling reasons to prefer MySQL replicas to cache servers,
+    but the latter has one important point in its favor: a cache server can be incredibly
+    faster than MySQL.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Cache server
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: A cache server is not encumbered with SQL, transactions, or durable storage.
+    That makes it incredibly faster than MySQL, but it also takes more work in the
+    application to use properly. As mentioned in the previous section, the application
+    must manage cache updates, invalidation, and (possibly) eviction. Moreover, the
+    application needs a data model that works with the cache, which is usually a key-value
+    model. The extra work is worth the effort because practically nothing is faster
+    than a cache. [Memcached](https://memcached.org) and [Redis](https://redis.io)
+    are two popular and widely-used cache servers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'If you hear that MySQL has a built-in query cache: forget it and never use
+    it. It was deprecated as of MySQL 5.7.20 and removed as of MySQL 8.0.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Caching is ideal for data that’s frequently accessed but infrequently changed.
+    This is not a consideration for MySQL replicas because all changes replicate,
+    but a cache stores only what the application puts in it. A bad example is the
+    current Unix timestamp in seconds: it’s always changing. The exception in a bad
+    case like this: if the frequency of access is significantly *greater than* the
+    frequency of change. For example, if the current Unix timestamp in seconds is
+    requested one million times per second, then caching the current timestamp might
+    be appropriate. A good example is the current year: it changes infrequently. However,
+    the exception in a good case like this: if the frequency of access is significantly
+    *less than* the frequency of change. For example, if the current year is requested
+    only once per second, then a cache provides almost no value because 1 QPS doesn’t
+    make any difference for this data access.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'A word of caution when using a cache: *decide whether the cache is ephemeral
+    or durable*. This, too, is not a consideration for MySQL replicas because they
+    are always durable, but some cache servers can be either. If the cache is truly
+    ephemeral, then you should be able to do the equivalent of `TRUNCATE TABLE` on
+    the cache data without affecting the application. You also need to decide how
+    the ephemeral cache is rebuilt. Some applications rebuild the cache on *cache
+    miss*: when the requested data is not in the cache. Other applications have an
+    external process to rebuild the cache from another data source (for example, loading
+    the cache with images stored in [Amazon S3](https://oreil.ly/XMQxR)). And some
+    applications rely so heavily on the cache, or the cache is so large, that rebuilding
+    it is not feasible. For such applications, a durable cache is required. Either
+    way—ephemeral or durable—test your decision to verify that the application functions
+    as expected when the cache fails and recovers.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Enqueue Writes
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use a queue to stabilize write throughput. [Figure 4-5](#erratic-writes) illustrates
+    unstable—erratic—write throughput that spikes above 30,000 QPS and dips below
+    10,000 QPS.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![emsp 0405](assets/emsp_0405.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 4-5\. Erratic write throughput
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Even if performance is currently acceptable with unstable write throughput,
+    it’s not a recipe for success because unstable throughput worsens at scale—it
+    never spontaneously stabilizes. (And if you recall [Figure 4-3](#db-perf-limit-charts)
+    from [“Performance Destabilizes at the Limit”](#perf-at-the-limit), a flatline
+    value is not stable.) Using a queue allows the application to process changes
+    (writes) at a stable rate, as shown in [Figure 4-6](#stable-writes).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![emsp 0406](assets/emsp_0406.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 4-6\. Stable write throughput
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'The real power of enqueueing writes and stable write throughput is that they
+    allow the application to respond gracefully and predictably to a *thundering herd*:
+    a flood of requests that overwhelms the application, or the database, or both.
+    For example, imagine that the application normally processes 20,000 changes per
+    second. But it goes offline for five seconds, which results in 100,000 pending
+    changes. The moment the application comes back online, it’s hit with the 100,000
+    pending changes—a thundering herd—plus the normal 20,000 changes for the current
+    second. How will the application and MySQL handle the thundering herd?'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'With a queue, the thundering herd does not affect MySQL: it goes into the queue,
+    and MySQL processes the changes as usual. The only difference is that some changes
+    happen later than usual. As long as write throughput is stable, you can increase
+    the number of queue consumers to process the queue more quickly.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Without a queue, experience teaches that one of two things will happen. Either
+    you’ll be super lucky and MySQL will handle the thundering herd, or it won’t.
+    Don’t count on luck. MySQL does not throttle query execution, so it will try to
+    execute all queries when the thundering herd hits. (However, MySQL Enterprise
+    Edition, Percona Server, and MariaDB Server have a *thread pool* that limits the
+    number of concurrently executing queries, which acts as a throttle.) This never
+    works because CPU, memory, and disk I/O are inherently limited—not to mention
+    the Universal Scalability Law ([Equation 4-1](#usl)). Regardless, MySQL always
+    tries because it’s incredibly ambitious and a little foolhardy.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This technique bestows other advantages that make it worth the effort to implement.
+    One advantage is that it decouples the application from MySQL availability: the
+    application can accept changes when MySQL is offline. Another advantage is that
+    it can be used to recover lost or abandoned changes. Suppose a change requires
+    various steps, some of which might be long-running or unreliable. If a step fails
+    or times out, the application can re-enqueue the change to try again. A third
+    advantage is the ability to replay changes if the queue is an event stream, like
+    [Kafka](https://oreil.ly/fRZpa).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: For write-heavy applications, enqueueing writes is the best practice and practically
+    a requirement. Invest the time to learn and implement a queue.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Partition Data
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: After [Chapter 3](ch03.html#ch03), it should be no surprise that it’s easier
+    to improve performance with *less data*. Data is valuable to you, but it’s dead
+    weight to MySQL. If you cannot delete or archive data (see [“Delete or Archive
+    Data”](ch03.html#delete-or-archive)), then you should at least partition (physically
+    separate) the data.
+  prefs: []
+  type: TYPE_NORMAL
+- en: First, let’s briefly address then put aside [MySQL partitioning](https://oreil.ly/BNopd).
+    MySQL supports partitioning, but it requires special handling. It’s not trivial
+    to implement or maintain, and some third-party MySQL tools don’t support it. Consequently,
+    I don’t recommend using MySQL partitioning.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The type of data partitioning that is most useful, more common, and easier
+    for application developers to implement is separating *hot* and *cold* data: frequently
+    and infrequently accessed data, respectively. Separating hot and cold data is
+    a combination of partitioning and archiving. It partitions by access, and it archives
+    by moving the infrequently accessed (cold) data out of the access path of the
+    frequently accessed (hot) data.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s use an example: a database that stores payments. The hot data is the
+    last 90 days of payments for two reasons. First, payments usually do not change
+    after settling, but there are exceptions like refunds that can be applied later.
+    After some period, however, payments are finalized and cannot be changed. Second,
+    the application shows only the last 90 days of payments. To see older payments,
+    users have to look up past statements. The cold data is payments after 90 days.
+    For a year, that’s 275 days, which is roughly 75% of data. Why have 75% of data
+    sit idly in a transactional data store like MySQL? That’s a rhetorical question:
+    there’s no good reason.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Separating hot and cold data is primarily an optimization for the former. Storing
+    cold data elsewhere yields three immediate advantages: more hot data fits in memory,
+    queries don’t waste time examining cold data, and operations (like schema changes)
+    are faster. Separating hot and cold data is also an optimization for the latter
+    when it has completely different access patterns. In the preceding example, old
+    payments might be grouped by month into a single data object that no longer requires
+    a row for each payment. In that case, a document store or key-value store might
+    be better suited for storing and accessing the cold data.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: At the very least, you can archive cold data in another table in the same database.
+    That’s relatively easy with a controlled `INSERT`…`SELECT` statement to select
+    from the hot table and insert into the cold table. Then `DELETE` the archived
+    cold data from the hot table. Wrap it all up in a transaction for consistency.
+    See [“Delete or Archive Data”](ch03.html#delete-or-archive).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This technique can be implemented many different ways, especially with respect
+    to how and where the cold data is stored and accessed. But fundamentally it’s
+    very simple and highly effective: move infrequently accessed (cold) data out of
+    the access path of frequently accessed (hot) data to improve performance for the
+    latter.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Don’t Use MySQL
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'I want to put a figurative capstone on the current discussion about application
+    changes: the most significant change is not using MySQL when it’s clearly not
+    the best data store for the access patterns. Sometimes it’s very easy to see when
+    MySQL is not the best choice. For example, in previous chapters I made reference
+    to a query with load 5,962. That query is used to select vertices in a graph.
+    Clearly, a relational database is not the best choice for graph data; the best
+    choice is a graph data store. Even a key-value store would be better because graph
+    data has nothing to do with relational database concepts like normalization and
+    transactions. Another easy and common example is time series data: a row-oriented
+    transactional database is not the best choice; the best choice is a time series
+    database, or perhaps a columnar store.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'MySQL scales surprising well for a wide range of data and access patterns even
+    when it’s not the best choice. But never take that for granted: be the first engineer
+    on your team to say, “Maybe MySQL isn’t the best choice.” It’s okay: if I can
+    say that, then you can too. If anyone gives you grief, tell them I support your
+    decision to use the best tool for the job.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: That said, MySQL is amazing. Please at least finish this chapter and the next,
+    [Chapter 5](ch05.html#ch05), before you swipe left on MySQL.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Better, Faster Hardware?
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: '[“Better, Faster Hardware!”](ch02.html#better-faster-hardware) cautions against
+    scaling up hardware to increase performance. But the first sentence of that section
+    is carefully worded: “When MySQL performance isn’t acceptable, do *not* begin
+    by scaling up…” The key word in that sentence is *begin*, and the pivotal question
+    that it leads to is: *when is the correct time to scale up hardware?*'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'That question is difficult to answer because it depends on a combination of
+    factors: queries, indexes, data, access patterns, and how those utilize the current
+    hardware. For example, let’s say that the application has a super inefficient
+    access pattern: it uses MySQL as a queue and polls it very quickly from many application
+    instances. I would not scale up hardware until fixing the access pattern first.
+    But sometimes, engineers don’t have the luxury of time necessary to make such
+    application changes.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Table 4-2](#hardware-upgrade-checklist) is a checklist to help determine if
+    it’s time to scale up the hardware. When you can check all items in column 1 and
+    at least two items in column 2, then it’s a strong indication that it’s time to
+    scale up the hardware.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 4-2\. Hardware upgrade checklist
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| 1\. Check all | 2\. Check at least two |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| ☐ Response time is too high | ☐ CPU utilization is greater than 80% |'
+  prefs: []
+  type: TYPE_TB
+- en: '| ☐ Slow queries have been optimized | ☐ Threads running greater than number
+    of CPU cores |'
+  prefs: []
+  type: TYPE_TB
+- en: '| ☐ Data has been deleted or archived | ☐ Memory is less than 10% of total
+    data size |'
+  prefs: []
+  type: TYPE_TB
+- en: '| ☐ Access patterns have been reviewed and optimized | ☐ Storage IOPS utilization
+    is greater than 80% |'
+  prefs: []
+  type: TYPE_TB
+- en: 'Column 1 is an unapologetic reiteration of everything since [Chapter 1](ch01.html#ch01),
+    but it’s also an unequivocal justification for spending money to upgrade the hardware.
+    Column 2 requires at least two checks because hardware works together. Heavily
+    utilizing only one piece of hardware doesn’t guarantee a problem or slow performance.
+    Instead, it’s probably a good sign: you’re fully utilizing that piece of hardware.
+    But when one piece of hardware is overloaded, it usually begins to affect other
+    pieces of hardware. For example, when slow storage causes a backlog of queries
+    which causes a backlog of clients which causes high CPU utilization because MySQL
+    is trying to execute too many threads. That’s why column 2 requires two checks.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Values in column 2 should be consistently greater or less than the suggested
+    thresholds. Occasional spikes and dips are normal.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The maximum number of storage IOPS is determined by the storage device, if running
+    your own hardware. If you’re not sure, check the device specifications, or ask
+    the engineers who manage the hardware. In the cloud, storage IOPS are allocated
+    or provisioned, so it’s usually easier to tell the maximum because you purchase
+    the IOPS. But if you’re not sure, check the MySQL storage settings, or ask the
+    cloud provider. [“IOPS”](ch06.html#metrics-iops) shows which metrics report storage
+    IOPS.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Storage IOPS utilization has an additional consideration based on whether the
+    application is read-heavy or write-heavy (see [“Read/Write”](#ap-read-write)):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Read-heavy
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'For read-heavy access patterns, consistently high IOPS is probably due to insufficient
+    memory, not insufficient IOPS. MySQL reads data from disk when it’s not in memory,
+    and it’s exceptionally good at keeping the working set in memory (see [“Working
+    set size”](ch03.html#working-set-size)). But a combination of two factors can
+    cause high IOPS for reads: the working set size is significantly larger than memory,
+    and read throughput is exceptionally high (see [“Throughput”](#ap-throughput)).
+    That combination causes MySQL to swap so much data between disk and memory that
+    the problem shows up as high IOPS. This is rare, but possible.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Write-heavy
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'For write-heavy access patterns, consistently high IOPS is probably due to
+    insufficient IOPS. Simply put: the storage can’t write data fast enough. Normally,
+    storage achieves high throughput (IOPS) with write caches, but caches are not
+    durable. MySQL requires *durable storage*: data physically on disk, not in caches.
+    (The phrase “on disk” is still used even for flash-based storage that doesn’t
+    have disks.) Consequently, MySQL must *flush* data—force it to be written to disk.
+    Flushing severely limits storage throughput, but MySQL has sophisticated techniques
+    and algorithms to achieve performance with durability—[“Page flushing”](ch06.html#metrics-page-flushing)
+    goes into detail. The only solution at this point—because you’ve already optimized
+    queries, data, and access patterns—is more storage IOPS.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'With a cautious nod to scaling up hardware, it might seem that we’ve reached
+    the end. No matter how many pebbles, or cobbles, or boulders we have to move,
+    we can always use a bigger truck to move them. But what if you have to move a
+    mountain? Then you need the next chapter: sharding.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Summary
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'This chapter centered on data access patterns that determine how you can change
+    the application to use MySQL efficiently. The important takeaway points are:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: MySQL does nothing but execute application queries.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Database performance destabilizes at a limit that is less than 100% of hardware
+    capacity.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Some applications have far greater MySQL performance because every detail is
+    engineered for high performance.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Access patterns describe how an application uses MySQL to access data.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: You must change the application to change its data access patterns.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Scale up hardware to improve performance after exhausting other solutions.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The next chapter introduces the basic mechanics of sharding MySQL to achieve
+    MySQL at scale.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Practice: Describe an Access Pattern'
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'The goal of this practice is to describe the access pattern of the slowest
+    query. (To get slow queries, refer back to [“Query profile”](ch01.html#query-profile)
+    and [“Practice: Identify Slow Queries”](ch01.html#ch01-ai).) For the slowest query,
+    describe all nine access pattern traits from [“Data Access Patterns”](#access-patterns).
+    As mentioned in that section, access patterns are pure knowledge. Use that knowledge
+    to consider what [“Application Changes”](#app-changes) could be made to indirectly
+    optimize the query by changing its access pattern. Even if no application changes
+    are possible, knowing access patterns is an expert practice because MySQL performance
+    depends on queries, data, and access patterns.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([1](ch04.html#idm45829111984992-marker)) Watch the video [Universal Scalability
+    Law Modeling Workbook](https://oreil.ly/hzXnb) by renowned MySQL expert Baron
+    Schwartz to see the USL in action with values from real MySQL servers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([2](ch04.html#idm45829111946752-marker)) In fact, renowned MySQL expert Baron
+    Schwartz put it there. Neil Gunther wrote in a blog post, [“USL Scalability Modeling
+    with Three Parameters”](https://oreil.ly/s2BL8), that Baron added the third parameter
+    because it allowed the USL to fit data from real databases.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '^([3](ch04.html#idm45829111931920-marker)) Toyota: 210 Km/h; Ferrari: 320 Km/h.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([4](ch04.html#idm45829111854048-marker)) It’s technically possible by inspecting
+    the LSN of data pages in the InnoDB buffer pool, but that’s disruptive, so it’s
+    practically never done.
+  prefs: []
+  type: TYPE_NORMAL

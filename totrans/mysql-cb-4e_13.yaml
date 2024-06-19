@@ -1,0 +1,2056 @@
+- en: Chapter 13\. Importing and Exporting Data
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 13.0 Introduction
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Suppose that a file named *somedata.csv* contains 12 data columns in comma-separated
+    values (CSV) format. From this file you want to extract only columns 2, 11, 5,
+    and 9, and use them to create database rows in a MySQL table that contains `name`,
+    `birth`, `height`, and `weight` columns. You must make sure that the height and
+    weight are positive integers, and convert the birth dates from *`MM/DD/YY`* format
+    to *`YYYY-MM-DD`* format. How can you do this?
+  prefs: []
+  type: TYPE_NORMAL
+- en: Data transfer problems with specific requirements occur frequently when you
+    transfer data into MySQL. Datafiles are not always formatted for being ready to
+    load into MySQL with no preparation. As a result, it’s often necessary to preprocess
+    information to put it into a format acceptable for MySQL. The reverse also is
+    true; data exported from MySQL may need massaging to be useful for other programs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Although some data preparation operations require a great deal of hand checking
+    and reformatting, in most cases you can do at least part of the job automatically.
+    Virtually all such problems involve at least some elements of a common set of
+    conversion issues. This chapter and the next discuss what these issues are, how
+    to deal with them by taking advantage of the existing tools at your disposal,
+    and how to write your own tools when necessary. The idea is not to cover all possible
+    situations (an impossible task), but to show representative techniques and utilities.
+    Use them as is or adapt them. (There are commercial data-handling tools, but our
+    purpose here is to enable you to do things yourself.) With respect to the problem
+    posed at the beginning of this Introduction, see [Recipe 14.18](ch14.xhtml#nch-format-format-epilog)
+    for the solution we arrived at.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The discussion on how to transfer data to and from MySQL begins with native
+    MySQL facilities for importing data (the `LOAD` `DATA` statement and the *mysqlimport*
+    command-line program), and for exporting data (the `SELECT` … `INTO` `OUTFILE`
+    statement). For situations where the native facilities do not suffice, we move
+    on to cover techniques for using external supporting utilities (such as *sed*
+    and *tr*) and for writing your own. There are two broad sets of issues to consider:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: How to manipulate the *structure* of datafiles. When a file is in a format not
+    suitable for import, you must convert it to a different format. This may involve
+    issues such as changing the column delimiters or line-ending sequences, or removing
+    or rearranging columns in the file. This chapter covers such techniques.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: How to manipulate the *content* of datafiles. If you don’t know whether the
+    values contained in a file are legal, you may want to preprocess it to check or
+    reformat them. Numeric values may need verification as lying within a specific
+    range, dates may need conversion to or from ISO format, and so forth. [Chapter 14](ch14.xhtml#nch-format)
+    covers those techniques.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Source code for program fragments and scripts discussed in this chapter is located
+    in the *transfer* directory of the `recipes` distribution.
+  prefs: []
+  type: TYPE_NORMAL
+- en: General Import and Export Issues
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Incompatible datafile formats and differing rules for interpreting various kinds
+    of values cause headaches when transferring data between programs. Nevertheless,
+    certain issues recur frequently. Be aware of them and you can identify more easily
+    what must be done to solve particular import or export problems.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In its most basic form, an input stream is just a set of bytes with no particular
+    meaning. Successful import into MySQL requires recognizing which bytes represent
+    structural information and which represent the data values framed by that structure.
+    Because such recognition is key to decomposing the input into appropriate units,
+    the most fundamental import issues are these:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: What is the record separator? Knowing this enables you to partition the input
+    stream into records.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: What is the field delimiter? Knowing this enables you to partition each record
+    into field values. Identifying the data values also might include stripping quotes
+    from around the values or recognizing escape sequences within them.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'The ability to break the input into records and fields is important for extracting
+    the data values from it. If the values are still not in a form that can be used
+    directly, you may need to consider other issues:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Do the order and number of columns match the structure of the database table?
+    Mismatches require rearranging or skipping columns.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: How should `NULL` or empty values be handled? Are they permitted? Can `NULL`
+    values even be detected? (Some systems export `NULL` values as empty strings,
+    making it impossible to distinguish them.)
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Do data values require validation or reformatting? If the values are in a format
+    that matches MySQL’s expectations, no further processing is necessary. Otherwise,
+    they must be checked and possibly rewritten.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: For export from MySQL, the issues are somewhat the reverse. You can assume that
+    values stored in the database are valid, but it’s necessary to add column and
+    record delimiters to form an output stream that has a structure other programs
+    can recognize, and values may require reformatting for use by other programs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: File Formats
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Datafiles come in many formats, two of which appear frequently in this chapter:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tab-delimited or tab-separated values (TSV) format
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This is one of the simplest file structures; lines contain values separated
+    by tab characters. A short tab-delimited file might look like this, where the
+    whitespace between column values represents single tab characters:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: Comma-separated values (CSV) format
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Files written in CSV format vary somewhat; there is apparently no formal standard
+    describing the format. However, the general idea is that lines consist of values
+    separated by commas, and values containing internal commas are enclosed within
+    quotes to prevent the commas from being interpreted as value delimiters. It’s
+    also common for values containing spaces to be quoted as well. In this example,
+    each line contains three values:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'It’s trickier to process CSV files than tab-delimited files because characters
+    like quotes and commas have a dual meaning: they may represent file structure
+    or be included in the content of data values.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Another important datafile characteristic is the line-ending sequence. The most
+    common sequences are carriage return (CR), linefeed (LF) and carriage return/linefeed
+    (CRLF) pair.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Datafiles often begin with a row of column labels. For some import operations,
+    the row of labels must be discarded to avoid having it be loaded into your table
+    as data. In other cases, the labels are quite useful:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: For import into existing tables, the labels help you match datafile columns
+    with the table columns if they are not necessarily in the same order.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The labels can be used for column names when creating a new table automatically
+    or semiautomatically from a datafile. For example, [Recipe 13.20](#nch-xfer-xfer-guess)
+    discusses a utility that examines a datafile and guesses the `CREATE` `TABLE`
+    statement to use to create a table from the file. If a label row is present, the
+    utility uses the labels for column names.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Notes on Invoking Shell Commands
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'This chapter shows a number of programs that you invoke from the command line
+    using a shell like *bash* or *tcsh* under Unix or *cmd.exe* (<q>the command prompt</q>)
+    under Windows. Many of the example commands for these programs use quotes around
+    option values, and sometimes an option value is itself a quote character. Quoting
+    conventions vary from one shell to another, but the following rules seem to work
+    with most of them (including *cmd.exe* under Windows):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: For an argument that contains spaces, enclose it within double quotes to prevent
+    the shell from interpreting it as multiple separate arguments. The shell strips
+    the quotes and passes the argument to the command intact.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: To include a double-quote character in the argument itself, precede it with
+    a backslash.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Some shell commands in this chapter are so long that they’re shown as you would
+    enter them using several lines, with a backslash character as the line-continuation
+    character:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'That works for Unix. On Windows, the continuation character is `^` (or `` `
+    `` for PowerShell). Alternatively, on any platform, enter the entire command on
+    one line:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: 13.1 Importing Data with LOAD DATA and mysqlimport
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to load a datafile into a table using MySQL’s built-in import capabilities.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use the `LOAD` `DATA` statement or the *mysqlimport* command-line program.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'MySQL provides a `LOAD` `DATA` statement that acts as a bulk data loader. Here’s
+    an example statement that reads a file *mytbl.txt* from your current directory
+    (the directory from which you call *mysql* client) and loads it into the table
+    `mytbl` in the default database:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Since MySQL 8.0, the `LOCAL` loading capability is disabled by default for security
+    reasons.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To enable it on the test server, set variable `local_infile` to `ON`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'and start *mysql* client with option `--local-infile`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: Alternatively, omit `LOCAL` from the statement and specify the full pathname
+    to the file, which must be readable by the server. Local versus nonlocal data
+    loading is discussed shortly.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The MySQL utility program *mysqlimport* acts as a wrapper around `LOAD` `DATA`
+    so that you can load input files directly from the command line. The *mysqlimport*
+    command that is equivalent to the preceding `LOAD` `DATA` statement looks like
+    this, assuming that `mytbl` is in the `cookbook` database:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: For *mysqlimport*, as with other MySQL programs, you may need to specify connection
+    parameter options such as `--user` or `--host` (see [Recipe 1.4](ch01.xhtml#nch-mysql-mysql-options)).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`LOAD` `DATA` provides options to address many of the import issues mentioned
+    in the chapter introduction, such as the line-ending sequence for recognizing
+    how to break input into records, the column value delimiter that permits records
+    to be broken into separate values, the quoting character that may enclose column
+    values, quoting and escaping conventions within values, and `NULL` value representation.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The following list describes `LOAD` `DATA`’s general characteristics and capabilities;
+    *mysqlimport* shares most of these behaviors. We’ll note some differences as we
+    go along, but for the most, what can be done with `LOAD` `DATA` can be done with
+    *mysqlimport* as well.
+  prefs: []
+  type: TYPE_NORMAL
+- en: By default, `LOAD` `DATA` expects the datafile to have the same number of columns
+    as the table into which you load it, with the columns present in the same order
+    as in the table. If the file column number or order differ from the table, you
+    can specify which columns are present and their order. If the datafile contains
+    fewer columns than the table, MySQL assigns default values for the missing columns.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`LOAD` `DATA` assumes that data values are separated by tab characters and
+    that lines end with linefeeds (newlines). If a file doesn’t conform to these conventions,
+    you can specify its format explicitly.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: You can indicate that data values may have quotes around them that should be
+    stripped, and you can specify the quote character.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Several special escape sequences are recognized and converted during input processing.
+    The default escape character is backslash (`\`), but you can change it. The `\N`
+    sequence is interpreted as a `NULL` value. The `\b`, `\n`, `\r`, `\t`, `\\`, and
+    `\0` sequences are interpreted as backspace, linefeed, carriage return, tab, backslash,
+    and ASCII NUL characters. (NUL is a zero-valued byte; it differs from the SQL
+    `NULL` value.)
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`LOAD` `DATA` provides diagnostic information about which input values cause
+    problems. To display this information, execute a `SHOW` `WARNINGS` statement after
+    the `LOAD` `DATA` statement.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: This and following eigth recipes describe how to handle these issues using `LOAD`
+    `DATA` or *mysqlimport*. It’s lengthy because there’s a lot to cover.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Specifying the datafile location
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: You can load files located either on the server host, or on the client host
+    from which you issue the `LOAD` `DATA` statement. Telling MySQL where to find
+    your datafile is a matter of knowing the rules that determine where it looks for
+    the file (particularly important for files not in your current directory).
+  prefs: []
+  type: TYPE_NORMAL
+- en: By default, the MySQL server assumes that the datafile is located on the server
+    host. You can load local files that are located on the client host using `LOAD`
+    `DATA` `LOCAL` rather than `LOAD` `DATA`, unless `LOCAL` capability is disabled
+    by default.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Many of the examples in this chapter assume that `LOCAL` can be used. If that’s
+    not true for your system, adapt the examples: omit `LOCAL` from the statement,
+    make sure that the file is located on the MySQL server host and readable to the
+    server.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If the `LOAD` `DATA` statement includes no `LOCAL` keyword, the MySQL server
+    looks for the file on the server host using the following rules:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Your MySQL account must have the `FILE` privilege, and the file to be loaded
+    must be either located in the data directory for the default database or world
+    readable.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: An absolute pathname fully specifies the location of the file in the filesystem
+    and the server reads it from the given location.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: A relative pathname is interpreted two ways, depending on whether it has a single
+    component or multiple components. For a single-component filename such as *mytbl.txt*,
+    the server looks for the file in the database directory for the default database.
+    (The operation fails if you have not selected a default database.) For a multiple-component
+    filename such as *xyz/mytbl.txt*, the server looks for the file beginning in the
+    MySQL data directory. That is, it expects to find *mytbl.txt* in a directory named
+    *xyz*.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: If option `secure_file_priv` is set to a directory path, MySQL is able to access
+    import and export files only in this directory. Specify absolute path if you use
+    `secure_file_priv`.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Database directories are located directly under the server’s data directory,
+    so these two statements are equivalent if the default database is `cookbook`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'If the `LOAD` `DATA` statement includes the `LOCAL` keyword, your client program
+    reads the file on the client host and sends its contents to the server. The client
+    interprets the pathname like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: An absolute pathname fully specifies the location of the file in the filesystem.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: A relative pathname specifies the file location relative to the directory from
+    which you stated the *mysql* client.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'If your file is located on the client host, but you forget to indicate that
+    it’s local, an error occurs:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'That `Access` `denied` message can be confusing: if you’re able to connect
+    to the server and issue the `LOAD` `DATA` statement, it would seem that you’ve
+    already gained access to MySQL, right? The error message means the server (not
+    the client) tried to open *mytbl.txt* on the server host and could not access
+    it.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: If your MySQL server runs on the host from which you issue the `LOAD` `DATA`
+    statement, <q>remote</q> and <q>local</q> refer to the same host. But the rules
+    just discussed for locating datafiles still apply. Without `LOCAL`, the server
+    reads the datafile directly. With `LOCAL`, the client program reads the file and
+    sends its contents to the server.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*mysqlimport* uses the same rules for finding files as `LOAD` `DATA`. By default,
+    it assumes that the datafile is located on the server host. To indicate that the
+    file is local to the client host, specify the `--local` (or `-L`) option on the
+    command line.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`LOAD` `DATA` assumes that the table is located in the default database. To
+    load a file into a specific database, qualify the table name with the database
+    name. The following statement indicates that the `mytbl` table is located in the
+    `other_db` database:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: '*mysqlimport* always requires a database argument:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: '`LOAD` `DATA` assumes no relationship between the name of the datafile and
+    the name of the table into which you load the file’s contents. *mysqlimport* assumes
+    a fixed relationship between the datafile name and the table name. Specifically,
+    it uses the last component of the filename to determine the table name. For example,
+    *mysqlimport* interprets *mytbl,* *mytbl.dat*, */home/paul/mytbl.csv*, and *C:\projects\mytbl.txt*
+    all as files containing data for the `mytbl` table.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 13.2 Specifying Column and Line Delimiters
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Your datafile uses non-standard column or line delimitrs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use clauses `FIELDS TERMINATED BY` and `LINES TERMINATED BY` for the `LOAD DATA
+    INFILE` statement and options `--fields-terminated-by` and `--lines-terminated-by`
+    for *mysqlimport*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'By default, `LOAD` `DATA` assumes that datafile lines are terminated by linefeed
+    (newline) characters and that values within a line are separated by tab characters.
+    To provide explicit information about datafile format, use a `FIELDS` clause to
+    describe the characteristics of fields within a line, and a `LINES` clause to
+    specify the line-ending sequence. The following `LOAD` `DATA` statement indicates
+    that the input file contains data values separated by colons and lines terminated
+    by carriage returns:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: Each clause follows the table name. If both are present, `FIELDS` must precede
+    `LINES`. The line and field termination indicators can contain multiple characters.
+    For example, `\r\n` indicates that lines are terminated by carriage return/linefeed
+    pairs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `LINES` clause also has a `STARTING` `BY` subclause. It specifies the sequence
+    to be stripped from each input record. (Everything *up* *to* the given sequence
+    is stripped. If you specify `STARTING` `BY` `'X'` and a record begins with `abcX`,
+    all four leading characters are stripped.) Like `TERMINATED` `BY`, the sequence
+    can have multiple characters. If `TERMINATED` `BY` and `STARTING` `BY` both are
+    present in the `LINES` clause, they can appear in any order.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'For *mysqlimport*, command options provide the format specifiers. Commands
+    that correspond to the preceding two `LOAD` `DATA` statements look like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  prefs: []
+  type: TYPE_PRE
+- en: Option order doesn’t matter for *mysqlimport*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The `FIELDS` and `LINES` clauses understand hex notation to specify arbitrary
+    format characters, which is useful for loading datafiles that use binary format
+    codes. Suppose that a datafile has lines with Ctrl-A between fields and Ctrl-B
+    at the end of lines. The ASCII values for Ctrl-A and Ctrl-B are 1 and 2, so you
+    represent them as `0x01` and `0x02`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE14]'
+  prefs: []
+  type: TYPE_PRE
+- en: '*mysqlimport* also understands hex constants for format specifiers. You may
+    find this capability helpful if you don’t like remembering how to type escape
+    sequences on the command line or when it’s necessary to use quotes around them.
+    Tab is `0x09`, linefeed is `0x0a`, and carriage return is `0x0d`. This command
+    indicates that the datafile contains tab-delimited lines terminated by CRLF pairs:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE15]'
+  prefs: []
+  type: TYPE_PRE
+- en: When you import datafiles, don’t assume that `LOAD` `DATA` (or *mysqlimport*)
+    knows more than it does. Some `LOAD` `DATA` frustrations occur because people
+    expect MySQL to know more than it possibly can. Keep in mind that `LOAD` `DATA`
+    has no idea at all about the format of your datafile. It makes certain assumptions
+    about the input structure, represented as the default settings for the line and
+    field terminators, and for the quote and escape character settings. If your input
+    differs from those assumptions, you must tell MySQL so.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The line-ending sequence used in a datafile typically is determined by the
+    system from which the file originated. Unix files normally have lines terminated
+    by linefeeds, which you indicate like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE16]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Because `\n` happens to be the default line terminator, you need not specify
+    that clause in this case unless you want to indicate the line-ending sequence
+    explicitly. If files on your system don’t use the Unix default (linefeed), you
+    must specify the line terminator explicitly. For files that have lines ending
+    in carriage returns or carriage return/linefeed pairs, respectively, use the appropriate
+    `LINES` `TERMINATED` `BY` clause:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE17]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'For example, to load a Windows file that contains tab-delimited fields and
+    lines ending with CRLF pairs, use this `LOAD` `DATA` statement:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE18]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The corresponding *mysqlimport* command is:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE19]'
+  prefs: []
+  type: TYPE_PRE
+- en: If the file has been transferred from one machine to another, its contents may
+    have been changed in subtle ways of which you’re not aware. For example, an FTP
+    transfer between machines running different operating systems typically translates
+    line endings to those that are appropriate for the destination machine if the
+    transfer is performed in text mode rather than in binary (image) mode.
+  prefs: []
+  type: TYPE_NORMAL
+- en: When in doubt, check the contents of your datafile using a hex dump program
+    or other utility that displays a visible representation of whitespace characters
+    like tab, carriage return, and linefeed. Under Unix, programs such as *od* or
+    *hexdump* can display file contents in a variety of formats. If you don’t have
+    these or some comparable utility, the *transfer* directory of the `recipes` distribution
+    contains hex dumpers written in Perl, Ruby, and Python (*hexdump.pl*, *hexdump.rb*,
+    and *hexdump.py*), as well as programs that display printable representations
+    of all characters of a file (*see.pl*, *see.rb*, and *see.py*). You may find them
+    useful for examining files to see what they really contain.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 13.3 Dealing with Quotes and Special Characters
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Your data file contains quotes or special characters, therefore cannot be loaded
+    with default options.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use `FIELDS` clause for `LOAD DATA INFILE` with combination of `TERMINATED BY`,
+    `ECNLOSED BY` and `ESCAPED BY`. For *mysqlimport* use options `--fields-enclosed-by`
+    and `--fields-escaped-by`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: If your datafile contains quoted values or escaped characters, tell `LOAD` `DATA`
+    to be aware of them so that it doesn’t load uninterpreted data values into the
+    database.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `FIELDS` clause can specify other format options besides `TERMINATED` `BY`.
+    By default, `LOAD` `DATA` assumes that values are unquoted, and it interprets
+    the backslash (`\`) as an escape character for special characters. To indicate
+    the value-quoting character explicitly, use `ENCLOSED` `BY`; MySQL will strip
+    that character from the ends of data values during input processing. To change
+    the default escape character, use `ESCAPED` `BY`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You can use subclauses `ENCLOSED` `BY`, `ESCAPED` `BY`, and `TERMINATED` `BY`
+    in any order. For example, these `FIELDS` clauses are equivalent:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE20]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The `TERMINATED` `BY` value can consist of multiple characters. If data values
+    are separated within input lines by `*@*`, sequences, indicate that like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE21]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'To disable escape processing entirely, specify an empty escape sequence:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE22]'
+  prefs: []
+  type: TYPE_PRE
+- en: When you specify `ENCLOSED` `BY` to indicate which quote character should be
+    stripped from data values, it’s possible to include the quote character literally
+    within data values by doubling it or by preceding it with the escape character.
+    For example, if the quote character is `"` and escape character is `\`, the input
+    value `"a""b\"c"` is interpreted as `a"b"c`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: For *mysqlimport*, the corresponding command options for specifying quote and
+    escape values are `--fields-enclosed-by` and `--fields-escaped-by`. (When using
+    *mysqlimport* options that include quotes or backslashes or other characters that
+    are special to your command interpreter, you may need to quote or escape the quote
+    or escape characters.)
+  prefs: []
+  type: TYPE_NORMAL
+- en: 13.4 Handling Duplicate Key Values
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You have duplicates in your datafile and import fails with an error.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Instruct `LOAD DATA INFILE` and *mysqlimport* to either ignore or replace duplicates.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: By default, an error occurs if an input record duplicates an existing row in
+    the column or columns that form a `PRIMARY` `KEY` or `UNIQUE` index. To control
+    this behavior, specify `IGNORE` or `REPLACE` after the filename to tell MySQL
+    to either ignore duplicate rows or replace old rows with the new ones.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Suppose that you periodically receive meteorological data about current weather
+    conditions from various monitoring stations, and that you store various measurements
+    from these stations in a table that looks like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE23]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The table includes a primary key on the combination of station ID and measurement
+    type, to ensure that it contains only one row per station per type of measurement.
+    The table is intended to hold only current conditions, so when new measurements
+    for a given station are loaded into the table, they should kick out the station’s
+    previous measurements. To accomplish this, use the `REPLACE` keyword:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE24]'
+  prefs: []
+  type: TYPE_PRE
+- en: '*mysqlimport* has `--ignore` and `--replace` options that correspond to the
+    `IGNORE` and `REPLACE` keywords for `LOAD` `DATA`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 13.5 Obtaining Diagnostics about Bad Input Data
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You found differences between the datafile and data, loaded into the database
+    and want to know why import failed for those values.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use statement `SHOW WARNINGS`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '`LOAD` `DATA` displays an information line to indicate whether there are any
+    problematic input values. If so, use `SHOW` `WARNINGS` to find where they are
+    and what the problems are.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'When a `LOAD` `DATA` statement finishes, it returns a line of information that
+    tells you how many errors or data conversion problems occurred. For example:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE25]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'These values provide general information about the import operation:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`Records` indicates the number of records found in the file.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`Deleted` and `Skipped` are related to treatment of input records that duplicate
+    existing table rows on unique index values. `Deleted` indicates how many rows
+    were deleted from the table and replaced by input records, and `Skipped` indicates
+    how many input records were ignored in favor of existing rows.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`Warnings` is something of a catchall that indicates the number of problems
+    found while loading data values into columns. Either a value stores into a column
+    properly, or it doesn’t. In the latter case, the value ends up in MySQL as something
+    different, and MySQL counts it as a warning. (Storing a string `abc` into a numeric
+    column results in a stored value of `0`, for example.)'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: What do these values tell you? The `Records` value normally should match the
+    number of lines in the input file. If it doesn’t, that’s a sign that MySQL interprets
+    the file as having a different format than it actually has. In this case, you’ll
+    likely also see a high `Warnings` value, which indicates that many values had
+    to be converted because they didn’t match the expected data type. The solution
+    to this problem often is to specify the proper `FIELDS` and `LINES` clauses.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Assuming that your `FIELDS` and `LINES` format specifiers are correct, a nonzero
+    `Warnings` count indicates the presence of bad input values. You can’t tell from
+    the numbers in the `LOAD` `DATA` information line which input records had problems
+    or which columns were bad. To get that information, issue a `SHOW` `WARNINGS`
+    statement.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Suppose that a table `t` has this structure:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE26]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'And suppose that a datafile *data.txt* looks like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE27]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Loading the file into the table causes a number, a string, and a date to be
+    loaded into each of the three columns. Doing so results in several data conversions
+    and warnings, which you can see using `SHOW` `WARNINGS` immediately following
+    `LOAD` `DATA`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE28]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The `SHOW` `WARNINGS` output helps you determine which values were converted
+    and why. The resulting table looks like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE29]'
+  prefs: []
+  type: TYPE_PRE
+- en: 13.6 Skipping Datafile Lines
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to skip few first lines from a datafile.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use `IGNORE ... LINES` clause for `LOAD DATA INFILE` and option `--ignore-lines`
+    for *mysqlimport*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'To skip the first *`n`* lines of a datafile, add an `IGNORE` *`n`* `LINES`
+    clause to the `LOAD` `DATA` statement. For example, a file might include an initial
+    line of column labels. You can skip it like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE30]'
+  prefs: []
+  type: TYPE_PRE
+- en: '*mysqlimport* supports an `--ignore-lines=`*`n`* option that corresponds to
+    `IGNORE` *`n`* `LINES`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 13.7 Specifying Input Column Order
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Column order in the datafile and the table is different and you need to change
+    for the import.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Specify order of the columns when importing.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '`LOAD` `DATA` assumes that columns in the datafile have the same order as the
+    columns in the table. If that’s not true, specify a list to indicate the table
+    columns into which to load the datafile columns. Suppose that your table has columns
+    `a`, `b`, and `c`, but successive columns in the datafile correspond to columns
+    `b`, `c`, and `a`. Load the file like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE31]'
+  prefs: []
+  type: TYPE_PRE
+- en: '*mysqlimport* has a corresponding `--columns` option to specify the column
+    list:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE32]'
+  prefs: []
+  type: TYPE_PRE
+- en: 13.8 Preprocessing Input Values Before Inserting Them
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Values in the datafile cannot be inserted into the database as is. You need
+    to modify them before inserting.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use `SET` clause for `LOAD DATA INFILE` and MySQL functions to modify values.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '`LOAD` `DATA` can perform limited preprocessing of input values before inserting
+    them, which sometimes enables you to map input data onto more appropriate values
+    before loading them into your table. This is useful when values are not in a format
+    suitable for loading into a table (for example, they are in the wrong units, or
+    two input fields must be combined and inserted into a single column).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The previous section shows how to specify a column list for `LOAD` `DATA` to
+    indicate how input fields correspond to table columns. The column list also can
+    name user-defined variables, such that for each input record, the input fields
+    are assigned to the variables. You can then perform calculations with those variables
+    before inserting the result into the table. Specify these calculations in a `SET`
+    clause that names one or more *`col_name`* `=` *`expr`* assignments, separated
+    by commas.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Suppose that a datafile has the following columns, with the first line providing
+    column labels:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE33]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Suppose also that the file is to be loaded into a table that has these columns:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE34]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'To import the file, you must address several mismatches between its fields
+    and the table columns:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The file contains separate date and time fields that must be combined into date-and-time
+    values for insertion into the `DATETIME` column.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The file contains a name field, which must be split into separate first and
+    last name values for insertion into the `first_name` and `last_name` columns.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The file contains a weight in pounds, which must be converted to kilograms for
+    insertion into the `weight_kg` column. (1 lb. equals .454 kg.)
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The file contains state names, but the table contains two-letter abbreviations.
+    The name can be mapped to the abbreviation by performing a lookup in the `states`
+    table.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'To handle these conversions, skip the first line that contains the column labels,
+    assign each input column to a user-defined variable, and write a `SET` clause
+    to perform the calculations:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE35]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'After the import operation, the table contains these rows:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE36]'
+  prefs: []
+  type: TYPE_PRE
+- en: '`LOAD` `DATA` can perform data value reformatting, as just shown. Other examples
+    showing uses for this capability occur elsewhere. (For example, [Recipe 13.12](#nch-xfer-xfer-null)
+    uses it to map `NULL` values, and [Recipe 14.16](ch14.xhtml#nch-format-format-date-import)
+    rewrites non-ISO dates to ISO format during data import.) However, although `LOAD`
+    `DATA` can map input values to other values, it cannot outright reject an input
+    record that is found to contain unsuitable values. To do that, either preprocess
+    the input file to remove these records or issue a `DELETE` statement after loading
+    the file.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 13.9 Ignoring Datafile Columns
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Your datafile contains extra fields that should not be added to the database.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Specify column order when importing data. In place of the columns that need
+    to be ignored specify user-defined variable.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Extra columns at the end of input lines are easy to handle. If a line contains
+    more columns than are in the table, `LOAD` `DATA` just ignores them (although
+    it might produce a nonzero warning count).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Skipping columns in the middle of lines is a bit more involved. To handle this,
+    use a column list with `LOAD` `DATA` that assigns the columns to be ignored to
+    a dummy user-defined variable. Suppose that you want to load information from
+    a Unix password file */etc/passwd*, which contains lines in the following format:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE37]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Suppose also that you don’t want to load the password and directory columns.
+    A table to hold the information in the remaining columns looks like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE38]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'To load the file, specify that the column delimiter is a colon. Also, tell
+    `LOAD` `DATA` to skip the second and sixth fields that contain the password and
+    directory. To do this, add a column list in the statement. The list should include
+    the name of each column to load into the table, and a dummy user-defined variable
+    for columns to be ignored (you can use the same variable for all of them). The
+    resulting statement looks like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE39]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The corresponding *mysqlimport* command includes a `--columns` option:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE40]'
+  prefs: []
+  type: TYPE_PRE
+- en: See Also
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Another approach to ignoring columns is to preprocess the input file to remove
+    columns. Utility *yank_col.pl*, included into the recipes distribution, can extract
+    and display datafile columns in any order.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 13.10 Importing CSV Files
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to load a file that is in CSV format.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use the appropriate format specifiers with `LOAD` `DATA` or *mysqlimport*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Datafiles in CSV format contain values that are delimited by commas rather
+    than tabs and that may be quoted with double-quote characters. A CSV file *mytbl.txt*
+    containing lines that end with carriage return/linefeed pairs can be loaded into
+    `mytbl` using `LOAD` `DATA`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE41]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Or like this using *mysqlimport*:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE42]'
+  prefs: []
+  type: TYPE_PRE
+- en: 13.11 Exporting Query Results from MySQL
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to export the result of a query from MySQL into a file or another program.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use the `SELECT` … `INTO` `OUTFILE` statement, or redirect the output of the
+    *mysql* program.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The `SELECT` … `INTO` `OUTFILE` statement exports a query result directly into
+    a file on the server host. To capture the result on the client host instead, redirect
+    the output of the *mysql* program. These methods have different strengths and
+    weaknesses; get to know them both and apply whichever one best suits a given situation.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Exporting using the SELECT ... INTO OUTFILE statement
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'The syntax for `SELECT ... INTO OUTFILE` statement combines a regular `SELECT`
+    with `INTO` `OUTFILE` *`file_name`*. The default output format is the same as
+    for `LOAD` `DATA`, so the following statement exports the `passwd` table into
+    */tmp/passwd.txt* as a tab-delimited, linefeed-terminated file:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE43]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'To change the output format, use options similar to those used with `LOAD`
+    `DATA` that indicate how to quote and delimit columns and records. For example,
+    to export the `passwd` table (created earlier in [Recipe 13.1](#nch-xfer-xfer-load-data))
+    in CSV format with CRLF-terminated lines, use this statement:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE44]'
+  prefs: []
+  type: TYPE_PRE
+- en: '`SELECT` … `INTO` `OUTFILE` has these properties:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The output file is created directly by the MySQL server, so the filename should
+    indicate where to write the file on the server host. The file location is determined
+    using the same rules as for `LOAD` `DATA` without `LOCAL`, as described in [Recipe
+    13.1](#nch-xfer-xfer-load-data). (There is no `LOCAL` version of the statement
+    analogous to the `LOCAL` version of `LOAD` `DATA`.)
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: You must have the MySQL `FILE` privilege to execute the `SELECT` … `INTO` `OUTFILE`
+    statement.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The output file must not already exist. (This prevents MySQL from overwriting
+    files that may be important.)
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: You should have a login account on the server host or some way to access files
+    on that host. `SELECT` … `INTO` `OUTFILE` is of no value to you if you cannot
+    retrieve the output file.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Under Unix, before MySQL 8.0.17, the file is created world readable and is owned
+    by the account used for running the MySQL server. This means that although you
+    can read the file, you may not be able to delete it unless you can log in using
+    that account. As of MySQL 8.0.17, the file is world writable.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: If the option `secure_file_priv` is set, you can only export into the specified
+    directory.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Exporting using the mysql client program
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'Because `SELECT` … `INTO` `OUTFILE` writes the datafile on the server host,
+    you cannot use it unless your MySQL account has the `FILE` privilege. To export
+    data into a local file owned by yourself, use another strategy. If all you require
+    is tab-delimited output, do a <q>poor-man’s export</q> by executing a `SELECT`
+    statement with the *mysql* program and redirecting the output to a file. That
+    way you can write query results into a file on your local host without the `FILE`
+    privilege. Here’s an example that exports the login name and command interpreter
+    columns from the `passwd` table:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE45]'
+  prefs: []
+  type: TYPE_PRE
+- en: The `-e` option specifies the statement to execute (see [Recipe 1.5](ch01.xhtml#nch-mysql-mysql-interactive)),
+    and `--skip-column-names` tells MySQL not to write the row of column names that
+    normally precedes statement output (see [Recipe 1.7](ch01.xhtml#nch-mysql-mysql-output)).
+    Operator `>` instructs *mysql* to redirect output into the file. Otherwise result
+    will be printed onto the screen.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note that MySQL writes `NULL` values as the string <q>NULL</q>. Some postprocessing
+    to convert them may be needed, depending on what you want to do with the output
+    file. We discuss how to handle `NULL` values during export and import in [Recipe
+    13.12](#nch-xfer-xfer-null)
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'It’s possible to produce output in formats other than tab-delimited by sending
+    the query result into a postprocessing filter that converts tabs to something
+    else. For example, to use hash marks as delimiters, convert all tabs to `#` characters
+    (*`TAB`* indicates where you type a tab character in the command):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE46]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You can also use *tr* for this purpose, although the syntax varies for different
+    implementations of this utility. For Mac OS X or Linux, the command looks like
+    this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE47]'
+  prefs: []
+  type: TYPE_PRE
+- en: The *mysql* commands just shown use `--skip-column-names` to suppress column
+    labels from appearing in the output. Under some circumstances, it may be useful
+    to include the labels. (For example, if they will useful when importing the file
+    later.) In this respect, exporting query results with *mysql* is more flexible
+    than `SELECT` … `INTO` `OUTFILE` because the latter cannot produce output that
+    includes column labels.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Another way to export query results to a file on the client host is to use the
+    *mysql_to_text.pl* utility, available in the recipes distribution. That program
+    has options that enable you to specify the output format explicitly. To export
+    a query result as an Excel spreadsheet or XML document, use *mysql_to_excel.pl*
+    and *mysql_to_xml.pl* utilities.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 13.12 Importing and Exporting NULL Values
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You need to represent `NULL` values in a datafile.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use a value not otherwise present, so that you can distinguish `NULL` from all
+    other legitimate non-`NULL` values. When you import the file, convert instances
+    of that value to `NULL`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: There’s no standard for representing `NULL` values in datafiles, which makes
+    them problematic for import and export operations. The difficulty arises from
+    the fact that `NULL` indicates the *absence* of a value, and that’s not easy to
+    represent literally in a datafile. Using an empty column value is the most obvious
+    thing to do, but that’s ambiguous for string-valued columns because there is no
+    way to distinguish a `NULL` represented that way from a true empty string. Empty
+    values can be a problem for other data types as well. For example, if you load
+    an empty value with `LOAD` `DATA` into a numeric column, it is stored as `0` rather
+    than as `NULL` and thus becomes indistinguishable from a true `0` in the input.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The usual solution to this problem is to represent `NULL` using a value not
+    otherwise present in the data. This is how `LOAD` `DATA` and *mysqlimport* handle
+    the issue: they understand the value of `\N` by convention to mean `NULL`. (`\N`
+    is interpreted as `NULL` only when it occurs by itself, not as part of a larger
+    value such as `x\N` or `\Nx`.) For example, if you load the following datafile
+    with `LOAD` `DATA`, it treats the instances of `\N` as `NULL`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE48]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'But you might want to interpret values other than `\N` as signifying `NULL`,
+    and you might have different conventions in different columns. Consider the following
+    datafile:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE49]'
+  prefs: []
+  type: TYPE_PRE
+- en: The first column contains strings, and `Unknown` signifies `NULL`. The second
+    column contains integers, and `-1` signifies `NULL`. The third column contains
+    dates, and an empty value signifies `NULL`. What to do?
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To handle situations like this, use `LOAD` `DATA`’s input preprocessing capability:
+    specify a column list that assigns input values to user-defined variables and
+    use a `SET` clause that maps the special values to true `NULL` values. If the
+    datafile is named *has_nulls.txt*, the following `LOAD` `DATA` statement properly
+    interprets its contents:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE50]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The resulting data after import looks like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE51]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The preceding discussion pertains to interpreting `NULL` values for import
+    into MySQL, but it’s also necessary to think about `NULL` values when transferring
+    data in the other direction—from MySQL into other programs. Here are some examples:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`SELECT` … `INTO` `OUTFILE` writes `NULL` values as `\N`. Will another program
+    understand that convention? If not, convert `\N` to something the program understands.
+    For example, the `SELECT` statement can export the column using an expression
+    like this:'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[PRE52]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: 'You can use *mysql* in batch mode as an easy way to produce tab-delimited output
+    (see [Recipe 13.11](#nch-xfer-xfer-export-query)), but then `NULL` values appear
+    in the output as instances of the word <q>NULL</q>. If that word occurs nowhere
+    else in the output, you may be able to postprocess it to convert instances of
+    it to something more appropriate. For example, you can use a one-line *sed* command:'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[PRE53]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: If the word <q>NULL</q> appears where it represents something other than a `NULL`
+    value, it’s ambiguous and you should probably export your data differently. For
+    example, use `IFNULL()` to map `NULL` values to something else.
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: 13.13 Exporting Data in SQL Format
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to export data in SQL format.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use *mysqldump* or *mysqlpump*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: SQL format is widely used for exporting and importing data. It has such advantages
+    that it could be executed inside the MySQL clients as we discuss in [Recipe 1.6](ch01.xhtml#nch-mysql-mysql-batch)
+    and [Recipe 13.14](#nch-xfer-xfer-import-sql). SQL files can also have special
+    information, such as replication source position ([Recipe 3.3](ch03.xhtml#nch-replication-replication-position-existing)),
+    default character set and other. SQL files can contain data for all tables, triggers,
+    events and stored routines on the server, so you may use them to copy your MySQL
+    installation.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Since very first versions MySQL distribution contains utility *mysqldump* that
+    allows to export (dump) data into a SQL file. *mysqldump* is very easy to use.
+    For example, to dump all databases run it with option `--all-databases`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE54]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'To copy all tables in the database `cookbook` put its name as a *mysqldump*
+    parameter:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE55]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'To export just few tables in the database `cookbook` specify their names after
+    the database name. Thus, to copy tables `limbs` and `patients` run:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE56]'
+  prefs: []
+  type: TYPE_PRE
+- en: Shell command `>` redirects output of the *mysqldump* into a file. You may also
+    specify an option `--result-file` to instruct *mysqldump* to store result in the
+    named file.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Resulting file will contain SQL instructions that allow to re-create a database,
+    tables in it and then fill them with data.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Normally MySQL works in high concurrent environments. Therefore *mysqldump*
+    supports the following options to ensure consistency of the resulting backup file:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`--lock-all-tables`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Locks all tables accross all databases with a read lock, preventing writes to
+    any of the tables until the dump is finished.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`--lock-tables`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Locks all tables for each dumped database separately. This protection prevents
+    writes only into a database being exported, but it does not guarantee consistency
+    of the resulting dump for multiple-database backups.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`--single-transaction`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Starts a transaction before dumping. This option does not prevent any write
+    and still guarantees consistency of the backup. This is the recommended option
+    for backups of tables that use transactional storage engines.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Since ensuring consistency may affect performance of the high concurrent writes,
+    it is advisable to run *mysqldump* on the read-only replica.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*mysqldump* is a mature tool, but it exports data in a single thread. This
+    maybe not so performant as we expect nowadays. Therefore since version 5.7 MySQL
+    distribution includes one more backup tool: *mysqlpump*.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*mysqlpump* works similarly to *mysqldump*. You may use the same options as
+    for *mysqldump* to export all databases, single database or just a few tables.
+    But *mysqlpump* also supports parallel processing to speed up the dump process,
+    progress indicator, smarter dumping of the user accounts, filters and other features
+    that *mysqldump* lacks.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Thus, to create a dump of the whole MySQL instance in four threads, protect
+    the dump with the `--single-transaction` option and see the progress bar use command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE57]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '*mysqlpump* supports option `--single-transaction`, but does not support `--lock-all-tables`
+    and `--lock-tables`. It has option `--add-locks` instead that surrounds each dumped
+    table with `LOCK TABLES` and `UNLOCK TABLES` statements.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: See Also
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: For additional information about *mysqldump*, see [mysqldump — A Database Backup
+    Program](https://dev.mysql.com/doc/refman/8.0/en/mysqldump.html) and about *mysqlpump*,
+    see [mysqlpump — A Database Backup Program](https://dev.mysql.com/doc/refman/8.0/en/mysqlpump.html)
+    in the MySQL User Reference Manual.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 13.14 Importing SQL Data
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You have a SQL dump file and want to import it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Process the file using *mysql* client or MySQL Shell.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: A SQL dump is just a file with SQL commands. Therefore you can read it with
+    *mysql* client as we discussed in [Recipe 1.6](ch01.xhtml#nch-mysql-mysql-batch)
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE58]'
+  prefs: []
+  type: TYPE_PRE
+- en: MySQL Shell supports similar functionality in SQL mode.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To load dump from the command line specify option `--sql` for the *mysqlsh*
+    client and redirect input into it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE59]'
+  prefs: []
+  type: TYPE_PRE
+- en: To load dump while in the interactive session switch to the SQL mode and use
+    command *\source* or its shortcut *\.*
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE60]'
+  prefs: []
+  type: TYPE_PRE
+- en: 13.15 Exporting Query Results as XML
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to export the result of a query as an XML document.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use the *mysql* client,or *mysqldump* with option `--xml`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The *mysql* client can produce XML-format output from a query result (see [Recipe
+    1.7](ch01.xhtml#nch-mysql-mysql-output)).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Suppose that a table named `expt` contains test scores from an experiment:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE61]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Run *mysql* client with optin `--xml`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE62]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The resulting XML document, *expt.xml*, looks like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE63]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'To produce similar output with *mysqldump*, run it with option `--xml`. The
+    resulting file will contain table definition unless you specify option `--no-create-info`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE64]'
+  prefs: []
+  type: TYPE_PRE
+- en: 13.16 Importing XML into MySQL
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to import an XML document into a MySQL table.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use `LOAD XML` statement.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Importing an XML document depends on being able to parse the document and extract
+    record contents from it. How you do that depends on how the document is written.
+    To read XML files, created by the *mysql* client, use the `LOAD XML` statement.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To load file `expt.xml` that we created in [Recipe 13.15](#nch-xfer-xfer-xml-export),
+    run the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE65]'
+  prefs: []
+  type: TYPE_PRE
+- en: '`LOAD XML` statement automatically recognizes three different XML formats as
+    shown below.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Column names as attributes and column values as attribute values
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE66]'
+  prefs: []
+  type: TYPE_PRE
+- en: Column names as tags and column values as tag values.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE67]'
+  prefs: []
+  type: TYPE_PRE
+- en: Column names as values of the attribute `name` of the tag `field`, and column
+    values as their values.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE68]'
+  prefs: []
+  type: TYPE_PRE
+- en: This is the same format that *mysql*, *mysqldump*, and other MySQL utilities
+    use.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If your XML file uses different tag name, specify it with clause `ROWS IDENTIFIED
+    BY`. For example, if rows for the table `expt` are defined as follow:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE69]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Load them with the statement:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE70]'
+  prefs: []
+  type: TYPE_PRE
+- en: 13.17 Importing Data in JSON Format
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You have a JSON file and want to import it into MySQL database.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use MySQL Shell utility *importJson*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: JSON is a popular format for storing data. You can have it prepared by an application
+    or want to import data from MongoDB.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Utility *importJson* takes path to the JSON file and dictionary of options as
+    arguments. You can either import JSON into a collection or into a table. In the
+    latter case you need to specify `tableColumn` where to store the document unless
+    default value `doc` works for you.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The document should contain list of JSON objects, separated by a new line. This
+    list should not be a member of JSON array or another object.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE71]'
+  prefs: []
+  type: TYPE_PRE
+- en: You will find JSON dump of the collection `CollectionLimbs` in the file *collections/limbs.json*
+    of the `recipes` distribution.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To insert data from the JSON file into collection `CollectionLimbs` run following
+    code.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE72]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](Images/1.png)](#co_nch-xfer-xfer-importjson-options_co)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: First, create a dictionary object with options. At the minimum, you need to
+    specify collection name and the schema.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](Images/2.png)](#co_nch-xfer-xfer-importjson-importJson_co)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Then call *util.importJson* with path to the JSON file and options dictionary
+    as arguments.
+  prefs: []
+  type: TYPE_NORMAL
+- en: You can also call utility *importJson* from the command line without entering
+    interactive MySQL Shell session. To do it use option `--import` of the command
+    *mysqlsh* and specify path to the JSON file and target collection as parameters.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE73]'
+  prefs: []
+  type: TYPE_PRE
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: If no collection or a table with the specific name exists in the database, utility
+    *importJson* will create it for you.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 13.18 Importing data from MongoDB
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to import data from a MongoDB collection.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Export the collection from MongoDB into a file with help of the utility *mongoexport*
+    and use *importJson* with option `"convertBsonTypes": true` to import the collection
+    into MySQL.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '*importJson* can import documents, exported from MongoDB with the help of the
+    utility *mongoexport*. Additionally, it can convert BSON data types into MySQL
+    format. To explore this feature put `"convertBsonTypes": true` into the options
+    dictionary and perform import.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE74]'
+  prefs: []
+  type: TYPE_PRE
+- en: The resulting collection `blogs` uses data in MySQL format. We can check it
+    if select all documents from the collection using MySQL Shell.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE75]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](Images/1.png)](#co_ch-xfer-xfer-importjson-bson_oid_co)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: BSON OID value `"_id":{"$oid":"6029abb942e2e9c45760eabc"}` converted to MySQL
+    ID format.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](Images/2.png)](#co_ch-xfer-xfer-importjson-bson_date_co)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: BSON Date value `"date_created":{"$date":"2021-02-13T23:01:13.154Z"}` converted
+    to MySQL Date format.
+  prefs: []
+  type: TYPE_NORMAL
+- en: You will find JSON dump of the collection `blogs` in the file *collections/blogs.json*
+    of the `recipes` distribution.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 13.19 Exporting Data in JSON Format
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to export MySQL collection into a JSON file.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use MySQL Shell to retrieve result in the JSON format. Redirect output into
+    a file if needed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'MySQL Shell allows you to retrieve data in JSON format. The following code
+    snippet dumps collection `CollectionLimbs` and redirects result into a file:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE76]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](Images/1.png)](#co_nch-xfer-xfer-exportjson-select_co)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Select the collection.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](Images/2.png)](#co_nch-xfer-xfer-exportjson-fetch_co)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Fetch all rows from the collection.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![3](Images/3.png)](#co_nch-xfer-xfer-exportjson-print_co)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Print the result and redirect command output into a file.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Resulting file will contain array of JSON documents. This is not the same format
+    that MySQL Shell utility *importJson* can use. If you want to import the data
+    back into MySQL modify resulting file. You can do it with help of the utility
+    *jq*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE77]'
+  prefs: []
+  type: TYPE_PRE
+- en: '*jq* reads file `limbs.json` and prints each its array element into standard
+    output. Then we redirect result into a file `limbs_fixed.json`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: See Also
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: For additional information about utility *jq*, see the [jq Manual](https://stedolan.github.io/jq/manual/).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 13.20 Guessing Table Structure from a Datafile
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Someone gives you a datafile and says, <q>Here, put this into MySQL for me.</q>
+    But no table yet exists to hold the data. You need to create a table that will
+    hold data from the file.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use a utility that guesses the table structure by examining the datafile contents.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Sometimes you must import data into MySQL for which no table has yet been set
+    up. You can create the table yourself, based on any knowledge you have about the
+    contents of the file. Or you might be able to avoid some of the work by using
+    *guess_table.pl*, a utility located in the *transfer* directory of the `recipes`
+    distribution. *guess_table.pl* reads the datafile to see what kind of information
+    it contains, then attempts to produce an appropriate `CREATE` `TABLE` statement
+    that matches the contents of the file. This script is necessarily imperfect because
+    column contents sometimes are ambiguous. (For example, a column containing a small
+    number of distinct strings might be a `VARCHAR` column or an `ENUM`.) Still, it
+    may be easier to tweak the `CREATE` `TABLE` statement that *guess_table.pl* produces
+    than to write the statement from scratch. This utility also has diagnostic value,
+    although that’s not its primary purpose. For example, if you believe a column
+    contains only numbers, but *guess_table.pl* indicates that it should be a `VARCHAR`
+    column, that tells you the column contains at least one nonnumeric value.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*guess_table.pl* assumes that its input is in tab-delimited, linefeed-terminated
+    format. It also assumes valid input because any attempt to guess data types based
+    on possibly flawed data is doomed to failure. This means, for example, that if
+    a date column is to be recognized as such, it should be in ISO format. Otherwise,
+    *guess_table.pl* may characterize it as a `VARCHAR` column. If a datafile doesn’t
+    satisfy these assumptions, you may be able to reformat it first using the *cvt_file.pl*
+    and *cvt_date.pl* utilities, available in the recipes distribution.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*guess_table.pl* understands the following options:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`--labels`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Interpret the first input line as a row of column labels and use them for table
+    column names. Without this option, *guess_table.pl* uses default column names
+    of `c1`, `c2`, and so forth.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If the file contains a row of labels and you omit this option, *guess_table.pl*
+    treats the labels as data values. The likely result is that the script will characterize
+    *all* columns as `VARCHAR` columns (even those that otherwise contain only numeric
+    or temporal values), due to the presence of a nonnumeric or nontemporal value
+    in the column.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`--lower`, `--upper`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Force column names in the `CREATE` `TABLE` statement to be lowercase or uppercase.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`--quote-names`, `--skip-quote-names`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Quote or do not quote table and column identifiers in the `CREATE` `TABLE` statement
+    with `` ` `` characters (for example, `` `mytbl` ``). This can be useful if an
+    identifier is a reserved word. The default is to quote identifiers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`--report`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Generate a report rather than a `CREATE` `TABLE` statement. The script displays
+    the information that it gathers about each column.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`--table``=`*`tbl_name`*'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Specify the table name to use in the `CREATE` `TABLE` statement. The default
+    name is `t`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Here’s an example of how *guess_table.pl* works. Suppose that a file named
+    *commodities.csv* is in CSV format and has the following contents:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE78]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The first row indicates the column labels, and the following rows contain data
+    records, one per line. The values in the `trade_date` column are dates, but they
+    are in *`MM-DD-YYYY`* format rather than the ISO format that MySQL expects. *cvt_date.pl*
+    can convert these dates to ISO format. However, both *cvt_date.pl* and *guess_table.pl*
+    require input in tab-delimited, linefeed-terminated format, so first use *cvt_file.pl*
+    to convert the input to tab-delimited, linefeed-terminated format, and *cvt_date.pl*
+    to convert the dates:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE79]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Feed the resulting file, *tmp2.txt*, to *guess_table.pl*:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE80]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The `CREATE` `TABLE` statement that *guess_table.pl* writes to *commodities.sql*
+    looks like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE81]'
+  prefs: []
+  type: TYPE_PRE
+- en: '*guess_table.pl* produces that statement based on heuristics such as these:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: A column that contains only numeric values is assumed to be a `BIGINT` if no
+    values contain a decimal point, and `DOUBLE` otherwise.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: A numeric column that contains no negative values is likely to be `UNSIGNED`.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: If a column contains no empty values, *guess_table.pl* assumes that it’s probably
+    `NOT` `NULL`.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Columns that cannot be classified as numbers or dates are taken to be `VARCHAR`
+    columns, with a length equal to the longest value present in the column.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: You might want to edit the `CREATE` `TABLE` statement that *guess_table.pl*
+    produces, to make modifications such as using smaller integer types, increasing
+    the size of character fields, changing `VARCHAR` to `CHAR`, adding indexes, or
+    changing a column name that is a reserved word in MySQL.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To create the table, use the statement produced by *guess_table.pl*:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE82]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Then load the datafile into the table (skipping the initial row of labels):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE83]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The resulting table contents after import look like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE84]'
+  prefs: []
+  type: TYPE_PRE

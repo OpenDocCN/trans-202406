@@ -1,0 +1,618 @@
+- en: Chapter 7\. Debugging Containers
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Once you’ve shipped an application to production, there will come a day when
+    it’s not working as expected. It’s always nice to know ahead of time what to expect
+    when that day comes. It’s also important to have a good understanding of debugging
+    containers before moving on to more complex deployments. Without debugging skills,
+    it will be difficult to see where orchestration systems have gone wrong. So let’s
+    take a look at debugging containers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the end, debugging a containerized application is not all that different
+    from debugging a normal process on a system except that the tools are somewhat
+    different. Docker provides some pretty nice tooling to help you out! Some of these
+    map to regular system tools, and some go further.
+  prefs: []
+  type: TYPE_NORMAL
+- en: It is also critical to understand that your application is not running in a
+    separate system from the other Docker processes. They share a kernel, and depending
+    on your container configuration, they may share other things like a storage subsystem
+    and network interfaces. This means that you can get a lot of information about
+    what your container is doing from the system.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you’re used to debugging applications in a VM environment, you might think
+    you would need to enter the container to inspect an application’s memory or CPU
+    use, or to debug its system calls. However, this is not so! Despite feeling in
+    many ways like a virtualization layer, processes in containers are just processes
+    on the Linux host itself. If you want to see a process list across all of the
+    Linux containers on a machine, you could log in to the server and run `ps` with
+    your favorite command-line options. However, you can use the `docker container
+    top` command from anywhere to see the list of processes running in your container
+    from the viewpoint of the underlying Linux kernel. Let’s take a more detailed
+    look at some of the things that you can do when debugging a containerized application
+    that do not require the use of either `docker container exec` or `nsenter`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Process Output
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'One of the first things you’ll want to know when debugging a container is what
+    is running inside it. As we mentioned previously, Docker has a built-in command
+    for doing just that: `docker container top`. This is not the only way to see what’s
+    going on inside a container, but it is by far the easiest to use. Let’s see how
+    that works:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: To run `docker container top`, we need to pass it the name or ID of our container,
+    and then we receive a nice listing of what is running inside our container, ordered
+    by PID just as we’d expect from Linux `ps` output.
+  prefs: []
+  type: TYPE_NORMAL
+- en: There are some oddities here, though. The primary one is the name-spacing of
+    user IDs and filesystems.
+  prefs: []
+  type: TYPE_NORMAL
+- en: It is important to understand that the username for a particular user ID (UID)
+    can be completely different between each container and the host system. It is
+    even possible that a specific UID has no named user in the container or host’s
+    */etc/passwd* file associated with it at all. This is because Unix does not require
+    a UID to have a named user associated with it, and Linux namespaces, which we
+    discuss much more in [“Namespaces”](ch11.html#namespaces), provide some isolation
+    between the container’s concept of valid users and those on the underlying host.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s look at a more concrete example of this. Let’s consider a production
+    Docker server running Ubuntu 22.04 and a container running on it that has an Ubuntu
+    distribution inside. If you run the following commands on the Ubuntu host, you
+    would see that UID 7 is named `lp`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: There is nothing special about the UID number we are using here. You don’t need
+    to take any particular note of it. It was chosen simply because it is used by
+    default on both platforms but represents a different username.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If we then enter the standard Fedora container on that Docker host, you will
+    see that UID 7 is set to `halt` in */etc/passwd*. By running the following commands,
+    you can see that the container has a completely different perspective of who UID
+    7 is:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'If we then run `ps aux` on the theoretical Ubuntu Docker server while that
+    container is running as UID 7 (`-u 7`), we see that the Docker host shows the
+    container process as being run by `lp` instead of `halt`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: This could be particularly confusing if a well-known user like `nagios` or `postgres`
+    were configured on the host system but not in the container, yet the container
+    ran its process with the same ID. This namespacing can make the `ps` output look
+    quite strange. It might, for example, look like the `nagios` user on your Docker
+    host is running the `postgresql` daemon that was launched inside a container,
+    if you don’t pay close attention.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: One solution to this is to dedicate a nonzero UID to your containers. On your
+    Docker servers, you can create a `container` user as UID 5000 and then create
+    the same user in your base container images. If you then run all your containers
+    as UID 5000 (`-u 5000`), not only will you improve the security of your system
+    by not running container processes as UID 0, but you will also make the `ps` output
+    on the Docker host easier to decipher by displaying the `container` user for all
+    of your running container processes. Some systems use the `nobody` or `daemon`
+    user for the same purpose, but we prefer `container` for clarity. There is a little
+    more detail about how this works in [“Namespaces”](ch11.html#namespaces).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Likewise, because the process has a different view of the filesystem, paths
+    that are shown in the `ps` output are relative to the container and not the host.
+    In these cases, knowing it is in a container is a big win.
+  prefs: []
+  type: TYPE_NORMAL
+- en: So that’s how you use the Docker tooling to look at what’s running in a container.
+    But that’s not the only way, and in a debugging situation, it might not be the
+    best way. If you hop onto a Docker server and run a normal Linux `ps` to see what’s
+    running, you get a full list of everything containerized and not containerized
+    just as if they were all equivalent processes. There are some ways to look at
+    the process output to make things a lot clearer. For example, you can facilitate
+    debugging by looking at the Linux `ps` output in tree form so that you can see
+    all of the processes descended from Docker. Here’s what that might look like when
+    you use the BSD command-line flags to look at a system that is currently running
+    two containers; we’ll chop the output to just the part we care about.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Docker Desktop’s VM contains minimal versions of most Linux tools, and some
+    of these commands may not produce the same output that you will get if you use
+    a standard Linux server as the Docker daemon host.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Many of the `ps` commands in this example work only on Linux distributions with
+    the full `ps` command. Some stripped-down versions of Linux, like Alpine, run
+    the BusyBox shell, which does not have full `ps` support and won’t show some of
+    this output. We recommend running a full distribution on your host systems like
+    Ubuntu or Fedora CoreOS.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Here you can see that we’re running one instance of `containerd`, which is the
+    main container runtime used by the Docker daemon. `dockerd` has two `docker-proxy`
+    sub-processes running at the moment, which we will discuss in more detail in [“Network
+    Inspection”](#net_inspect).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Each process that is using `containerd-shim-runc-v2` represents a single container
+    and all of the processes that are running inside that container. In this example,
+    we have two containers. They show up as `containerd-shim-runc-v2`, followed by
+    some additional information about the process, including the container ID. In
+    this case, we are running one instance of Google’s `cadvisor` and one instance
+    of `sleep` in another container. Each container that has ports mapped will have
+    at least one `docker-proxy` process that is used to map the required network ports
+    between the container and the host Docker server. In this example, both `docker-proxy`
+    processes are related to `cadvisor`. One is mapping the ports for IPv4 addresses,
+    and the other is mapping ports for IPv6 addresses.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Because of the tree output from `ps`, it’s pretty clear which processes are
+    running in which containers. If you’re a bigger fan of Unix SysV command-line
+    flags, you can get a similar, but not as nice-looking, tree output with `ps -ejH`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You can get a more concise view of the `docker` process tree by using the `pstree`
+    command. Here, we’ll use `pidof` to scope it to the tree belonging to `docker`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: This doesn’t show us PIDs and therefore is useful only for getting a sense of
+    how things are connected. But this is conceptually clear output when there are
+    a lot of processes running on a host. It’s far more concise and provides a nice
+    high-level map of how things connect. Here we can see the same containers that
+    were shown in the previous `ps` output, but the tree is collapsed so we get multipliers
+    like `7*` when there are seven duplicate processes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'We can get a full tree with PIDs if we run `pstree`, as shown here:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: This output provides us with a very good look at all the processes attached
+    to Docker and what they are running.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If you wanted to inspect a single container and its processes, you could determine
+    the container’s main process ID and then use `pstree` to see all the related subprocesses:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: Process Inspection
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'If you’re logged in to the Docker server, you can inspect running processes
+    using all of the standard debugging tools. Common debugging tools like `strace`
+    work as expected. In the following code, we’ll inspect an `nginx` process running
+    inside a container:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: If you run `strace`, you will need to type Ctrl-C to exit the `strace` process.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You can see that we get the same output that we would from noncontainerized
+    processes on the host. Likewise, an `lsof` shows us that the files and sockets
+    open in a process work as expected:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note that the paths to the files are all relative to the container’s view of
+    the backing filesystem, which is not the same as the host view. Due to this, if
+    you are on the host system, you may not be able to easily find a specific file
+    from one of your running containers. In most cases, it’s probably best to enter
+    the container using `docker container exec` to look at the files with the same
+    view that the processes inside it have.
+  prefs: []
+  type: TYPE_NORMAL
+- en: It’s possible to run the GNU debugger (`gdb`) and other process inspection tools
+    in the same manner as long as you’re `root` and have proper permissions to do
+    so.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'It is worth mentioning here that it is also possible to run a new debugging
+    container that can see the processes of an existing container and therefore provide
+    additional tools to debug issues. We will discuss the underlying details of this
+    command later, in [“Namespaces”](ch11.html#namespaces) and [“Security”](ch11.html#security):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: You will need to type Ctrl-C to exit the `strace` process.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Controlling Processes
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: When you have a shell directly on the Docker server, you can, in many ways,
+    treat containerized processes just like any other process running on the system.
+    If you’re remote, you might send signals with `docker container kill` because
+    it’s expedient. But if you’re already logged in to a Docker server for a debugging
+    session or because the Docker daemon is not responding, you can just `kill` the
+    process like you would any other.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Unless you kill the top-level process in the container (PID 1 inside the container),
+    killing a process will not terminate the container itself. That *might* be desirable
+    if you were killing a runaway process, but it might leave the container in an
+    unexpected state. Developers probably expect that all the processes are running
+    if they can see their container in `docker container ls`. It could also confuse
+    a scheduler like Mesos or Kubernetes or any other system that is health-checking
+    your application. Keep in mind that containers are supposed like a single bundle
+    to the outside world. If you need to kill off something inside the container,
+    it’s best to replace the whole container. Containers offer an abstraction that
+    tools interoperate with. They expect the internals of the container to be predictable
+    and remain consistent.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Terminating processes is not the only reason to send signals. And since containerized
+    processes are just normal processes in many respects, they can be passed the whole
+    array of Unix signals listed in the manpage for the Linux `kill` command. Many
+    Unix programs will perform special actions when they receive certain predefined
+    signals. For example, `nginx` will reopen its logs when receiving a `SIGUSR1`
+    signal. Using the Linux `kill` command, you can send any Unix signal to a container
+    process on the local server.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Because containers work just like any other process, it’s important to understand
+    how they can interact with your application in less than helpful ways. There are
+    some special needs in a container for processes that spawn background children—that
+    is, anything that forks and daemonizes so the parent no longer manages the child
+    process lifecycle. Jenkins build containers are one common example where people
+    see this go wrong. When daemons fork into the background, they become children
+    of PID 1 on Unix systems. Process 1 is special and is usually an `init` process
+    of some kind.
+  prefs: []
+  type: TYPE_NORMAL
+- en: PID 1 is responsible for making sure that children are reaped. In your container,
+    by default, your main process will be PID 1\. Since you probably won’t be handling
+    the reaping of children from your application, you can end up with zombie processes
+    in your container. There are a few solutions to this problem. The first is to
+    run an init system in the container of your own choosing—​one that is capable
+    of handling PID 1 responsibilities. `s6`, `runit`, and others described in the
+    preceding note can be easily used inside the container.
+  prefs: []
+  type: TYPE_NORMAL
+- en: But Docker itself provides an even simpler option that solves just this one
+    case without taking on all the capabilities of a full init system. If you provide
+    the `--init` flag to `docker container run`, Docker will launch a very small init
+    process based on the [`tini` project](https://github.com/krallin/tini) that will
+    act as PID 1 inside the container on startup. Whatever you specify in your *Dockerfile*
+    as the `CMD` is passed to `tini` and otherwise works in the same way you would
+    expect. It does, however, replace anything you might have in the `ENTRYPOINT`
+    section of your *Dockerfile*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'When you launch a Linux container without the `--init` flag, you get something
+    like this in your process list:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Notice that in this case, the `CMD` we launched is PID 1\. That means it is
+    responsible for child reaping. If we are launching a container where that is important,
+    we can pass `--init` to make sure that when the parent process exits, children
+    are reaped:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  prefs: []
+  type: TYPE_PRE
+- en: Here, you can see that the PID 1 process is `/sbin/docker-init`. That has in
+    turn launched the shell binary for us as specified on the command line. Because
+    we now have an init system inside the container, the PID 1 responsibilities fall
+    to it rather than the command we used to invoke the container. In most cases,
+    this is what you want. You may not need an init system, but it’s small enough
+    that you should consider having at least `tini` inside your containers in production.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In general, you probably only need an init process inside your container if
+    you are running multiple parent processes or you have processes that do not respond
+    to Unix signals properly.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Network Inspection
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'Compared to process inspection, debugging containerized applications at the
+    network level can be more complicated. Unlike traditional processes running on
+    the host, Linux containers can be connected to the network in multiple ways. If
+    you are running the default setup, as the vast majority of people are, then your
+    containers are all connected to the network via the default bridge network that
+    Docker creates. This is a virtual network where the host is the gateway to the
+    rest of the world. We can inspect these virtual networks with the tooling that
+    ships with Docker. You can get it to show you which networks exist by calling
+    the `docker network ls` command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE14]'
+  prefs: []
+  type: TYPE_PRE
+- en: Here we can see the default bridge network, the host network, which is for any
+    containers running in `host` network mode (see [“Host networking”](ch11.html#host_networking)),
+    and the none network, which disables network access entirely for the container.
+    If you use `docker compose` or other orchestration tools, they may create additional
+    networks here with different names.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'But seeing which networks exist doesn’t make it any easier to see what’s on
+    those networks. So, you can see which containers are attached to any particular
+    named network with the `docker network inspect` command. This produces a fair
+    amount of output. It shows you all of the containers that are attached to the
+    specified network and a number of details about the network itself. Let’s take
+    a look at the default bridge network:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE15]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE16]'
+  prefs: []
+  type: TYPE_PRE
+- en: We’ve excluded some of the details here to shrink the output a bit. But what
+    we can see is that there are two containers on the bridge network, and they are
+    attached to the `docker0` bridge on the host. We can also see the IP addresses
+    of each container (`IPv4Address` and `IPv6Address`) and the host network address
+    they are bound to (`host_binding_ipv4`). This is useful when you are trying to
+    understand the internal structure of the bridged network. If you have containers
+    on different networks, they may not have connectivity to one another, depending
+    on how the networks were configured.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: In general, we recommend leaving your containers on the default bridge network
+    until you have a good reason not to or are running `docker compose` or a scheduler
+    that manages container networks on its own. In addition, naming your containers
+    in some identifiable way helps here because we can’t see the image information.
+    The name and ID are the only references we have in this output that can tie us
+    back to a `docker container ls` listing. Some schedulers don’t do a good job of
+    naming containers, which is too bad because it can be really helpful for debugging.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As we’ve seen, containers will normally have their own network stack and their
+    own IP address, unless they are running in host networking mode, which we will
+    discuss further in [“Networking”](ch11.html#docker_net). But what about when we
+    look at them from the host machine itself? Because containers have their own network
+    and addresses, they won’t show up in all `netstat` output on the host. But we
+    know that the ports you map to your containers are bound to the host.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Running `netstat -an` on the Docker server works as expected, as shown here:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE17]'
+  prefs: []
+  type: TYPE_PRE
+- en: Here we can see all of the interfaces that we’re listening on. Our container
+    is bound to port `8080` on IP address `0.0.0.0`. That shows up. But what happens
+    when we ask `netstat` to show us the process name that’s bound to the port?
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE18]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'We see the same output, but notice what is bound to the port: `docker-proxy`.
+    That’s because, in its default configuration, Docker has a proxy written in Go
+    that sits between all of the containers and the outside world. That means that
+    when we look at this output, all containers running via Docker will be associated
+    with `docker-proxy`. Notice that there is no clue here about which specific container
+    `docker-proxy` is handling. Fortunately, `docker container ls` shows us which
+    containers are bound to which ports, so this isn’t a big deal. But it’s not obvious,
+    and you probably want to be aware of it before you’re debugging a production failure.
+    Still, passing the `p` flag to `netstat` is helpful in identifying which ports
+    are tied to containers.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: If you’re using host networking in your container, then this layer is skipped.
+    There is no `docker-proxy`, and the process in the container can bind to the port
+    directly. It also shows up as a normal process in `netstat -anp` output.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Other network inspection commands work largely as expected, including `tcpdump`,
+    but it’s important to remember that `docker-proxy` is there, in between the host’s
+    network interface and the container, and that the containers have their own network
+    interfaces on a virtual network.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Image History
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'When you’re building and deploying a single container, it’s easy to keep track
+    of where it came from and what images it’s sitting on top of. But this rapidly
+    becomes unmanageable when you’re shipping many containers with images that are
+    built and maintained by different teams. How can you tell what layers are actually
+    underneath the one your container is running on? Your container’s image tag hopefully
+    makes it clear which build of your application you’re running, but the image tag
+    doesn’t reveal anything about the image layers that your application is built
+    on. `docker image history` does just that. You can see each layer that exists
+    in the inspected image, the sizes of each layer, and the commands that were used
+    to build it:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE19]'
+  prefs: []
+  type: TYPE_PRE
+- en: Using `docker image history` can be useful, for example, when you are trying
+    to determine why the size of the final image is much larger than expected. The
+    layers are listed in order, with the first one at the bottom of the list and the
+    last one at the top.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Here we can see that the command output has been truncated in a few cases. For
+    long commands, adding the `--no-trunc` option to the `docker image history` command
+    will let you see the complete command that was used to build each layer. Just
+    be aware that `--no-trunc` will make the output much larger and more difficult
+    to visually scan in most cases.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Inspecting a Container
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'In [Chapter 4](ch04.html#docker_images), we showed you how to read the `docker
+    container inspect` output to see how a container is configured. But underneath
+    that is a directory on the host’s disk that is dedicated to the container. Usually
+    this is */var/lib/docker/containers*. If you look at that directory, it contains
+    very long SHA hashes, as shown here:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE20]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'That’s a bit daunting. But those are just the container IDs in long form. If
+    you want to look at the configuration for a particular container, you just need
+    to use `docker container ls` to find its short ID, and then find the directory
+    that matches:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE21]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You can view the short ID from `docker container ls`, then match it to the
+    `ls /var/lib/docker/containers` output to see that you want the directory beginning
+    with `c58bfeffb9e6`. Command-line tab completion is helpful here. If you need
+    exact matching, you can do a `docker container inspect c58bfeffb9e6` and grab
+    the long ID from the output. This directory contains some pretty interesting files
+    related to the container:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE22]'
+  prefs: []
+  type: TYPE_PRE
+- en: As we discussed in [Chapter 5](ch05.html#docker_containers), this directory
+    contains some files that are bind-mounted directly into your container, like *hosts*,
+    *resolv.conf*, and *hostname*. If you are running the default logging mechanism,
+    then this directory is also where Docker stores the JSON file containing the log
+    that is shown with the `docker container logs` command, the JSON configuration
+    that backs the `docker container inspect` output (*config.v2.json*), and the networking
+    configuration for the container (*hostconfig.json*). The *resolv.conf.hash* file
+    is used by Docker to determine when the container’s file has diverged from the
+    current one on the host so it can be updated.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This directory can also be really helpful in the event of severe failure. Even
+    if we’re not able to enter the container, or if `docker` is not responding, we
+    can look at how the container was configured. It’s also pretty useful to understand
+    where those files are mounted from inside the container. Keep in mind that it’s
+    not a good idea to modify these files. Docker expects them to contain reality,
+    and if you alter that reality, you’re asking for trouble. But it’s another avenue
+    for information on what’s happening in your container.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Filesystem Inspection
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'Docker, regardless of the backend actually in use, has a layered filesystem
+    that allows it to track the changes in any given container. This is how the images
+    are assembled when you do a build, but it is also useful when you’re trying to
+    figure out if a Linux container has changed anything and, if so, what. A common
+    problem with containerized applications is that they may continue to write things
+    into the container’s filesystem. Normally, you don’t want your containers to do
+    that, to the extent possible, and it can help debugging to figure out if your
+    processes have been writing into the container. Sometimes this is helpful in turning
+    up stray logfiles that exist in the container as well. As with most of the core
+    tools, this kind of inspection is built into the `docker` command-line tooling
+    and is also exposed via the API. Let’s take a look at what this shows us. Let’s
+    launch a quick container and use its name to explore this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE23]'
+  prefs: []
+  type: TYPE_PRE
+- en: Each line begins with either `A` or `C`, which is shorthand for *added* or *changed*,
+    respectively. We can see that this container is running `nginx`, that the `nginx`
+    configuration file has been written to, and that some temporary files have been
+    created in a new directory named `/var/cache/nginx`. Being able to find out how
+    the container filesystem is being used can be very useful when you are trying
+    to optimize and harden your container’s filesystem usage.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Further detailed inspection requires exploring the container with `docker container
+    export`, `docker container exec`, or `nsenter` and the like, to see exactly what
+    is in the filesystem. But `docker container diff` gives you a good place to start.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Wrap-Up
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'At this point, you should have a good idea of how to deploy and debug individual
+    containers in development and production, but how do you start to scale this for
+    larger application ecosystems? In the next chapter, we’ll take a look at one of
+    the simpler Docker orchestration tools: Docker Compose. This tool is a nice bridge
+    between a single Linux container and a production orchestration system. It delivers
+    a lot of value in development environments and throughout the DevOps pipeline.'
+  prefs: []
+  type: TYPE_NORMAL

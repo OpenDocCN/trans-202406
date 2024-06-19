@@ -1,0 +1,678 @@
+- en: Chapter 15\. Configuring Sharding
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'In the previous chapter, you set up a “cluster” on one machine. This chapter
+    covers how to set up a more realistic cluster and how each piece fits. In particular,
+    you’ll learn:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: How to set up config servers, shards, and *mongos* processes
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: How to add capacity to a cluster
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: How data is stored and distributed
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: When to Shard
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Deciding when to shard is a balancing act. You generally do not want to shard
+    too early because it adds operational complexity to your deployment and forces
+    you to make design decisions that are difficult to change later. On the other
+    hand, you do not want to wait too long to shard because it is difficult to shard
+    an overloaded system without downtime.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In general, sharding is used to:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Increase available RAM
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Increase available disk space
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Reduce load on a server
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Read or write data with greater throughput than a single *mongod* can handle
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Thus, good monitoring is important to decide when sharding will be necessary.
+    Carefully measure each of these metrics. Generally people speed toward one of
+    these bottlenecks much faster than the others, so figure out which one your deployment
+    will need to provision for first and make plans well in advance about when and
+    how you plan to convert your replica set.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Starting the Servers
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'The first step in creating a cluster is to start up all of the processes required.
+    As mentioned in the previous chapter, you need to set up the *mongos* and the
+    shards. There’s also a third component, the config servers, which are an important
+    piece. Config servers are normal *mongod* servers that store the cluster configuration:
+    which replica sets host the shards, what collections are sharded by, and on which
+    shard each chunk is located. MongoDB 3.2 introduced the use of replica sets as
+    config servers. Replica sets replace the original syncing mechanism used by config
+    servers; the ability to use that mechanism was removed in MongoDB 3.4.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Config Servers
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Config servers are the brains of your cluster: they hold all of the metadata
+    about which servers hold what data. Thus, they must be set up first, and the data
+    they hold is *extremely* important: make sure that they are running with journaling
+    enabled and that their data is stored on nonephemeral drives. In production deployments,
+    your config server replica set should consist of at least three members. Each
+    config server should be on a separate physical machine, preferable geographically
+    distributed.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The config servers must be started before any of the *mongos* processes, as
+    *mongos* pulls its configuration from them. To begin, run the following commands
+    on three separate machines to start your config servers:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Then initiate the config servers as a replica set. To do this, connect a *mongo*
+    shell to one of the replica set members:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'and use the `rs.initiate()` helper:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: Here we’re using *configRS* as the replica set name. Note that this name appears
+    both on the command line when instantiating each config server and in the call
+    to `rs.initiate()`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `--configsvr` option indicates to the *mongod* that you are planning to
+    use it as a config server. On a server running with this option, clients (i.e.,
+    other cluster components) cannot write data to any database other than *config*
+    or *admin*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The *admin* database contains the collections related to authentication and
+    authorization, as well as the other *system.** collections for internal use. The
+    *config* database contains the collections that hold the sharded cluster metadata.
+    MongoDB writes data to the *config* database when the metadata changes, such as
+    after a chunk migration or a chunk split.
+  prefs: []
+  type: TYPE_NORMAL
+- en: When writing to config servers, MongoDB uses a `writeConcern` level of `"majority"`.
+    Similarly, when reading from config servers, MongoDB uses a `readConcern` level
+    of `"majority"`. This ensures that sharded cluster metadata will not be committed
+    to the config server replica set until it can’t be rolled back. It also ensures
+    that only metadata that will survive a failure of the config servers will be read.
+    This is necessary to ensure all *mongos* routers have a consistent view of how
+    data is organized in a sharded cluster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In terms of provisioning, config servers should be provisioned adequately in
+    terms of networking and CPU resources. They only hold a table of contents of the
+    data in the cluster so the storage resources required are minimal. They should
+    be deployed on separate hardware to avoid contention for the machine’s resources.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: If all of your config servers are lost, you must dig through the data on your
+    shards to figure out which data is where. This is possible, but slow and unpleasant.
+    Take frequent backups of config server data. Always take a backup of your config
+    servers before performing any cluster maintenance.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The mongos Processes
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Once you have three config servers running, start a *mongos* process for your
+    application to connect to. *mongos* processes need to know where the config servers
+    are, so you must always start *mongos* with the `--configdb` option:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: By default, *mongos* runs on port 27017\. Note that it does not need a data
+    directory (*mongos* holds no data itself; it loads the cluster configuration from
+    the config servers on startup). Make sure that you set `--logpath` to save the
+    *mongos* log somewhere safe.
+  prefs: []
+  type: TYPE_NORMAL
+- en: You should start a small number of *mongos* processes and locate them as close
+    to all the shards as possible. This improves performance of queries that need
+    to access multiple shards or which perform scatter/gather operations. The minimal
+    setup is at least two *mongos* processes to ensure high availability. It is possible
+    to run tens or hundreds of *mongos* processes but this causes resource contention
+    on the *config server*s. The recommended approach is to provide a small pool of
+    routers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Adding a Shard from a Replica Set
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Finally, you’re ready to add a shard. There are two possibilities: you may
+    have an existing replica set or you may be starting from scratch. We will cover
+    starting from an existing set. If you are starting from scratch, initialize an
+    empty set and follow the steps outlined here.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you already have a replica set serving your application, that will become
+    your first shard. To convert it into a shard, you need to make some small configuration
+    modifications to the members and then tell the *mongos* how to find the replica
+    set that will comprise the shard.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'For example, if you have a replica set named *rs0* on *svr1.example.net*, *svr2.example.net*,
+    and *svr3.example.net*, you would first connect to one of the members using the
+    *mongo* shell:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Then use `rs.status()` to determine which member is the primary and which are
+    secondaries:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: Beginning with MongoDB 3.4, for sharded clusters, *mongod* instances for shards
+    *must* be configured with the `--shardsvr` option, either via the configuration
+    file setting `sharding.clusterRole` or via the command-line option `--shardsvr`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: You will need to do this for each of the members of the replica set you are
+    in the process of converting to a shard. You’ll do this by first restarting each
+    secondary in turn with the `--shardsvr` option, then stepping down the primary
+    and restarting it with the `--shardsvr` option.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'After shutting down a secondary, restart it as follows:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note that you’ll need to use the correct IP address for each secondary for the
+    `--bind_ip` parameter.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Now connect a *mongo* shell to the primary:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'and step it down:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Then restart the former primary with the `--shardsvr` option:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Now you’re ready to add your replica set as a shard. Connect a *mongo* shell
+    to the *admin* database of the *mongos*:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'And add a shard to the cluster using the `sh.addShard()` method:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: You can specify all the members of the set, but you do not have to. *mongos*
+    will automatically detect any members that were not included in the seed list.
+    If you run `sh.status()`, you’ll see that MongoDB soon lists the shard as
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: The set name, *rs0*, is taken on as an identifier for this shard. If you ever
+    want to remove this shard or migrate data to it, you can use *rs0* to describe
+    it. This works better than using a specific server (e.g., *svr1.example.net*),
+    as replica set membership and status can change over time.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Once you’ve added the replica set as a shard you can convert your application
+    from connecting to the replica set to connecting to the *mongos*. When you add
+    the shard, *mongos* registers that all the databases in the replica set are “owned”
+    by that shard, so it will pass through all queries to your new shard. *mongos*
+    will also automatically handle failover for your application as your client library
+    would: it will pass the errors through to you.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Test failing over a shard’s primary in a development environment to ensure that
+    your application handles the errors received from *mongos* correctly (they should
+    be identical to the errors that you receive from talking to the primary directly).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Once you have added a shard, you *must* set up all clients to send requests
+    to the *mongos* instead of contacting the replica set. Sharding will not function
+    correctly if some clients are still making requests to the replica set directly
+    (not through the *mongos*). Switch all clients to contacting the *mongos* immediately
+    after adding the shard and set up a firewall rule to ensure that they are unable
+    to connect directly to the shard.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Prior to MongoDB 3.6 it was possible to create a standalone *mongod* as a shard.
+    This is no longer an option in versions of MongoDB later than 3.6\. All shards
+    must be replica sets.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Adding Capacity
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: When you want to add more capacity, you’ll need to add more shards. To add a
+    new, empty shard, create a replica set. Make sure it has a distinct name from
+    any of your other shards. Once it is initialized and has a primary, add it to
+    your cluster by running the `addShard` command through *mongos*, specifying the
+    new replica set’s name and its hosts as seeds.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you have several existing replica sets that are not shards, you can add all
+    of them as new shards in your cluster so long as they do not have any database
+    names in common. For example, if you had one replica set with a *blog* database,
+    one with a *calendar* database, and one with *mail*, *tel*, and *music* databases,
+    you could add each replica set as a shard and end up with a cluster with three
+    shards and five databases. However, if you had a fourth replica set that also
+    had a database named *tel*, *mongos* would refuse to add it to the cluster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Sharding Data
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'MongoDB won’t distribute your data automatically until you tell it how to do
+    so. You must explicitly tell both the database and the collection that you want
+    them to be distributed. For example, suppose you wanted to shard the *artists*
+    collection in the *music* database on the `"name"` key. First, you’d enable sharding
+    for the database:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  prefs: []
+  type: TYPE_PRE
+- en: Sharding a database is always a prerequisite to sharding one of its collections.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Once you’ve enabled sharding on the database level, you can shard a collection
+    by running `sh.shardCollection()`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE14]'
+  prefs: []
+  type: TYPE_PRE
+- en: Now the *artists* collection will be sharded by the `"name"` key. If you are
+    sharding an existing collection there must be an index on the `"name"` field;
+    otherwise, the `shardCollection` call will return an error. If you get an error,
+    create the index (*mongos* will return the index it suggests as part of the error
+    message) and retry the `shardCollection` command.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If the collection you are sharding does not yet exist, *mongos* will automatically
+    create the shard key index for you.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `shardCollection` command splits the collection into chunks, which are the
+    units MongoDB uses to move data around. Once the command returns successfully,
+    MongoDB will begin balancing the collection across the shards in your cluster.
+    This process is not instantaneous. For large collections it may take hours to
+    finish this initial balancing. This time can be reduced with presplitting where
+    chunks are created on the shards prior to loading the data. Data loaded after
+    this point will be inserted directly to the current shard without requiring additional
+    balancing.
+  prefs: []
+  type: TYPE_NORMAL
+- en: How MongoDB Tracks Cluster Data
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Each *mongos* must always know where to find a document, given its shard key.
+    Theoretically, MongoDB could track where each and every document lived, but this
+    becomes unwieldy for collections with millions or billions of documents. Thus,
+    MongoDB groups documents into chunks, which are documents in a given range of
+    the shard key. A chunk always lives on a single shard, so MongoDB can keep a small
+    table of chunks mapped to shards.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'For example, if a user collection’s shard key is `{"age" : 1}`, one chunk might
+    be all documents with an `"age"` field between `3` and `17`. If *mongos* gets
+    a query for `{"age" : 5}`, it can route the query to the shard where this chunk
+    lives.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'As writes occur, the number and size of the documents in a chunk might change.
+    Inserts can make a chunk contain more documents, and removes fewer. For example,
+    if we were making a game for children and preteens, our chunk for ages 3−17 might
+    get larger and larger (one would hope). Almost all of our users would be in that
+    chunk and so would be on a single shard, somewhat defeating the point of distributing
+    our data. Thus, once a chunk grows to a certain size, MongoDB automatically splits
+    it into two smaller chunks. In this example, the original chunk might be split
+    into one chunk containing documents with ages 3 through 11 and another with ages
+    12 through 17\. Note that these two chunks still cover the entire age range that
+    the original chunk covered: 3−17\. As these new chunks grow, they can be split
+    into still smaller chunks until there is a chunk for each age.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: You cannot have chunks with overlapping ranges, like 3−15 and 12−17. If you
+    could, MongoDB would need to check both chunks when attempting to find an age
+    in the overlap, like 14\. It is more efficient to only have to look in one place,
+    particularly once chunks begin moving around the cluster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: A document always belongs to one and only one chunk. One consequence of this
+    rule is that you cannot use an array field as your shard key, since MongoDB creates
+    multiple index entries for arrays. For example, if a document had `[5, 26, 83]`
+    in its `"age"` field, it would belong in up to three chunks.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'A common misconception is that the data in a chunk is physically grouped on
+    disk. This is incorrect: chunks have no effect on how *mongod* stores collection
+    data.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Chunk Ranges
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Each chunk is described by the range it contains. A newly sharded collection
+    starts off with a single chunk, and every document lives in this chunk. This chunk’s
+    bounds are negative infinity to infinity, shown as `$minKey` and `$maxKey` in
+    the shell.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'As this chunk grows, MongoDB will automatically split it into two chunks, with
+    the range negative infinity to *`<some value>`* and *`<some value>`* to infinity.
+    *`<some value>`* is the same for both chunks: the lower chunk contains everything
+    up to (but not including) *`<some value>`*, and the upper chunk contains *`<some
+    value>`* and everything higher.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This may be more intuitive with an example. Suppose we were sharding by `"age"`
+    as described earlier. All documents with `"age"` between `3` and `17` are contained
+    in one chunk: `3 ≤ "age" < 17`. When this is split, we end up with two ranges:
+    `3 ≤ "age" < 12` in one chunk and `12 ≤ "age" < 17` in the other. 12 is called
+    the *split point*.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Chunk information is stored in the *config.chunks* collection. If you looked
+    at the contents of that collection, you’d see documents that looked something
+    like this (some fields have been omitted for clarity):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE15]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Based on the *config.chunks* documents shown, here are a few examples of where
+    various documents would live:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`{"_id" : 123, "age" : 50}`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This document would live in the second chunk, as that chunk contains all documents
+    with `"age"` between `23` and `100`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`{"_id" : 456, "age" : 100}`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This document would live in the third chunk, as lower bounds are inclusive.
+    The second chunk contains all documents up to `"age" : 100`, but not any documents
+    where `"age"` equals `100`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`{"_id" : 789, "age" : -101}`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This document would not be in any of these chunks. It would be in some chunk
+    with a range lower than the first chunk’s.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'With a compound shard key, shard ranges work the same way that sorting by the
+    two keys would work. For example, suppose that we had a shard key on `{"username"
+    : 1, "age" : 1}`. Then we might have chunk ranges such as:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE16]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Thus, *mongos* can easily find which chunk someone with a given username (or
+    a given username and age) lives in. However, given just an age, *mongos* would
+    have to check all, or almost all, of the chunks. If we wanted to be able to target
+    queries on age to the right chunk, we’d have to use the “opposite” shard key:
+    `{"age" : 1, "username" : 1}`. This is often a point of confusion: a range over
+    the second half of a shard key will cut across multiple chunks.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Splitting Chunks
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Each shard primary *mongod* tracks their current chunks and, once they reach
+    a certain threshold, checks if the chunk needs to be split, as shown in Figures
+    [15-1](#splitstorm1) and [15-2](#splitstorm2). If the chunk does need to be split,
+    the *mongod* will request the global chunk size configuration value from the config
+    servers. It will then perform the chunk split and update the metadata on the config
+    servers. New chunk documents are created on the config servers and the old chunk’s
+    range (`"max"`) is modified. If the chunk is the top chunk of the shard, then
+    the *mongod* will request the balancer move this chunk to a different shard. The
+    idea is to prevent a shard from becoming “hot” where the shard key uses a monotonically
+    increasing key.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'A shard may not be able to find any split points, though, even for a large
+    chunk, as there are a limited number of ways to legally split a chunk. Any two
+    documents with the same shard key must live in the same chunk, so chunks can only
+    be split between documents where the shard key’s value changes. For example, if
+    the shard key was `"age"`, the following chunk could be split at the points where
+    the shard key changed, as indicated:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE17]'
+  prefs: []
+  type: TYPE_PRE
+- en: The primary *mongod* for the shard only requests that the top chunk for a shard
+    when split be moved to the balancer. The other chunks will remain on the shard
+    unless manually moved.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If, however, the chunk contained the following documents, it could not be split
+    (unless the application started inserting fractional ages):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE18]'
+  prefs: []
+  type: TYPE_PRE
+- en: Thus, having a variety of values for your shard key is important. Other important
+    properties will be covered in the next chapter.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If one of the config servers is down when a *mongod* tries to do a split, the
+    *mongod* won’t be able to update the metadata (as shown in [Figure 15-3](#splitstorm4)).
+    All config servers must be up and reachable for splits to happen. If the *mongod*
+    continues to receive write requests for the chunk, it will keep trying to split
+    the chunk and fail. As long as the config servers are not healthy, splits will
+    continue not to work, and all the split attempts can slow down the *mongod* and
+    the shard involved (which repeats the process shown in Figures [15-1](#splitstorm1)
+    through [15-3](#splitstorm4) for each incoming write). This process of *mongod*
+    repeatedly attempting to split a chunk and being unable to is called a *split
+    storm*. The only way to prevent split storms is to ensure that your config servers
+    are up and healthy as much of the time as possible.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![](Images/mdb3_1501.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 15-1\. When a client writes to a chunk, the mongod will check its split
+    threshold for the chunk
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '![](Images/mdb3_1502.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 15-2\. If the split threshold has been reached, the mongod will send
+    a request to the balancer to migrate the top chunk; otherwise the chunk remains
+    on the shard
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '![](Images/mdb3_1503.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 15-3\. The mongod chooses a split point and attempts to inform the config
+    server, but cannot reach it; thus, it is still over its split threshold for the
+    chunk and any subsequent writes will trigger this process again
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The Balancer
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The *balancer* is responsible for migrating data. It regularly checks for imbalances
+    between shards and, if it finds an imbalance, will begin migrating chunks. In
+    MongoDB version 3.4+, the balancer is located on the primary member of the config
+    server replica set; prior to this version, each *mongos* used to play the part
+    of “the balancer” occasionally.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The balancer is a background process on the primary of the config server replica
+    set, which monitors the number of chunks on each shard. It becomes active only
+    when a shard’s number of chunks reaches a specific migration threshold.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: In MongoDB 3.4+, the number of concurrent migrations increased to one migration
+    per shard with a maximum number of concurrent migrations being half the total
+    number of shards. In earlier versions only one concurrent migration in total was
+    supported.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Assuming that some collections have hit the threshold, the balancer will begin
+    migrating chunks. It chooses a chunk from the overloaded shard and asks the shard
+    if it should split the chunk before migrating. Once it does any necessary splits,
+    it migrates the chunk(s) to a machine with fewer chunks.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'An application using the cluster does not need be aware that the data is moving:
+    all reads and writes are routed to the old chunk until the move is complete. Once
+    the metadata is updated, any *mongos* process attempting to access the data in
+    the old location will get an error. These errors should not be visible to the
+    client: the *mongos* will silently handle the error and retry the operation on
+    the new shard.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is a common cause of errors you might see in *mongos* logs that relate
+    to being “unable to `setShardVersion`.” When a *mongos* gets this type of error,
+    it looks up the new location of the data from the config servers, updates its
+    chunk table, and attempts the request again. If it successfully retrieves the
+    data from the new location, it will return it to the client as though nothing
+    went wrong (but it will print a message in the log that the error occurred).
+  prefs: []
+  type: TYPE_NORMAL
+- en: If the *mongos* is unable to retrieve the new chunk location because the config
+    servers are unavailable, it will return an error to the client. This is another
+    reason why it is important to always have config servers up and healthy.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Collations
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: '*Collations* in MongoDB allow for the specification of language-specific rules
+    for string comparison. Examples of these rules include how lettercase and accent
+    marks are compared. It is possible to shard a collection that is a default collation.
+    There are two requirements: the collection must have an index whose prefix is
+    the shard key, and the index must also have the collation `{ locale: "simple"
+    }`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Change Streams
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: '*Change Streams* allow applications to track real-time changes to the data
+    in the database. Prior to MongoDB 3.6, this was only possible by tailing the oplog
+    and was a complex error-prone operation. Change streams provide a subscription
+    mechanism for all data changes on a collection, a set of collections, a database,
+    or across a full deployment. The aggregation framework is used by this feature.
+    It allows applications to filter for specific changes or to transform the change
+    notifications received. In a sharded cluster, all change stream operations must
+    be issued against a *mongos*.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The changes across a sharded cluster are kept ordered through the use of a global
+    logical clock. This guarantees the order of changes, and stream notifications
+    can be safely interpreted by the order of their receipt. The *mongos* needs to
+    check with each shard upon receipt of a change notification, to ensure that no
+    shard has seen more recent changes. The activity level of the cluster and the
+    geographical distribution of the shards can both impact the response time for
+    this checking. The use of notification filters can improve the response time in
+    these situations.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'There are a few notes and caveats when using change streams with a sharded
+    cluster. You open a change stream by issuing an open change stream operation.
+    In sharded deployments, this *must* be issued against a *mongos*. If an update
+    operation with `multi: true` is run against a sharded collection with an open
+    change stream, then it is possible for notifications to be sent for orphaned documents.
+    If a shard is removed, it may cause an open change stream cursor to close—furthermore,
+    that cursor may not be fully resumable.'
+  prefs: []
+  type: TYPE_NORMAL

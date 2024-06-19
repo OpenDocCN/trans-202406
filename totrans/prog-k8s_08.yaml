@@ -1,0 +1,2590 @@
+- en: Chapter 8\. Custom API Servers
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: As an alternative to CustomResourceDefinitions, you can use a custom API server.
+    Custom API servers can serve API groups with resources the same way the main Kubernetes
+    API server does. In contrast to CRDs, there are hardly any limits to what you
+    can do with a custom API server.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This chapter begins by listing a number of reasons why CRDs might not be the
+    right solution for your use case. It describes the aggregation pattern that makes
+    it possible to extend the Kubernetes API surface with a custom API server. Finally,
+    you’ll learn to actually implement a custom API server using Golang.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Use Cases for Custom API Servers
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'A custom API server can be used in place of CRDs. It can do everything that
+    CRDs can do and offers nearly infinite flexibility. Of course, this comes at a
+    cost: complexity of both development and operation.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s look at some limits of CRDs as of the time of this writing (when Kubernetes
+    1.14 was the stable release). CRDs:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Use `etcd` as their storage medium (or whatever the Kubernetes API server uses).
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Do not support protobuf, only JSON.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Support only two kinds of subresources: */status* and */scale* (see [“Subresources”](ch04.html#crd-subresources)).'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Do not support graceful deletion.^([1](ch08.html#idm46336853170760)) Finalizers
+    can simulate this but do not allow a custom graceful deletion time.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Add significantly to the Kubernetes API server’s CPU load, because all algorithms
+    are implemented in a generic way (for example, validation).
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Implement only standard CRUD semantics for the API endpoints.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Do not support cohabitation of resources (i.e., resources in different API groups
+    or resources of different names that share storage).^([2](ch08.html#idm46336853165528))
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'A custom API server, in contrast, does not have these restrictions. A custom
+    API server:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Can use any storage medium. There are custom API servers, such as:'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The [metrics API server](http://bit.ly/2FvgfAV), which stores data in memory
+    for maximum performance
+  prefs:
+  - PREF_IND
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: API servers mirroring a Docker registry in [OpenShift](http://redhat.com/openshift)
+  prefs:
+  - PREF_IND
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: API servers writing to a time series database
+  prefs:
+  - PREF_IND
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: API servers mirroring cloud APIs
+  prefs:
+  - PREF_IND
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: API servers mirroring other API objects, like projects in [OpenShift](http://redhat.com/openshift)
+    that mirror Kubernetes namespaces
+  prefs:
+  - PREF_IND
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Can provide protobuf support like all native Kubernetes resources do. For this
+    you must create a *.proto* file by using [go-to-protobuf](http://bit.ly/31OLSie)
+    and then using the protobuf compiler `protoc` to generate serializers, which are
+    then compiled into the binary.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Can provide any custom subresource; for example, the Kubernetes API server provides
+    */exec*, */logs*, */port-forward*, and more, most of which use very custom protocols
+    like WebSockets or HTTP/2 streaming.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Can implement graceful deletion as Kubernetes does for pods. `kubectl` waits
+    for the deletion, and the user can even provide a custom graceful termination
+    period.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Can implement all operations like validation, admission, and conversion in the
+    most efficient way using Golang, without a roundtrip through webhooks, which add
+    further latency. This can matter for high performance use cases or if there is
+    a large number of objects. Think about pod objects in a huge cluster with thousands
+    of nodes, and two magnitudes more pods.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Can implement custom semantics, like the atomic reservation of a service IP
+    in the core v1 `Service` kind. At the moment the service is created, a unique
+    service IP is assigned and directly returned. To a limited degree, special semantics
+    like this can of course be implemented with admission webhooks (see [“Admission
+    Webhooks”](ch09.html#admission-webhooks)), though those webhooks can never reliably
+    know whether the passed object was actually created or updated: they are called
+    optimistically, but a later step in the request pipeline might cancel the request.
+    In other words: side effects in webhooks are tricky because there is no undo trigger
+    if a request fails.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Can serve resources that have a common storage mechanism (i.e., a common `etcd`
+    key path prefix) but live in different API groups or are named differently. For
+    example, Kubernetes stores deployments and other resources in the API group `extensions/v1`
+    and then moves them to more specific API groups like `apps/v1`.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: In other words, custom API servers are a solution for situations where CRDs
+    are still limited. In transitional scenarios where it is important to not break
+    resource compatibility when moving to new semantics, custom API servers are often
+    much more flexible.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Example: A Pizza Restaurant'
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'To learn how custom API servers are implemented, in this section we will look
+    at an example project: a custom API server implementing a pizza restaurant API.
+    Let’s take a look at the requirements.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'We want to create two kinds in the `restaurant.programming-kubernetes.info`
+    API group:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`Topping`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Pizza toppings (e.g., salami, mozzarella, or tomato)
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`Pizza`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The type of pizza offered in the restaurant
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The toppings are cluster-wide resources and hold only a floating-point value
+    for the cost of one unit of the topping. An instance is as simple as:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Each pizza can have an arbitrary number of toppings; for example:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: The list of toppings is ordered (like any list in YAML or JSON), but the order
+    does not really matter for the semantics of the type. The customer will get the
+    same pizza in any case. We want to allow duplicates in the list in order to allow,
+    say, a pizza with extra cheese.
+  prefs: []
+  type: TYPE_NORMAL
+- en: All this can be implemented easily with CRDs. Now let’s add some requirements
+    that go beyond the basic CRD capabilities:^([3](ch08.html#idm46336853099640))
+  prefs: []
+  type: TYPE_NORMAL
+- en: We want to allow only toppings in a pizza specification that have a corresponding
+    `Topping` object.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: We also want to assume that we first introduced this API as a `v1alpha1` version
+    but eventually learned that we want another representation of the toppings in
+    the `v1beta1` version of the same API.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: In other words, we want to have two versions and convert seamlessly between
+    them.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The full implementation of this API as a custom API server can be found at
+    [the book’s GitHub repository](http://bit.ly/2x9C3gR). In the rest of this chapter,
+    we will go through all the major parts of that project and learn how it works.
+    In the process, you’ll see a lot of the concepts presented in the previous chapter
+    in a different light: namely, the Golang implementation that is also behind the
+    Kubernetes API server. A number of design decisions highlighted in CRDs also will
+    become clearer.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Hence, we highly recommend you read through this chapter even if you don’t plan
+    to go the route of a custom API server. Maybe the concepts presented here will
+    be made available for CRDs as well in the future, in which case having knowledge
+    of custom API servers will be useful to you.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The Architecture: Aggregation'
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Before going into the technical implementation details, we want to take a higher-level
+    view of the custom API server architecture in the context of a Kubernetes cluster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Custom API servers are processes serving API groups, usually built using the
+    generic API server library [*k8s.io/apiserver*](http://bit.ly/2X3joNX). These
+    processes can run inside or outside of the cluster. In the former case, they run
+    inside pods, with a service in front.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The main Kubernetes API server, called `kube-apiserver`, is always the first
+    point of contact for `kubectl` and other API clients. API groups served by a custom
+    API server are proxied by the `kube-apiserver` process to the custom API server
+    process. In other words, the `kube-apiserver` process knows about all of the custom
+    API servers and the API groups they serve, in order to be able to proxy the right
+    requests to them.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The component doing this proxying is inside the `kube-apiserver` process and
+    is called [`kube-aggregator`](http://bit.ly/2X10C9W). The process of proxying
+    API requests to the custom API server is called *API aggregation*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s look a bit more into the path of requests targeted at a custom API server,
+    but coming in at the Kubernetes API server TCP socket (see [Figure 8-1](#aggregation-kube-apiserver)):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Requests are received by the Kubernetes API server.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: They pass the handler chain consisting of authentication, audit logging, impersonation,
+    max-in-flight throttling, authorization, and more (the figure is just a sketch
+    and is not complete).
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: As the Kubernetes API server knows the aggregated APIs, it can intercept requests
+    to the HTTP path */apis/`aggregated-API-group-name`*.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: The Kubernetes API server forwards the request to the custom API server.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: '![Kubernetes main API server `kube-apiserver` with an integrated `kube-aggregator`](assets/prku_0801.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 8-1\. Kubernetes main API server kube-apiserver with an integrated kube-aggregator
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The `kube-aggregator` proxies requests under the HTTP path for an API group
+    version (i.e., everything under */apis/`group-name`/`version`*). It does not have
+    to know the actual served resources in the API group version.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In contrast, the `kube-aggregator` serves the discovery endpoints */apis* and
+    */apis/`group-name`* of all aggregated custom API servers itself (it uses the
+    defined order explained in the following section) and returns the results without
+    talking to the aggregated custom API servers. Instead it uses the information
+    from the `APIService` resource. Let’s look at this process in detail.
+  prefs: []
+  type: TYPE_NORMAL
+- en: API Services
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'For the Kubernetes API server to know about the API groups a custom API server
+    serves, one `APIService` object must be created in the `apiregistration.k8s.io/v1`
+    API group. These objects list only the API groups and versions, not resources
+    or any further details:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: The name is arbitrary, but for clarity we suggest you use a name that identifies
+    the API group name and version—e.g., *`group-name-version`*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The service can be a normal [`ClusterIP` service](http://bit.ly/2X0zEEu) in
+    the cluster, or it can be an `ExternalName` service with a given DNS name for
+    out-of-cluster custom API servers. In both cases, the port must be 443\. No other
+    service port is supported (at the time of this writing). Service target port mapping
+    allows any chosen, preferably nonrestricted, higher port to be used for the custom
+    API server pods, so this is not a major restriction.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The certificate authority (CA) bundle is used for the Kubernetes API server
+    to trust the contacted service. Note that API requests can contain confidential
+    data. To avoid man-in-the-middle attacks, it is highly recommended that you set
+    the `caBundle` field and not use the `insecureSkipTLSVerify` alternative. This
+    is especially important for any production cluster, including a mechanism for
+    certificate rotation.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Finally, there are two priorities in the `APIService` object. These have some
+    tricky semantics, described in the Golang code documentation for the `APIService`
+    type:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: In other words, the `GroupPriorityMinimum` value determines where the group
+    is prioritized. If multiple `APIService` objects for different versions differ,
+    the highest value rules.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The second priority just orders the versions among each other to define the
+    preferred version to be used by dynamic clients.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Here is a list of the `GroupPriorityMinimum` values for the native Kubernetes
+    API groups:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: So using `2000` for PaaS-like APIs means that they are placed at the end of
+    this list.^([4](ch08.html#idm46336852602264))
+  prefs: []
+  type: TYPE_NORMAL
+- en: The order of the API groups plays a role during the REST mapping process in
+    `kubectl` (see [“REST Mapping”](ch03.html#RESTMapping)). This means it has actual
+    influence on the user experience. If there are conflicting resource names or short
+    names, the one with the highest `GroupPriorityMinimum` value wins.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Also, in the special case of replacing of an API group version using a custom
+    API server, this priority ordering might be of use. For example, you could replace
+    a native Kubernetes API group with a modified one (for whatever reason) by placing
+    the custom API service at a position with a lower `GroupPriorityMinimum` value
+    than the one in the upper table.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note again that the Kubernetes API server does not need to know the list of
+    resources for either of the discovery endpoints */apis*, and */apis/`group-name`*,
+    or for proxying. The list of resources is returned only via the third discovery
+    endpoint, */apis/`group-name`/`version`*. But as we have seen in the previous
+    section, this endpoint is served by the aggregated custom API server, not by `kube-aggregator`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Inner Structure of a Custom API Server
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'A custom API server resembles most of the parts that make up the Kubernetes
+    API server, though of course with different API group implementations, and without
+    an embedded `kube-aggregator` or an embedded `apiextension-apiserver` (which serves
+    CRDs). This leads to nearly the same architectural picture (shown in [Figure 8-2](#aggregation-aggregated-apiserver))
+    as the one in [Figure 8-1](#aggregation-kube-apiserver):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![An aggregated custom API server based on k8s.io/apiserver](assets/prku_0802.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 8-2\. An aggregated custom API server based on k8s.io/apiserver
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'We observe a number of things. An aggregated API server:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Has the same basic internal structure as the Kubernetes API server.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Has its own handler chain, including authentication, audit, impersonation, max-in-flight
+    throttling, and authorization (we will explain throughout this chapter why this
+    is necessary; see, for example, [“Delegated Authorization”](#aggregated-authorization)).
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Has its own resource handler pipeline, including decoding, conversion, admission,
+    REST mapping, and encoding.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Calls admission webhooks.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Might write to `etcd` (it can use a different storage backend, though). The
+    `etcd` cluster does not have to be the same as the one used by the Kubernetes
+    API server.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Has its own scheme and registry implementation for custom API groups. The registry
+    implementation might differ and be customized to any degree.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Does authentication again. It usually does client certificate authentication
+    and token-based authentication, calling back to the Kubernetes API server with
+    a `TokenAccessReview` request. We will discuss the authentication and trust architecture
+    in more detail shortly.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Does its own auditing. This means the Kubernetes API server audits certain fields,
+    but only on the meta level. Object-level auditing is done in the aggregated custom
+    API server.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Does its own authentication using `SubjectAccessReview` requests to the Kubernetes
+    API server. We will discuss authorization in more detail shortly.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Delegated Authentication and Trust
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: An aggregated custom API server (based on [*k8s.io/apiserver*](http://bit.ly/2X3joNX))
+    is built on the same authentication library as the Kubernetes API server. It can
+    use client certificates or tokens to authenticate a user.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Because an aggregated custom API server is architecturally placed behind the
+    Kubernetes API server (i.e., the Kubernetes API server receives requests and proxies
+    them to the aggregated custom API server), requests are already authenticated
+    by the Kubernetes API server. The Kubernetes API server stores the result of the
+    authentication—that is, the username and group membership—in HTTP request headers,
+    usually `X-Remote-User` and `X-Remote-Group` (these can be configured with the
+    `--requestheader-username-headers` and `--requestheader-group-headers` flags).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The aggregated custom API server has to know when to trust these headers; otherwise,
+    any other caller could claim to have done authentication and could set these headers.
+    This is handled by a special request header client CA. It is stored in the config
+    map *kube-system/extension-apiserver-authentication* (filename *requestheader-client-ca-file*).
+    Here is an example:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'With this information, an aggregated custom API server with default settings
+    will authenticate:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Clients using client certificates matching the given *client-ca-file*
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Clients preauthenticated by the Kubernetes API server whose requests are forwarded
+    using the given *requestheader-client-ca-file* and whose username and group memberships
+    are stored in the given HTTP headers `X-Remote-Group` and `X-Remote-User`
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Last but not least, there is a mechanism called `TokenAccessReview` that forwards
+    bearer tokens (received via the HTTP header `Authorization: bearer *token*`) back
+    to the Kubernetes API server in order to verify whether they are valid. The token
+    access review mechanism is disabled by default but can optionally be enabled;
+    see [“Options and Config Pattern and Startup Plumbing”](#aggregated-apiserver-development-options-config).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: We will see in the following sections how delegated authentication is actually
+    set up. While we’ve gone into detail about this mechanism here, inside an aggregated
+    custom API server this is mostly done automatically by the *k8s.io/apiserver*
+    library. But knowing what is going on behind the curtain is certainly valuable,
+    especially where security is involved.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Delegated Authorization
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: After authentication has been done, each request must be authorized. Authorization
+    is based on the username and group list. The default authorization mechanism in
+    Kubernetes is role-based access control (RBAC).
+  prefs: []
+  type: TYPE_NORMAL
+- en: RBAC maps identities to roles, and roles to authorization rules, which finally
+    accept or reject requests. We won’t go into all the details here about RBAC authorization
+    objects like roles and cluster roles, or role bindings and cluster role bindings
+    (see [“Getting the Permissions Right”](ch07.html#crds-rbac) for more). From an
+    architectural point of view it is enough to know that an aggregated custom API
+    server authorizes requests using delegated authorization via `SubjectAccessReview`s.
+    It does not evaluate RBAC rules itself but instead delegates evaluation to the
+    Kubernetes API server.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Let’s look at delegated authorization in more detail now.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'A subject access review is sent from the aggregated custom API server to the
+    Kubernetes API server on a request (if it does not find an answer in its authorization
+    cache). Here is an example of such a review object:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The Kubernetes API server receives this from the aggregated custom API server,
+    evaluates the RBAC rules in the cluster, and makes a decision, returning a `SubjectAccessReview`
+    object with a status field set; for example:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note here that it is possible that both `allowed` and `denied` are `false`.
+    This means that the Kubernetes API server could not make a decision, in which
+    case another authorizer inside an aggregated custom API server can make a decision
+    (API servers implement an authorization chain that is queried one by one, with
+    delegated authorization being one of the authorizers in that chain). This can
+    be used to model nonstandard authorization logic—that is, if in certain cases
+    there are no RBAC rules but an external authorization system is used instead.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Note that for performance reasons, the delegated authorization mechanism maintains
+    a local cache in each aggregated custom API server. By default, it caches 1,024
+    authorization entries with:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`5` minutes expiry for allowed authorization requests'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`30` seconds expiry for denied authorization requests'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: These values can be customized via `--authorization-webhook-cache-authorized-ttl`
+    and `--authorization-webhook-cache-unauthorized-ttl`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: We’ll see in the following sections how delegated authorization is set up in
+    code. Again, as with authentication, inside an aggregated custom API server delegated
+    authorization is mostly done automatically by the *k8s.io/apiserver* library.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Writing Custom API Servers
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: In the previous sections we looked at the architecture of aggregated API servers.
+    In this section we want to look at the implementation of an aggregated custom
+    API server in Golang.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The main Kubernetes API server is implemented via the *k8s.io/apiserver* library.
+    A custom API server will use the very same code. The main difference is that our
+    custom API server will run in-cluster. This means that it can assume that a `kube-apiserver`
+    is available in the cluster and use it to do delegated authorization and to retrieve
+    other kube-native resources.
+  prefs: []
+  type: TYPE_NORMAL
+- en: We also assume that an `etcd` cluster is available and ready to be used by the
+    aggregated custom API server. It is not important whether this `etcd` is dedicated
+    or shared with the Kubernetes API server. Our custom API server will use a different
+    `etcd` key space to avoid conflicts.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The code examples in this chapter refer to [the example code on GitHub](http://bit.ly/2x9C3gR),
+    so look there for the complete source code. We will show only the most interesting
+    excerpt here, but you can always go to the complete example project, experiment
+    with it, and—very important for learning—run it in a real cluster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This `pizza-apiserver` project implements the example API shown in [“Example:
+    A Pizza Restaurant”](#aggregation-example).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Options and Config Pattern and Startup Plumbing
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The *k8s.io/apiserver* library uses an *options and config pattern* to create
+    a running API server.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: We’ll start with a couple of option structs that are bound to flags. Take them
+    from *k8s.io/apiserver* and add our custom options. Option structs from *k8s.io/apiserver*
+    can be tweaked in-code for special use cases, and the provided flags can be applied
+    to a flag set in order to be accessible to the user.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In the [example](http://bit.ly/2x9C3gR) we start very simply by basing everything
+    on the `RecommendedOptions`. These recommended options set up everything as needed
+    for a “normal” aggregated custom API server for simple APIs, like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: The `CustomServerOptions` embed `RecommendedOptions` and add one field on top.
+    `NewCustomServerOptions` is the constructor that fills the `CustomServerOptions`
+    struct with default values.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s look into some of the more interesting details:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`defaultEtcdPathPrefix` is the `etcd` prefix for all of our keys. As a key
+    space, we use */registry/pizza-apiserver.programming-kubernetes.info*, clearly
+    distinct from Kubernetes keys.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`SharedInformerFactory` is the process-wide shared informer factory for our
+    own CRs to avoid unnecessary informers for the same resources (see [Figure 3-5](ch03.html#informers-figure)).
+    Note that it is imported from the generated informer code in our project and not
+    from `client-go`.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`NewRecommendedOptions` sets everything up for an aggregated custom API server
+    with default values.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Let’s take a quick look at `NewRecommendedOptions`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: All of these can be tweaked if necessary. For example, if a custom default serving
+    port is desired, `RecommendedOptions.SecureServing.SecureServingOptions.BindPort`
+    can be set.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s briefly go through the existing option structs:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`Etcd` configures the storage stack that reads and write to `etcd`.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`SecureServing` configures everything around HTTPS (i.e., ports, certificates,
+    etc.)'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`Authentication` sets up delegated authentication as described in [“Delegated
+    Authentication and Trust”](#aggregated-authentication).'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`Authorization` sets up delegated authorization as described in [“Delegated
+    Authorization”](#aggregated-authorization).'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`Audit` sets up the auditing output stack. This is disabled by default, but
+    can be set to output an audit log file or to send audit events to an external
+    backend.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`Features` configures feature gates of alpha and beta features.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`CoreAPI` holds a path to a kubeconfig file to access the main API server.
+    This defaults to using the in-cluster configuration.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`Admission` is a stack of mutating and validating admission plug-ins that execute
+    for every incoming API request. This can be extended with custom in-code admission
+    plug-ins, or the default admission chain can be tweaked for the custom API server.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`ExtraAdmissionInitializers` allows us to add more initializers for admission.
+    Initializers implement the plumbing of, for example, informers or clients through
+    the custom API server. See [“Admission”](#aggregated-apiserver-development-admission)
+    for more about custom admission.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`ProcessInfo` holds information for event object creation (i.e., a process
+    name and a namespace). We have set it to `pizza-apiserver` for both values.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`Webhook` configures how webhooks operate (e.g., general setting for authentication
+    and admission webhook). It is set up with good defaults for a custom API server
+    that runs inside of a cluster. For API servers outside of the cluster, this would
+    be the place to configure how it can reach the webhook.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Options are coupled with flags; that is, they are conventionally on the same
+    abstraction level as flags. As a rule of thumb, options do not hold “running”
+    data structures. They are used during startup and then converted to configuration
+    or server objects, which are then run.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Options can be validated via the `Validate() error` method. This method will
+    also check that the user-provided flag values make logical sense.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Options can be completed in order to set default values, which should not show
+    up in the flags’ help text but which are necessary to get a complete set of options.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Options are converted to a server configuration (“config”) by the `Config()
+    (*apiserver.Config, error)` method. This is done by starting with a recommended
+    default configuration and then applying the options to it:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: The config created here contains runnable data structures; in other words, configs
+    are runtime objects, in contrast to the options, which correspond to flags. The
+    line `o.RecommendedOptions.SecureServing.MaybeDefaultWithSelfSignedCerts` creates
+    self-signed certificates in case the user has not passed flags for pregenerated
+    certificates.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As we’ve described, `genericapiserver.NewRecommendedConfig` returns a default
+    recommended configuration, and `RecommendedOptions.ApplyTo` changes it according
+    to flags (and other customized options).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The config struct of the `pizza-apiserver` project itself is just a wrapper
+    around the `RecommendedConfig` for our example custom API server:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: If more state for a running custom API server is necessary, `ExtraConfig` is
+    the place to put it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Similarly to option structs, the config has a `Complete() CompletedConfig`
+    method that sets default values. Because it is necessary to actually call `Complete()`
+    for the underlying configuration, it is common to enforce that via the type system
+    by introducing the unexported `completedConfig` data type. The idea here is that
+    only a call to `Complete()` can turn a `Config` into a `completeConfig`. The compiler
+    will complain if this call is not done:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Finally, the completed config can be turned into a `CustomServer` runtime struct
+    via the `New()` constructor:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note that we have intentionally omitted the API installation part here. We’ll
+    come back to this in [“API Installation”](#aggregated-apiserver-development-api-install)
+    (i.e., how you wire the *registries* into the custom API server during startup).
+    A registry implements the API and storage semantics of an API group. We will see
+    this for the restaurant API group in [“Registry and Strategy”](#aggregated-apiserver-development-registry).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The `CustomServer` object can finally be started with the `Run(stopCh <-chan
+    struct{}) error` method. This is called by the `Run` method of the options in
+    our example. That is, `CustomServerOptions.Run`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Creates the config
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Completes the config
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Creates the `CustomServer`
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Calls `CustomServer.Run`
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'This is the code:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE14]'
+  prefs: []
+  type: TYPE_PRE
+- en: The `PrepareRun()` call wires up the OpenAPI specification and might do other
+    post-API-installation operations. After calling it, the `Run` method starts the
+    actual server. It blocks until `stopCh` is closed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This example also wires a *post-start hook* named `start-pizza-apiserver-informers`.
+    As the name suggests, a post-start hook is called after the HTTPS server is up
+    and listening. Here, it starts the shared informer factories.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note that even local in-process informers of resources provided by the custom
+    API server itself speak via HTTPS to the localhost interface. So it makes sense
+    to start them after the server is up and the HTTPS port is listening.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Also note that the */healthz* endpoint returns success only after all post-start
+    hooks have finished successfully.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'With all the little plumbing pieces in place, the `pizza-apiserver` project
+    wraps everything up into a `cobra` command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE15]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'With `NewCommandStartCustomServer` the `main()` method of the process is pretty
+    simple:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE16]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Note especially the call to `SetupSignalHandler`: it wires Unix signal handling.
+    On `SIGINT` (triggered when you press Ctrl-C in a terminal) and `SIGKILL`, the
+    stop channel is closed. The stop channel is passed to the running custom API server,
+    and it shuts down when the stop channel is closed. Hence, the main loop will initiate
+    a shutdown when one of the signals is received. This shutdown is graceful in the
+    sense that running requests are finished (for up to 60 seconds by default) before
+    termination. It also makes sure that all requests are sent to the audit backend
+    and no audit data is dropped. After all that, `cmd.Execute()` will return and
+    the process will terminate.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The First Start
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Now we have everything in place to start the custom API server for the first
+    time. Assuming you have a cluster configured in *~/.kube/config*, you can use
+    it for delegated authentication and authorization:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE17]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'It will start up and start serving the generic API endpoints:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE18]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'We can also list the discovery endpoint, but the result is not very satisfying
+    yet—we have not created an API, so the discovery is empty:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE19]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Let’s take a look from a higher level:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: We have started a custom API server with the recommended options and config.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: We have a standard handler chain that includes delegated authentication, delegated
+    authorization, and auditing.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'We have an HTTPS server running and serving requests for the generic endpoints:
+    */logs*, */metrics*, */version*, */healthz*, and */apis*.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[Figure 8-3](#aggregation-kube-apiserver_without) shows this from 10,000 feet.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![The custom API server without APIs](assets/prku_0803.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 8-3\. The custom API server without APIs
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Internal Types and Conversion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Now that we’ve set up a running custom API server, it’s time to actually implement
+    APIs. Before doing so, we have to understand API versions and how they are handled
+    inside of an API server.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Every API server serves a number of resources and versions (see [Figure 2-3](ch02.html#gvr)).
+    Some resources have multiple versions. To make multiple versions of a resource
+    possible, the API server converts between versions.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To avoid quadratic growth of necessary conversions between versions, API servers
+    use an *internal version* when implementing the actual API logic. The internal
+    version is also often called *hub version* because it is a kind of hub that every
+    other version is converted to and from (see [Figure 8-4](#aggregation-version-star)).
+    The internal API logic is implemented just once for that hub version.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Conversion from and to the hub version](assets/prku_0804.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 8-4\. Conversion from and to the hub version
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '[Figure 8-5](#aggregation-conversions-figure) shows how the API servers make
+    use of the internal version in the life-cycle of an API request:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The user sends a request using a specific version (e.g., `v1`).
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The API server decodes the payload and converts it to the internal version.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The API server passes the internal version through admission and validation.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The API logic is implemented for internal versions in the registry.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`etcd` reads and writes the versioned object (e.g., `v2`—the storage version);
+    that is, it converts from and to the internal version.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Finally, the result is converted to the request version, in this case, `v1`.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '![Conversion of API objects during the life-cycle of a request](assets/prku_0805.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 8-5\. Conversion of API objects during the lifecycle of a request
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: On each edge between the internal hub version and the external version, a conversion
+    takes place. In [Figure 8-6](#aggregation-conversions-points), you can count the
+    number of conversions per request handler. In a writing operation (like creation
+    and update), at least four conversions are done, and even more if admission webhooks
+    are deployed in the cluster. As you can see, conversion is a crucial operation
+    in every API implementation.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Conversions and Defaulting during the life-cycle of a request](assets/prku_0806.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 8-6\. Conversions and defaulting during the lifecycle of a request
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: In addition to conversion, [Figure 8-6](#aggregation-conversions-points) also
+    shows when *defaulting* takes place. Defaulting is the process of filling in unspecified
+    field values. Defaulting is highly coupled with conversion, and is always done
+    on the external version when it comes in from the user’s request, from `etcd`
+    or from an admission webhook, but never when converted from the hub to the external
+    version.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Conversion is crucial for the API server mechanics. It is also crucial that
+    all conversions (back and forth) must be correct in the sense of being *roundtrippable*.
+    Roundtrippable means that we can convert back and forth in the version graph ([Figure 8-4](#aggregation-version-star))
+    starting with random values, and we never lose any information; that is, conversions
+    are bijective, or one-to-one. For example, we must be able to go from a random
+    (but valid) `v1` object to the internal hub type, then to `v1alpha1`, back to
+    the internal hub type, and then back to `v1`. The resulting object must be equivalent
+    to the original.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Making types roundtrippable often requires a lot of thought; it nearly always
+    drives the API design of new versions and also influences the extension of old
+    types in order to store the information that new versions carry.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In short: getting roundtripping right is hard—very hard at times. See [“Roundtrip
+    Testing”](#aggregated-apiserver-roundtrip) to learn how roundtripping can be tested
+    effectively.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Defaulting logic can changed during the lifecycle of an API server. Imagine
+    you add a new field to a type. The user might have old objects stored on disk,
+    or the `etcd` may have old objects. If that new field has a default, this field
+    value is set when the old, stored objects are sent to the API server, or when
+    the user retrieves one of the old objects from `etcd`. It looks like the new field
+    has existed forever, while in reality the defaulting process in the API server
+    sets the field values during the processing of the request.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Writing the API Types
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: As we have seen, to add an API to the custom API server, we have to write the
+    internal hub version types and the external version types and convert between
+    them. This is what we’ll look at now for the [pizza example project](http://bit.ly/2x9C3gR).
+  prefs: []
+  type: TYPE_NORMAL
+- en: API types are traditionally placed into the *pkg/apis/`group-name`* package
+    of the project with *pkg/apis/`group-name`/types.go* for internal types and *pkg/apis/`group-name`/`version`/types.go*
+    for the external versions). So, for our example, *pkg/apis/restaurant*, *pkg/apis/restaurant/v1alpha1/types.go*,
+    and *pkg/apis/restaurant/v1beta1/types.go*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Conversions will be created at *pkg/apis/`group-name`/`version`/zz_generated.conversion.go*
+    (for `conversion-gen` output) and *pkg/apis/`group-name`/`version`/conversion.go*
+    for custom conversions written by the developer.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In a similar way, defaulting code will be created for `defaulter-gen` output
+    at *pkg/apis/`group-name`/`version`/zz_generated.defaults.go* and at *pkg/apis/`group-name`/`version`/defaults.go*
+    for custom defaulting code written by the developer. We have both *pkg/apis/restaurant/v1alpha1/defaults.go*
+    and *pkg/apis/restaurant/v1beta1/defaults.go* in our example.
+  prefs: []
+  type: TYPE_NORMAL
+- en: We go into more detail about conversion and defaulting in [“Conversions”](#aggregated-apiserver-conversion)
+    and [“Defaulting”](#aggregated-apiserver-defaulting).
+  prefs: []
+  type: TYPE_NORMAL
+- en: With the exception of conversion and defaulting, we’ve seen most of this process
+    already for CustomResourceDefinitions in [“Anatomy of a type”](ch04.html#anatomy-of-CRD-types).
+    Native types for the external versions in our custom API server are defined exactly
+    the same way.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In addition, we have *pkg/apis/`group-name`/types.go* for the internal types,
+    the hub types. The main difference is that in the latter the `SchemeGroupVersion`
+    in the *register.go* file references `runtime.APIVersionInternal` (which is a
+    shortcut for `"__internal"`).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE20]'
+  prefs: []
+  type: TYPE_PRE
+- en: Another difference between `pkg/apis/*group-name*/types.go` and the external
+    type files is the lack of JSON and protobuf tags.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: JSON tags are used by some generators to detect whether a *types.go* file is
+    for an external version or the internal version. So always drop those tags when
+    copying and pasting external types in order to create or update the internal types.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Last but not least, there is a helper to install all versions of an API group
+    into a scheme. This helper is traditionally placed in *pkg/apis/`group-name`/install/install.go*.
+    For our custom API server *pkg/apis/restaurant/install/install.go*, it looks as
+    simple as this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE21]'
+  prefs: []
+  type: TYPE_PRE
+- en: Because we have multiple versions, the priority has to be defined. This order
+    will be used to determine the default storage version of the resource. It used
+    to also play a role in version selection in internal clients (clients that return
+    internal version objects; refer back to the note [“Versioned Clients and Internal
+    Clients in the Past”](ch03.html#internal-clients)). But internal clients are deprecated
+    and are going away. Even code inside an API server will use an external version
+    client in the future.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Conversions
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Conversion takes an object in one version and converts it into an object in
+    another version. Conversion is implemented through conversion functions, some
+    of them manually written (placed into *pkg/apis/`group-name`/`version`/conversion.go*
+    by convention), and others autogenerated by [`conversion-gen`](http://bit.ly/31RewiP)
+    (placed by convention into *pkg/apis/`group-name`/`version`/zz_generated.conversion.go*).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Conversion is initiated via a scheme (see [“Scheme”](ch03.html#scheme)) using
+    the `Convert()` method, passing the source object `in` and the target object `out`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE22]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The `context` is described as follows:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE23]'
+  prefs: []
+  type: TYPE_PRE
+- en: It is used only in very special cases and is usually `nil`. Later in the chapter
+    we will look at the conversion function scope, which allows us to access this
+    context from within conversion functions.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To do the actual conversion, the scheme knows about all the Golang API types,
+    their GroupVersionKinds, and the conversion functions between GroupVersionKinds.
+    For this, `conversion-gen` registers generated conversion functions via the local
+    scheme builder. In our example custom API server, the *zz_generated.conversion.go*
+    file starts like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE24]'
+  prefs: []
+  type: TYPE_PRE
+- en: The function `Convert_v1alpha1_Topping_To_restaurant_Topping()` is generated.
+    It takes a `v1alpha1` object and converts it to the internal type.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The preceding complicated type conversion turns the typed conversion function
+    into a uniformly typed `func(a, b interface{}, scope conversion.Scope) error`.
+    The scheme uses the latter types because it can call them without the use of reflection.
+    Reflection is slow due to the many necessary allocations.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The manually written conversions in *conversion.go* take precedence during
+    generation in the sense that `conversion-gen` skips generation for types if it
+    finds a manually written function in the packages with the *Convert_`source-package-basename_Kind`To_`target-package-basename`_Kind*
+    conversion function naming pattern. For example:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE25]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'In the simplest case, conversion functions just copy over values from the source
+    to the target object. But for the previous example, which converts a `v1alpha1`
+    pizza specification to the internal type, simple copying is not enough. We have
+    to adapt the different structure, which actually looks like the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE26]'
+  prefs: []
+  type: TYPE_PRE
+- en: Clearly, no code generation can be so clever as to foresee what the user intended
+    when defining these different types.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note that during conversion the source object must never be mutated. But it
+    is completely normal and, often for performance reasons, highly recommended to
+    reuse data structures of the source in the target object if the types match.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is so important that we reiterate it in a warning, because it has implications
+    not only for the implementation of conversion but also for callers of conversions
+    and consumers of conversion output.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Conversion functions must not mutate the source object, but the output is allowed
+    to share data structures with the source. This means that consumers of conversion
+    output have to make sure not to mutate an object if the original object must not
+    be mutated.
+  prefs: []
+  type: TYPE_NORMAL
+- en: For example, assume you have a `pod *core.Pod` in the internal version, and
+    you convert it to `v1` as `podv1 *corev1.Pod`, and mutate the resulting `podv1`.
+    This might also mutate the original `pod`. If the `pod` came from an informer,
+    this is highly dangerous because informers have a shared cache and mutating `pod`
+    makes the cache inconsistent.
+  prefs: []
+  type: TYPE_NORMAL
+- en: So, be aware of this property of conversion and do deep copies if necessary
+    to avoid undesired and potentially dangerous mutations.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'While this sharing of data structures leads to some risk, it also can avoid
+    unnecessary allocations in many situations. Generated code goes so far that the
+    generator compares source and target structs and uses Golang’s `unsafe` packages
+    to convert pointers to structs of the same memory layout via a simple type conversion.
+    Because the internal type and the `v1beta1` types for a pizza in our example have
+    the same memory layout, we get this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE27]'
+  prefs: []
+  type: TYPE_PRE
+- en: On the machine language level, this is a NOOP and therefore as fast as it can
+    get. It avoids allocating a slice in this case and copying item by item from `in`
+    to `out`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Last but not least, some words about the third argument of conversion functions:
+    the conversion scope `conversion.Scope`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The conversion scope provides access to a number of conversion metalevel values.
+    For example, it allows us to access the `context` value that is passed to the
+    scheme’s `Convert(in, out interface{}, context interface{}) error` method via:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE28]'
+  prefs: []
+  type: TYPE_PRE
+- en: It also allows us to call the scheme conversion for subtypes via `s.Convert`,
+    or without considering the registered conversion functions at all via `s.DefaultConvert`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In most conversion cases, though, there is no need to use the scope at all.
+    You can just ignore its existence for the sake of simplicity until you hit a tricky
+    situation where more context than the source and target object is necessary.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Defaulting
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Defaulting is the step in an API request’s lifecycle that sets default values
+    for omitted fields in incoming objects (from the client or from `etcd`). For example,
+    a pod has a `restartPolicy` field. If the user does not specify it, a value will
+    default to `Always`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Imagine we are using a very old Kubernetes version around the year 2014\. The
+    field `restartPolicy` was just introduced to the system in the latest release
+    at that time. After an upgrade of your cluster, there is a pod in `etcd` without
+    the `restartPolicy` field. A `kubectl get pod` would read the old pod from `etcd`
+    and the defaulting code would add the default value `Always`. From the user’s
+    point of view, magically the old pod suddenly has the new `restartPolicy` field.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Refer back to [Figure 8-6](#aggregation-conversions-points) to see where defaulting
+    takes place today in the Kubernetes request pipeline. Note that defaulting is
+    done only for external types, not internal types.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Now let’s look at the code that does defaulting. Defaulting is initiated by
+    the *k8s.io/apiserver* code via the scheme, similarly to conversion. Hence, we
+    have to register defaulting functions into the scheme for our custom types.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Again, similarly to conversions, most defaulting code is just generated with
+    the [`defaulter-gen`](http://bit.ly/2J108vK) binary. It traverses API types and
+    creates defaulting functions in *pkg/apis/`group-name`/`version`/zz_generated.defaults.go*.
+    The code doesn’t do anything by default other than calling defaulting functions
+    for the substructures.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You can define your own defaulting logic by following the defaulting function
+    naming pattern `SetDefaults*Kind*`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE29]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'In addition, and unlike with conversions, we have to call the registration
+    of the generated function on the local scheme builder manually. This is unfortunately
+    not done automatically:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE30]'
+  prefs: []
+  type: TYPE_PRE
+- en: Here, `RegisterDefaults` is generated inside package *pkg/apis/`group-name`/`version`/zz_generated.defaults.go*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: For defaulting code, it is crucial to know when a field was set by the user
+    and when it wasn’t. This is not that clear in many cases.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Golang has zero values for every type and sets them if a field is not found
+    in the passed JSON or protobuf. Imagine a default of `true` for a boolean field
+    `foo`. The zero value is `false`. Unfortunately, it is not clear whether `false`
+    was set due to the user’s input or because `false` is just the zero value of booleans.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To avoid this situation, often a pointer type must be used in the Golang API
+    types (e.g., `*bool` in the preceding case). A user-provided `false` would lead
+    to a non-`nil` boolean pointer to a `false` value, and a user-provided `true`
+    would lead to the non-`nil` boolean pointer and a `true` value. A not-provided
+    field leads to `nil`. This can be detected in the defaulting code:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE31]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This gives the desired semantics: “foo defaults to true.”'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: This trick of using a pointer works for primitive types like strings. For maps
+    and arrays, it is often hard to reach roundtrippability without identifying `nil`
+    maps/arrays and empty maps/arrays. Most defaulters for maps and arrays in Kubernetes
+    therefore apply the default in both cases, working around encoding and decoding
+    bugs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Roundtrip Testing
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Getting conversions right is hard. Roundtrip tests are an essential tool to
+    check automatically in a randomized test that conversions behave as planned and
+    do not lose data when converting from and to all known group versions.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Roundtrip tests are usually placed with the *install.go* file (for example,
+    into *pkg/apis/restaurant/install/roundtrip_test.go*) and just call the roundtrip
+    test functions from API Machinery:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE32]'
+  prefs: []
+  type: TYPE_PRE
+- en: Internally, the `RoundTripTestForAPIGroup` call installs the API group into
+    a temporary scheme using the `Install` functions. Then it creates random objects
+    in the internal version using the given fuzzer, and then converts them to some
+    external version and back to internal. The resulting objects must be equivalent
+    to the original. This test is done hundreds or thousand of times with all external
+    versions.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'A *fuzzer* is a function that return a slice of randomizer functions for the
+    internal types and their subtypes. In our example, the fuzzer is placed into the
+    package *pkg/apis/restaurant/fuzzer/fuzzer.go* and contains a randomizer for the
+    spec struct:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE33]'
+  prefs: []
+  type: TYPE_PRE
+- en: If no randomizer function is given, the underlying library [*github.com/google/gofuzz*](http://bit.ly/2KJrb27)
+    will generically try to fuzz the object by setting random values for base types
+    and diving recursively into pointers, structs, maps, and slices, eventually calling
+    custom randomizer functions if they are given by the developer.
+  prefs: []
+  type: TYPE_NORMAL
+- en: When writing a randomizer function for one of the types, it is convenient to
+    call `c.FuzzNoCustom(s)` first. It randomizes the given object `s` and also calls
+    custom functions for substructures, but not for `s` itself. Then the developer
+    can restrict and fix the random values to make the object valid.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: It is important to make fuzzers as general as possible in order to cover as
+    many valid objects as possible. If the fuzzer is too restrictive, the test coverage
+    will be bad. In many cases during the development of Kubernetes, regressions were
+    not caught because the fuzzers in place were not good.
+  prefs: []
+  type: TYPE_NORMAL
+- en: On the other hand, a fuzzer only has to consider objects that validate and are
+    the projection of actual objects definable in the external versions. Often you
+    have to restrict the random values set by `c.FuzzNoCustom(s)` in a way that the
+    randomized object becomes valid. For example, a string holding a URL does not
+    have to roundtrip for arbitrary values if validation will reject arbitrary strings
+    anyway.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Our preceding `PizzaSpec` example first calls `c.FuzzNoCustom(s)` and then
+    fixes up the object by:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Defaulting the `nil` case for toppings
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Setting a reasonable quantity for each topping (without that, the conversion
+    to `v1alpha1` will explode in complexity, introducing high quantities into a string
+    list)
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Normalizing the topping names, as we know that duplicated toppings in a pizza
+    spec will never roundtrip (for the internal types, note that v1alpha1 types have
+    duplication)
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Validation
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Incoming objects are validated shortly after they have been deserialized, defaulted,
+    and converted to the internal version. [Figure 8-5](#aggregation-conversions-figure)
+    showed earlier how validation is done between mutating admission plug-ins and
+    validating admission plug-ins, long before the actual creation or update logic
+    is executed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This means validation has to be implemented only once for the internal version,
+    not for all external versions. This has the advantage that it obviously saves
+    implementation work and also ensures consistency between versions. On the other
+    hand, it means that validation errors do not refer to the external version. This
+    can actually be observed with Kubernetes resources, but in practice it is no big
+    deal.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In this section, we’ll look at the implementation of validation functions. The
+    wiring into the custom API server—namely, calling validation from the strategy
+    that configures the generic registry—will be covered in the next section. In other
+    words, [Figure 8-5](#aggregation-conversions-figure) is slightly misleading in
+    favor of visual simplicity.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'For now it should be enough to look at the entry point into the validation
+    inside the strategy:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE34]'
+  prefs: []
+  type: TYPE_PRE
+- en: This calls out to the `Validate*Kind*(obj` `**Kind*) field.ErrorList` validation
+    function in the validation package of the API group `pkg/apis/*group*/*validation*`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The validation functions return an error list. They are usually written in
+    the same style, appending return values to an error list while recursively diving
+    into the type, one validation function per struct:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE35]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note how the field path is maintained using `Child` and `Index` calls. The field
+    path is the JSON path, which is printed in case of errors.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Often there is an additional set of validation functions that differs slightly
+    for updates (while the preceding set is used for creation). In our example API
+    server, this could look like the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE36]'
+  prefs: []
+  type: TYPE_PRE
+- en: This can be used to verify that no read-only fields are changed. Often an update
+    validation calls the normal validation functions as well and only adds checks
+    relevant for the update.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Validation is the right place to restrict object names on creation—for example,
+    to be single-word only, or to not include any non-alpha-numeric characters.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Actually, any `ObjectMeta` field can technically be restricted in a custom way,
+    though that’s not desirable for many fields because it might break core API machinery
+    behavior. A number of resources restrict the names because, for example, the name
+    will show up in other systems or in other contexts that require a specially formatted
+    name.
+  prefs: []
+  type: TYPE_NORMAL
+- en: But even if there are special `ObjectMeta` validations in place in a custom
+    API server, the generic registry will validate against generic rules in any case,
+    after the custom validation has passed. This allows us to return more specific
+    error messages from the custom code first.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Registry and Strategy
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: So far, we have seen how API types are defined and validate. The next step is
+    the implementation of the REST logic for those API types. [Figure 8-7](#aggregated-registry-figure)
+    shows the registry as a central part of the implementation of an API group. The
+    generic REST request handler code in *k8s.io/apiserver* calls out to the registry.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Resource storage and generic registry](assets/prku_0807.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 8-7\. Resource storage and generic registry
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Generic registry
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: The REST logic is usually implemented by what is called the *generic registry*.
+    It is—as the name suggests—a generic implementation of the registry interfaces
+    in the package *k8s.io/apiserver/pkg/registry/rest*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The generic registry implements the default REST behavior for “normal” resources.
+    Nearly all Kubernetes resources use this implementation. Only a few, specifically
+    those that do not persist objects (e.g., `SubjectAccessReview`; see [“Delegated
+    Authorization”](#aggregated-authorization)), have custom implementations.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In *k8s.io/apiserver/pkg/registry/rest/rest.go* you will find many interfaces,
+    loosely corresponding to HTTP verbs and certain API functionalities. If an interface
+    is implemented by a registry, the API endpoint code will offer certain REST features.
+    Because the generic registry implements most of the *k8s.io/apiserver/pkg/registry/rest*
+    interfaces, resources that use it will support all the default Kubernetes HTTP
+    verbs (see [“The HTTP Interface of the API Server”](ch02.html#api-server-http-interface)).
+    Here is a list of those interfaces that are implemented, with the GoDoc description
+    from the Kubernetes source code:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`CollectionDeleter`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: An object that can delete a collection of RESTful resources
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`Creater`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: An object that can create an instance of a RESTful object
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`CreaterUpdater`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: A storage object that must support both create and update operations
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`Exporter`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: An object that knows how to strip a RESTful resource for export
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`Getter`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: An object that can retrieve a named RESTful resource
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`GracefulDeleter`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: An object that knows how to pass deletion options to allow delayed deletion
+    of a RESTful object
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`Lister`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: An object that can retrieve resources that match the provided field and label
+    criteria
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`Patcher`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: A storage object that supports both get and update
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`Scoper`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: An object that must be specified and indicates what scope the resource
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`Updater`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: An object that can update an instance of a RESTful object
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`Watcher`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: An object that should be implemented by all storage objects that want to offer
+    the ability to watch for changes through the `Watch` API
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s look at one of the interfaces, `Creater`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE37]'
+  prefs: []
+  type: TYPE_PRE
+- en: A registry implementing this interface will be able to create objects. In contrast
+    to `NamedCreater`, the name of the new object either comes from `ObjectMeta.Name`
+    or is generated via `ObjectMeta.GenerateName`. If a registry implements `NamedCreater`,
+    the name can also be passed through the HTTP path.
+  prefs: []
+  type: TYPE_NORMAL
+- en: It is important to understand that the implemented interfaces determine which
+    verbs will be supported by the API endpoint that is created while installing the
+    API into the custom API server. See [“API Installation”](#aggregated-apiserver-development-api-install)
+    for how this is done in the code.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Strategy
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: The generic registry can be customized to a certain degree using an object called
+    a *strategy*. The strategy provides callbacks to functionality like validation,
+    as we saw in [“Validation”](#aggregated-apiserver-development-validation).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The strategy implements the REST strategy interfaces listed here with their
+    GoDoc description (see *k8s.io/apiserver/pkg/registry/rest* for their definitions):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`RESTCreateStrategy`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Defines the minimum validation, accepted input, and name generation behavior
+    to create an object that follows Kubernetes API conventions.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`RESTDeleteStrategy`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Defines deletion behavior on an object that follows Kubernetes API conventions.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`RESTGracefulDeleteStrategy`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Must be implemented by the registry that supports graceful deletion.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`GarbageCollectionDeleteStrategy`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Must be implemented by the registry that wants to orphan dependents by default.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`RESTExportStrategy`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Defines how to export a Kubernetes object.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`RESTUpdateStrategy`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Defines the minimum validation, accepted input, and name generation behavior
+    to update an object that follows Kubernetes API conventions.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s look again at the strategy for the creation case:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE38]'
+  prefs: []
+  type: TYPE_PRE
+- en: The embedded `ObjectTyper` recognizes objects; that is, it checks whether an
+    object in a request is supported by the registry. This is important to create
+    the right kind of objects (e.g., via a “foo” resource, only “Foo” resources should
+    be created).
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `NameGenerator` obviously generates names from the `ObjectMeta.GenerateName`
+    field.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Via `NamespaceScoped` the strategy can support cluster-wide or namespaced resources
+    by returning either `false` or `true`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `PrepareForCreate` method is called with the incoming object before validation.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The `Validate` method we’ve seen before in [“Validation”](#aggregated-apiserver-development-validation):
+    it’s the entry point to the validation functions.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Finally, the `Canonicalize` method does normalization (e.g., sorting of slices).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Wiring a strategy into the generic registry
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'The strategy object is plugged into a generic registry instance. Here is the
+    REST storage constructor for our custom API server on [GitHub](http://bit.ly/2Y0Mtyn):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE39]'
+  prefs: []
+  type: TYPE_PRE
+- en: It instantiates the generic registry object `genericregistry.Store` and sets
+    a few fields. Many of these fields are optional and `store.CompleteWithOptions`
+    will default them if they are not set by the developer.
+  prefs: []
+  type: TYPE_NORMAL
+- en: You can see how the custom strategy is first instantiated via the `NewStrategy`
+    constructor and then plugged into the registry for `create`, `update`, and `delete`
+    operators.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In addition, the `NewFunc` is set to create a new object instance, and the `NewListFunc`
+    field is set to create a new object list. The `PredicateFunc` translates a selector
+    (which could be passed to a list request) into a predicate function, filtering
+    runtime objects.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The returned object is a REST registry, just a simple wrapper in [our example
+    project](http://bit.ly/2Rxcv6G) around the generic registry object to make the
+    type our own:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE40]'
+  prefs: []
+  type: TYPE_PRE
+- en: With this we have everything to instantiate our API and wire it into the custom
+    API server. In the following section we’ll see how to create an HTTP handler out
+    of it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: API Installation
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'To activate an API in an API server, two steps are necessary:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The API version must be installed into the API type’s (and conversion and defaulting
+    functions’) server scheme.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: The API version must be installed into the server HTTP multiplexer (mux).
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'The first step is usually done using `init` functions somewhere centrally in
+    the API server bootstrapping. This is done in *pkg/apiserver/apiserver.go* in
+    our example custom API server, where the `serverConfig` and `CustomServer` objects
+    are defined (see [“Options and Config Pattern and Startup Plumbing”](#aggregated-apiserver-development-options-config)):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE41]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Then for each API group that should be served, we call the `Install()` function:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE42]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'For technical reasons, we also have to add some discovery-related types to
+    the scheme (this will probably go away in future versions of *k8s.io/apiserver*):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE43]'
+  prefs: []
+  type: TYPE_PRE
+- en: With this we have registered our API types in the global scheme, including conversion
+    and defaulting functions. In other words, the empty scheme of [Figure 8-3](#aggregation-kube-apiserver_without)
+    now knows everything about our types.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The second step is to add the API group to the HTTP mux. The generic API server
+    code embedded into our `CustomServer` struct provides the `InstallAPIGroup(apiGroupInfo
+    *APIGroupInfo) error` method, which sets up the whole request pipeline for an
+    API group.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The only thing we have to do is to provide a properly filled `APIGroupInfo`
+    struct. We do this in the constructor `New()` `(*CustomServer, error)` of the
+    `completedConfig` type:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE44]'
+  prefs: []
+  type: TYPE_PRE
+- en: The `APIGroupInfo` has references to the generic registry that we customized
+    in [“Registry and Strategy”](#aggregated-apiserver-development-registry) via a
+    strategy. For each group version and resource, we create an instance of the registry
+    using the implemented constructors.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The `customregistry.RESTInPeace` wrapper is just a helper that panics when
+    the registry constructors return an error:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE45]'
+  prefs: []
+  type: TYPE_PRE
+- en: The registry itself is version-independent, as it operates on internal objects;
+    refer back to [Figure 8-5](#aggregation-conversions-figure). Hence, we call the
+    same registry constructor for each version.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The call to `InstallAPIGroup` finally leads us to a complete custom API server
+    ready to serve our custom API group, as shown earlier in [Figure 8-7](#aggregated-registry-figure).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'After all this heavy plumbing, it is time to see our new API groups in action.
+    For this we start up the server as shown in [“The First Start”](#aggregated-apiserver-development-first-start).
+    But this time the discovery info is not empty but instead shows our newly registered
+    resource:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE46]'
+  prefs: []
+  type: TYPE_PRE
+- en: With this, we have nearly reached our goal to serve the restaurant API. We have
+    wired the API group versions, conversions are in place, and validation is working.
+  prefs: []
+  type: TYPE_NORMAL
+- en: What’s missing is a check that a topping mentioned in a pizza actually exists
+    in the cluster. We could add this in the validation functions. But traditionally
+    these are just format validation functions, which are static and do not need other
+    resources to run.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In contrast, more complex checks are implemented in admission—the topic of the
+    next section.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Admission
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Every request passes the chain of admission plug-ins after being unmarshaled,
+    defaulted, and converted to internal types; refer back to [Figure 8-2](#aggregation-aggregated-apiserver).
+    More precisely, requests pass admission twice:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The mutating plug-ins
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The validating plug-ins
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Admission plug-ins can be both mutating and validating and therefore can potentially
+    get called twice by the admission mechanism:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Once in the mutation phase, called for all mutating plug-ins sequentially
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Once in the validation phase, called (potentially parallelized) for all validating
+    plug-ins
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: More precisely, a plug-in can implement both the mutating and the validating
+    admission interface, with two different methods for both cases.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Before the separation into mutating and validating, there was just one call
+    to each plug-in. It was nearly impossible to keep an eye on which mutation each
+    plug-in did and which admission plug-in order therefore made sense to lead to
+    consistent behavior for the user.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This two-step architecture at least ensures that a validation is done at the
+    end for all plug-ins, which guarantees consistency.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In addition, the chain (i.e., the order of plug-ins for both admission phases)
+    is the same. Plug-ins are always enabled or disabled for both phases at the same
+    time.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Admission plug-ins, at least those implemented in Golang as described in this
+    chapter, work with internal types. In contrast, webhook admission plug-ins (see
+    [“Admission Webhooks”](ch09.html#admission-webhooks)) are based on external types
+    and involve conversion on the way to the webhook and back (in case of mutating
+    webhooks).
+  prefs: []
+  type: TYPE_NORMAL
+- en: But after all this theory, let’s get into the code.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Implementation
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'An admission plug-in is a type implementing:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The admission plug-in interface `Interface`
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Optionally the `MutatingInterface`
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Optionally the `ValidatingInterface`
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'All three can be found in the package *k8s.io/apiserver/pkg/admission*:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE47]'
+  prefs: []
+  type: TYPE_PRE
+- en: You see that the `Interface` method `Handles` is responsible for filtering on
+    the operation. The mutating plug-ins are called via `Admit` and the validating
+    plug-ins are called via `Validate`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The `ObjectInterfaces` gives access to helpers usually implemented by a scheme:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE48]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The attributes passed to the plug-in (via `Admit` or `Validate` or both) basically
+    contain all the information extractable from a request that is important to implementing
+    advanced checks:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE49]'
+  prefs: []
+  type: TYPE_PRE
+- en: In the mutating case—that is, in the implementation of the `Admit(a Attributes)
+    error` method—the attributes can be mutated, or more precisely, the object returned
+    from `GetObject() runtime.Object` can.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the validating case, mutation is not allowed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Both cases permit the call to `AddAnnotation(key, value string) error`, which
+    allows us to add annotations that end up in the audit output of the API server.
+    This can be helpful in order to understand why an admission plug-in mutated or
+    rejected a request.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Rejection is signaled by returning a non-`nil` error from `Admit` or `Validate`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: It is good practice for mutating admission plug-ins to also validate the changes
+    in the validating admission phase. The reason is that other plug-ins, including
+    webhook admission plug-ins, might add further changes. If an admission plug-in
+    guarantees that certain invariants are fulfilled, only the validation step can
+    make sure this is really the case.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Admission plug-ins have to implement the `Handles(operation Operation) bool`
+    method from the `admission.Interface` interfaces. There is a helper in the same
+    package called `Handler`. It can be instantiated using `NewHandler(ops ...Operation)
+    *Handler` and implements the `Handles` method by embedding `Handler` into the
+    custom admission plug-in:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE50]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Admission plug-ins should always check the GroupVersionKind of the passed object
+    first:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE51]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'and similarly for the validating case:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE52]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The full example admission implementation looks like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE53]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'It takes the following steps:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Checks that the passed object is of the right kind
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Forbids access before the informers are ready
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Verifies via the toppings informer lister that each topping mentioned in the
+    pizza specification actually exists as a `Topping` object in the cluster
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Note here that the lister is just an interface to the informer in-memory store.
+    So these `Get` calls will be fast.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Registering
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'Admission plug-ins must be registered. This is done through a `Register` function:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE54]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This function is added to the plug-in list in the `RecommendedOptions` (see
+    [“Options and Config Pattern and Startup Plumbing”](#aggregated-apiserver-development-options-config)):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE55]'
+  prefs: []
+  type: TYPE_PRE
+- en: Here, the `RecommendedPluginOrder` list is prepopulated with the generic admission
+    plug-ins, which every API server should keep enabled to be a good API convention
+    citizen in the cluster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: It is best practice not to touch the order. One reason is that getting the order
+    right is far from trivial. Of course, adding a custom plug-in at a location other
+    than the end of the list is fine, if it is strictly necessary for the plug-in
+    behavior.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The user of the custom API server will be able to disable a custom admission
+    plug-in with the usual admission chain configuration flags (`--disable-admission-plugins`,
+    for example). By default our own plug-in is enabled, because we don’t explicitly
+    disable it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Admission plug-ins can be configured using a configuration file. To do so,
+    we parse the output of the `io.Reader` in the `Register` function shown previously.
+    The `--admission-control-config-file` allows us to pass a configuration file to
+    the plug-in, like so:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE56]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Alternatively, we can do inline configuration to have all our admission configuration
+    in one place:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE57]'
+  prefs: []
+  type: TYPE_PRE
+- en: We briefly mentioned that our admission plug-in uses the toppings informer to
+    check for the existence of toppings mentioned in the pizza. We have not talked
+    about how to wire that into the admission plug-in. Let’s do this now.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Plumbing resources
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: Admission plug-ins often need clients and informers or other resources to implement
+    their behavior. We can do this resource plumbing using plug-in initializers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'There are a number of standard plug-in initializers. If your plug-in wants
+    to be called by them, it has to implement certain interfaces with callback methods
+    (for more on this, see *k8s.io/apiserver/pkg/admission/initializer*):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE58]'
+  prefs: []
+  type: TYPE_PRE
+- en: Implement some of these and the plug-in gets called during launch, in order
+    to get access to, say, Kubernetes resources or the API server global scheme.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In addition, the `admission.InitializationValidator` interface is supposed
+    to be implemented to do a final check that the plug-in is properly set up:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE59]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Standard initializers are great, but we need access to the toppings informer.
+    So, let’s look at how to add our own initializers. An initializer consists of:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'A `Wants*` interface (e.g., `WantsRestaurantInformerFactory`), which should
+    be implemented by an admission plug-in:'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[PRE60]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: 'The initializer struct, implementing `admission.PluginInitializer`:'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[PRE61]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: In other words, the `Initialize()` method checks that the passed plug-in implements
+    the corresponding custom initializer `Wants*` interface. If that is the case,
+    the initializer will call the method on the plug-in.
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: 'Plumbing of the initializer constructor into `RecommendedOptions.Extra\AdmissionInitializers`
+    (see [“Options and Config Pattern and Startup Plumbing”](#aggregated-apiserver-development-options-config)):'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[PRE62]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: This code creates a loopback client for the restaurant API group, creates a
+    corresponding informer factory, stores it in the options `o`, and returns a plug-in
+    initializer for it.
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: As promised, admission is the last step in the implementation to complete our
+    custom API server for the restaurant API group. Now we want to see it in action,
+    but not artificially on the local machine, but rather in a real Kubernetes cluster.
+    This means we have to take a look at the deployment of an aggregated custom API
+    server.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Deploying Custom API Servers
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'In [“API Services”](#aggregation-apiservices), we saw the `APIService` object,
+    which is used to register the custom API server API group versions with the aggregator
+    inside the Kubernetes API server:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE63]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The `APIService` object points to a service. Usually, this service will be
+    a normal cluster IP service: that is, the custom API server is deployed into the
+    cluster using pods. The service forwards the requests to the pods.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Let’s look at the Kubernetes manifest to implement this.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Deployment Manifests
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'We have the following manifests (found in [the example code on GitHub](http://bit.ly/2J6CVIz))
+    that will be part of an in-cluster deployment of a custom API service:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'An `APIService` for both versions `v1alpha1`:'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[PRE64]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: '…and `v1beta1`:'
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: '[PRE65]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: Note here that we set `insecureSkipTLSVerify`. This is OK for development but
+    inadequate for any production deployment. We’ll see how to fix this in [“Certificates
+    and Trust”](#aggregated-apiserver-certs).
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: 'A `Service` in front of the custom API server instances running in the cluster:'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[PRE66]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: 'A `Deployment` (as shown here) or `DaemonSet` for the custom API server pods:'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[PRE67]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: 'A namespace for the service and the deployment to live in:'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[PRE68]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: Often, the aggregated API server is deployed to some nodes reserved for control
+    plane pods, usually called *masters*. In that case, a `DaemonSet` is a good choice
+    to run one custom API server instance per master node. This leads to a high availability
+    setup. Note, that API servers are stateless, which means they can easily be deployed
+    multiple times and no leader election is necessary.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'With these manifests, we are nearly done. As is so often the case, though,
+    a secure deployment needs some more thought. You might have noticed that the pods
+    (defined via the preceding deployment) use a custom service account, `apiserver`.
+    This can be created via another manifest:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE69]'
+  prefs: []
+  type: TYPE_PRE
+- en: This service account needs a number of permissions, which we can add via RBAC
+    objects.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Setting Up RBAC
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'The service account of an API service first needs some generic permissions
+    to participate in:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: namespace lifecycle
+  prefs: []
+  type: TYPE_NORMAL
+- en: Objects can be created only in an existing namespace, and are deleted when the
+    namespace is deleted. For this the API server has to get, list, and watch namespaces.
+  prefs: []
+  type: TYPE_NORMAL
+- en: admission webhooks
+  prefs: []
+  type: TYPE_NORMAL
+- en: Admission webhooks configured via `MutatingWebhookConfigurations` and `ValidatedWebhookConfigurations`
+    are called from each API server independently. For this the admission mechanism
+    in our custom API server has to get, list, and watch these resources.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'We configure both by creating an RBAC cluster role:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE70]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'and binding it to our service account `apiserver` via a `ClusterRoleBinding`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE71]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'For delegated authentication and authorization, the service account has to
+    be bound to the preexisting RBAC role `extension-apiserver-authentication-reader`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE72]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'and the preexisting RBAC cluster role `system:auth-delegator`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE73]'
+  prefs: []
+  type: TYPE_PRE
+- en: Running the Custom API Server Insecurely
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Now with all manifests in place and RBAC set up, let’s deploy the API server
+    to a real cluster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'From a checkout of [the GitHub repository](http://bit.ly/2x9C3gR), and with
+    configured `kubectl` with `cluster-admin` privileges (this is needed because RBAC
+    rules can never escalate access):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE74]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Now the custom API server is launching:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE75]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'When it is running, we double-check that the Kubernetes API server does aggregation
+    (i.e., proxying of requests). First check via `APIService`s whether the Kubernetes
+    API server thinks that our custom API server is available:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE76]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This looks good. Let’s try to list pizzas, with logging enabled to see whether
+    something goes wrong:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE77]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This looks very good. We see that `kubectl` queries the discovery information
+    to find out what a pizza is. It queries the *restaurant.programming-kubernetes.info/v1beta1*
+    API to list the pizzas. Unsurprisingly, there aren’t any yet. But we can of course
+    change that:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE78]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This looks awesome. But the margherita pizza was easy. Let’s try defaulting
+    in action by creating an empty pizza that does not list any toppings:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE79]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Our defaulting should turn this into a salami pizza with a salami topping.
+    Let’s try:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE80]'
+  prefs: []
+  type: TYPE_PRE
+- en: This looks like a delicious salami pizza.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Now let’s check whether our custom admission plug-in is working. We first delete
+    all pizzas and toppings, and then try to re-create the pizzas:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE81]'
+  prefs: []
+  type: TYPE_PRE
+- en: No margherita without mozzarella, like in any good Italian restaurant.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Looks like we are done implementing what we described in [“Example: A Pizza
+    Restaurant”](#aggregation-example). But not quite. Security. Again. We have not
+    taken care of the proper certificates. A malicious pizza seller could try to get
+    between our users and the custom API server because the Kubernetes API server
+    just accepts any serving certificates without checking them. Let’s fix this.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Certificates and Trust
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The `APIService` object contains the `caBundle` field. This configures how the
+    aggregator (inside the Kubernetes API server) trusts the custom API server. This
+    CA bundle contains the certificate (and intermediate certificates) used to verify
+    that the aggregated API server has the identity it claims to have. For any serious
+    deployment, put the corresponding CA bundle into this field.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: While `insecureSkipTLSVerify` is allowed in an `APIService` in order to disable
+    certification verification, it is a bad idea to use this in a production setup.
+    The Kubernetes API server sends requests to a trusted aggregated API server. Setting
+    `insecureSkipTLSVerify` to `true` means that any other actor can claim to be the
+    aggregated API server. This is obviously insecure and should not be used in production
+    environments.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The reverse trust from the custom API server to the Kubernetes API server, and
+    its preauthentication of requests, is described in [“Delegated Authentication
+    and Trust”](#aggregated-authentication). We don’t have to do anything extra.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Back to the pizza example: to make it secure, we need a serving certificate
+    and a key for the custom API server in the deployment. We put both into a `serving-cert`
+    secret and mount it into the pod at */var/run/apiserver/serving-cert/tls.{crt,key}*.
+    Then we use the *tls.crt* file as CA in the `APIService`. This can all be found
+    in [the example code on GitHub](http://bit.ly/2XxtJWP).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The certificate-generation logic is scripted in a [Makefile](http://bit.ly/2KGn0nw).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note that in a real-world scenario we’d probably have some kind of cluster or
+    company CA we can plug into the `APIService`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To see it in action, either start with a new cluster or just reuse the previous
+    one and apply the new, secure manifests:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE82]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note here the correct common name `CN=api.pizza-apiserver.svc` in the certificate.
+    The Kubernetes API server proxies the request to the *api/pizza-apiserver* service
+    and hence its DNS name must be put into the certificate.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'We double-check that we really have disabled the `insecureSkipTLSVerify` flag
+    in the `APIService`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE83]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This looks as expected: `insecureSkipTLSVerify` is gone and the `caBundle`
+    field is filled with a base64 value of our certificate And: the service is still
+    available.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Now let’s see whether `kubectl` can still query the API:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE84]'
+  prefs: []
+  type: TYPE_PRE
+- en: The margherita pizza is back. This time it is perfectly secured. No chance for
+    a malicious pizza seller to start a man-in-the-middle attack. Buon appetito!
+  prefs: []
+  type: TYPE_NORMAL
+- en: Sharing etcd
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Aggregated API servers using the `RecommendOptions` (see [“Options and Config
+    Pattern and Startup Plumbing”](#aggregated-apiserver-development-options-config))
+    use `etcd` for storage. This means that any deployment of a custom API server
+    requires an `etcd` cluster to be available.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This cluster can be in-cluster—for example, deployed using the [`etcd` operator](http://bit.ly/2JTz8SK).
+    This operator allows us to launch and administrate an `etcd` cluster in a declarative
+    way. The operator will do updates, up and down scaling, and backup. This reduces
+    the operational overhead a lot.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Alternatively, the `etcd` of the cluster control plane (i.e., that of `kube-apiserver`)
+    can be used. Depending on the environment—self-deployed, on-premise, or hosted
+    services like Google Container Engine (GKE)—this might be viable, or it might
+    be impossible because the user has no access to the cluster at all (as is the
+    case with GKE). In the viable cases, the custom API server has to use a key path
+    that is distinct from the one used by the Kubernetes API server or other `etcd`
+    consumers. In our example custom API server, it looks like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE85]'
+  prefs: []
+  type: TYPE_PRE
+- en: This `etcd` path prefix is different from Kubernetes API server paths, which
+    use different group API names.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Last but not least, `etcd` can be proxied. The project [etcdproxy-controller](http://bit.ly/2Na2VrN)
+    implements this mechanism using the operator pattern; that is, `etcd` proxies
+    can be deployed automatically to the cluster and configured using `EtcdProxy`
+    objects.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `etcd` proxies will automatically do key mapping, so it is guaranteed that
+    `etcd` key prefixes will not conflict. This allows us to share `etcd` clusters
+    for multiple aggregated API servers without worrying that one aggregated API server
+    reads or changes the data of another one. This will improve security in an environment
+    where shared `etcd` clusters are required, for example, due to resource constraints
+    or to avoid operational overhead.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Depending on the context, one of these options must be chosen. Finally, aggregated
+    API servers can of course also use other storage backends, at least in theory,
+    as it requires a lot of custom code to implement the *k8s.io/apiserver* storage
+    interfaces.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Summary
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: This was a pretty large chapter, and you made it to the end. You’ve gotten a
+    lot of background about APIs in Kubernetes and how they are implemented.
+  prefs: []
+  type: TYPE_NORMAL
+- en: We saw how aggregation of custom API servers fits into the architecture of a
+    Kubernetes cluster. We saw how a custom API server receives requests that are
+    proxies from the Kubernetes API server. We have seen how the Kubernetes API server
+    preauthenticates these requests, and how API groups are implemented, with external
+    versions and internal versions. We learned how objects are decoded into the Golang
+    structs, how they are defaulted, how they are converted to internal types, and
+    how they go through admission and validation and finally reach the registry. We
+    saw how a strategy is plugged into a generic registry to implement “normal” Kubernetes-like
+    REST resources, how we can add custom admissions, and how to configure a custom
+    admission plug-in with a custom initializer. We now know how to do all the plumbing
+    to start up a custom API server with a multiversion API group, and how to deploy
+    the API group in a cluster with `APIServices`. We saw how to configure RBAC rules
+    to allow the custom API server to do its job. We discussed how `kubectl` queries
+    API groups. Finally, we learned how to secure the connection to our custom API
+    server with certificates.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This was a lot. Now you have a much better understanding of what APIs are in
+    Kubernetes and how they are implemented, and hopefully you are motivated to do
+    one or more of the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Implement your own custom API server
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Learn about the inner workings of Kubernetes
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Contribute to Kubernetes in the future
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: We hope that you have found this a good starting point.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([1](ch08.html#idm46336853170760-marker)) Graceful deletion means that the
+    client can pass a graceful deletion period as part of the deletion call. The actual
+    deletion is done by a controller asynchronously (the `kubelet` does that for pods)
+    by doing a forced deletion. This way pods have time to cleanly shut down.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([2](ch08.html#idm46336853165528-marker)) Kubernetes uses cohabitation to migrate
+    resources (e.g., deployments from the `extensions/v1beta1` API group) to subject-specific
+    API groups (e.g., `apps/v1`). CRDs have no concept of shared storage.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([3](ch08.html#idm46336853099640-marker)) We’ll see in [Chapter 9](ch09.html#ch_advanced-topics)
+    that CRD conversion and admission webhooks available in the latest Kubernetes
+    versions also allow us to add these features to CRDs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([4](ch08.html#idm46336852602264-marker)) PaaS stands for Platform as a Service.
+  prefs: []
+  type: TYPE_NORMAL

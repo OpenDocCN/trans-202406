@@ -1,0 +1,1351 @@
+- en: Chapter 7\. Replication Lag
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: '*Replication lag* is the delay between the time when a write occurs on a source
+    MySQL instance and the time when that write is applied on a replica MySQL instance.
+    Replication lag is inherent to all database servers because replication across
+    a network incurs network latency.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'I’m glad that, as an engineer using MySQL, you don’t have to set up, configure,
+    and maintain a MySQL replication topology because MySQL replication has become
+    complex. Instead, this chapter investigates replication lag with respect to performance:
+    what it is, why it happens, what risk it poses, and what you can do about it.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Technically, yes, replication decreases performance, but you don’t want to run
+    MySQL without it. It’s not hyperbole to say that replication prevents businesses
+    from failing—from data loss so catastrophic that, if replication did not prevent
+    it, the company would go out of business. MySQL runs everywhere from hospitals
+    to banks, and replication keeps invaluable data safe despite inevitable failures.
+    Although replication decreases performance and lag is a risk, these costs are
+    cancelled by the overwhelming benefits of replication.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This chapter investigates replication lag. There are six major sections. The
+    first introduces basic MySQL replication terminology and traces the technical
+    origins of replication lag—why it happens despite fast databases and networks.
+    The second discusses the main causes of replication lag. The third explains the
+    risk of replication lag: data loss. The fourth provides a conservative configuration
+    for enabling a multithreaded replica, which dramatically reduces lag. The fifth
+    looks at monitoring replication lag with high precision. The sixth explains why
+    replication lag is slow to recover.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Foundation
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'MySQL has two types of replication:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Source to replica
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*Source to replica replication* is the fundamental type of replication that
+    MySQL has used for more than 20 years. Its venerable status means that [*MySQL
+    replication*](https://oreil.ly/A8fTn) implies source to replica replication. MySQL
+    replication is old, but make no mistake: it’s fast, reliable, and still widely
+    used today.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Group Replication
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[*Group Replication*](https://oreil.ly/TASM9) is the new type of replication
+    that MySQL has supported as of MySQL 5.7.17 (released December 12, 2016). Group
+    Replication creates a MySQL cluster of primary and secondary instances that use
+    a group consensus protocol to synchronize (replicate) data changes and manage
+    group membership. That’s a long way of saying that Group Replication is MySQL
+    clustering, and it is the future of MySQL replication and high availability.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This chapter covers only traditional MySQL replication: source to replica.
+    Group Replication is the future, but I defer coverage to the future because, at
+    the time of this writing, neither I nor any DBAs that I know have significant
+    experience operating Group Replication at scale. Moreover, another innovation
+    built on top of Group Replication is becoming the standard: [InnoDB Cluster](https://oreil.ly/BFqu9).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Additionally, [Percona XtraDB Cluster](https://oreil.ly/fWNfb) and [MariaDB
+    Galera Cluster](https://oreil.ly/LMhEC) are database cluster solutions similar
+    to MySQL Group Replication in purpose but different in implementation. I defer
+    coverage of these solutions, too, but keep them in mind if you’re running a Percona
+    or MariaDB distribution of MySQL and looking for a database cluster solution.
+  prefs: []
+  type: TYPE_NORMAL
+- en: MySQL source to replica replication is ubiquitous. Although the inner workings
+    of replication are beyond the scope of this book, understanding the foundation
+    illuminates the causes of replication lag, the risk that it poses, and how to
+    reduce both.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Replication terminology changed as of MySQL 8.0.22 and 8.0.26–released in 2020
+    and 2021, respectively. For a summary of the changes, see [“MySQL Terminology
+    Updates”](https://oreil.ly/wrzfU). I use the current terminology, metrics, variables,
+    and commands in this book.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Source to Replica
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '[Figure 7-1](#repl-foundation-img) illustrates the foundation of MySQL source
+    to replica replication.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![emsp 0701](assets/emsp_0701.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 7-1\. Foundation of MySQL source to replica replication
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: A *source MySQL instance* (or *source* for short) is any MySQL server to which
+    clients (the application) write data. MySQL replication supports multiple writable
+    sources, but this is rare due to the difficulty of handling write conflicts. Consequently,
+    a single writable source is the norm.
+  prefs: []
+  type: TYPE_NORMAL
+- en: A *replica MySQL instance* (or *replica* for short) is any MySQL server that
+    replicates data changes from a source. *Data changes* are modifications to rows,
+    indexes, schemas, and so forth. Replicas should always be read-only to avoid split-brain
+    (see [“Split-Brain Is the Greatest Risk”](ch09.html#split-brain)). Usually, a
+    replica replicates from a single source, but [multisource replication](https://oreil.ly/GeaVQ)
+    is an option.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Arrows in [Figure 7-1](#repl-foundation-img) represent the flow of data changes
+    from the source to a replica:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'During transaction commit, data changes are written to *binary logs* (or *binlogs*
+    for short) on the source: on-disk files that record data changes in *binary log
+    events* (see [“Binary Log Events”](#repl-binlog-events)).'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: An *I/O thread* on the replica dumps (reads) binary log events from the source
+    binary logs. (A *binlog dump thread* on the source is dedicated to this purpose.)
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'The I/O thread on the replica writes the binary log events to *relay logs*
+    on the replica: on-disk files that are a local copy of the source binary logs.'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: A *SQL thread* (or *applier thread*) reads binary log events from the relay
+    log.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: The SQL thread applies the binary log events to the replica data.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: The replica writes the data changes (applied by the SQL thread) to its binary
+    logs.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'By default, MySQL replication is asynchronous: on the source, the transaction
+    completes after step 1 and the remaining steps happen asynchronously. MySQL supports
+    semisynchronous replication: on the source, the transaction completes after step
+    3. That is not a typo: MySQL semisynchronous replication commits after step 3;
+    it does *not* wait for step 4 or 5. [“Semisynchronous Replication”](#repl-semi-sync)
+    goes into more detail.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Replicas are not required to write binary logs (step 6), but it’s standard
+    practice for high availability because it allows a replica to become the source.
+    This is how a database *failover* works: when the source dies or is taken down
+    for maintenance, a replica is promoted to become the new source. Let’s call the
+    instances *old source* and *new source*. Eventually, a DBA will restore the old
+    source (or clone a new instance to replace it) and make it replicate from the
+    new source. In the old source, the previously idle I/O thread, relay logs, and
+    SQL threads (shaded darkly in [Figure 7-1](#repl-foundation-img)) start working.
+    (The I/O thread in the old source will connect to the new source, which activates
+    its previously idle binlog dump thread.) From the new source binary logs, the
+    old source replicates writes that it missed while it was offline. While doing
+    so, the old source reports replication lag, but this is a special case addressed
+    in [“Post-Failure Rebuild”](#repl-failures). That’s failover in a nutshell; but
+    of course, it’s more complex in practice.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Binary Log Events
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Binary log events are a low-level detail that you probably won’t encounter (even
+    DBAs don’t often mess around in binary logs), but they are a direct result of
+    transactions executed by the application. Therefore, it’s important to understand
+    what the application is trying to flush through the plumbing of replication.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The following presumes row-based replication (RBR), which is the default [`binlog_format`](https://oreil.ly/rtKm0)
+    as of MySQL 5.7.7.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Replication focuses on transactions and binary log events, not individual writes,
+    because data changes are committed to binary logs during transaction commit, at
+    which point writes have already completed. At a high level, the focus is transactions
+    because they are meaningful to the application. At a low level, the focus is binary
+    log events because they are meaningful to replication. Transactions are logically
+    represented and delineated in binary logs as events, which is how multithread
+    replicas can apply them in parallel—more on this in [“Reducing Lag: Multithreaded
+    Replication”](#repl-mtr). To illustrate, let’s use a simple transaction:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: The table schemas and data do not matter. What’s important is that the `UPDATE`
+    changes one row in table `t1`, and the `DELETE` deletes three rows from table
+    `t2`. [Figure 7-2](#repl-binlog-events-img) illustrates how that transaction is
+    committed in a binary log.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Four contiguous events constitute the transaction:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: An event for `BEGIN`
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: An event for the `UPDATE` statement with one row image
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: An event for the `DELETE` statement with three row images
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: An event for `COMMIT`
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: At this low level, SQL statements essentially disappear and replication is a
+    stream of events and row images (for events that modify rows). A *row image* is
+    a binary snapshot of a row before and after modification. This is an important
+    detail because a single SQL statement can generate countless row images, which
+    yields a large transaction that might cause lag as it flows through replication.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![emsp 0702](assets/emsp_0702.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 7-2\. Binary log events for a transaction
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Let’s stop here because we’re a little deeper into MySQL internals than we should
+    be for this book. Although brief, this introduction to binary log events makes
+    the following sections more intelligible because now you know what’s flowing through
+    the plumbing of replication and why the foci are transactions and binary log events.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Replication Lag
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Referring back to [Figure 7-1](#repl-foundation-img), replication lag occurs
+    when applying changes on a replica (step 5) is slower than committing changes
+    on the source (step 1). The steps in between are rarely a problem (when the network
+    is working properly) because MySQL binary logs, the MySQL network protocol, and
+    typical networks are very fast and efficient.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '*Apply changes* is short for *apply transactions* or *apply events*, depending
+    on the context.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The I/O thread on a replica can write binary log events to its relay logs at
+    a high rate because this is a relatively easy process: read from network, write
+    sequentially to disk. But a SQL thread has a much more difficult and time-consuming
+    process: applying the changes. Consequently, the I/O thread outpaces the SQL thread,
+    and replication lag looks like [Figure 7-3](#repl-lag-img).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![emsp 0703](assets/emsp_0703.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 7-3\. MySQL replication lag
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Strictly speaking, a single SQL thread does not cause replication lag, it’s
+    only the limiting factor. The cause, in this case, is high transaction throughput
+    on the source, which is a good problem if the application is busy, but a problem
+    nonetheless. More on causes in the next section. The solution is more SQL threads,
+    which is covered later in [“Reducing Lag: Multithreaded Replication”](#repl-mtr).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Semisynchronous replication does not solve or preclude replication lag. When
+    semisynchronous replication is enabled, for each transaction, MySQL waits for
+    a replica to acknowledge that it has written the binary log events for the transaction
+    to its relay logs—step 3 in [Figure 7-1](#repl-foundation-img). On a local network,
+    replication lag as depicted in [Figure 7-3](#repl-lag-img) can still occur. If
+    semisynchronous reduces replication lag, it’s only a side-effect of network latency
+    throttling transaction throughput on the source. [“Semisynchronous Replication”](#repl-semi-sync)
+    goes into more detail.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Lag is inherent to replication, but make no mistake: MySQL replication is very
+    fast. A single SQL thread can easily handle thousands of transactions per second.
+    The first reason is simple: replicas do not execute the full workload that the
+    source executes. Notably, replicas do not execute reads (presuming replicas aren’t
+    used to serve reads). The second reason requires a few lines to explain. As noted
+    in [“Binary Log Events”](#repl-binlog-events), this chapter presumes row-based
+    replication (RBR). Consequently, replicas do not execute SQL statements: they
+    apply binary log events. That saves replicas a lot of time because they’re given
+    the end result—data changes—and told where to apply them. That can be significantly
+    faster than finding the matching rows to update, which is what the source had
+    to do. As a result of these two reasons, replicas can be nearly idle even while
+    the source is very busy. Nevertheless, three causes can overwhelm replication.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Causes
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'Replication lag has three main causes: transaction throughput, post-failure
+    rebuilds, and network issues. A section for each follows.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Transaction Throughput
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Transaction throughput causes replication lag when the rate on the source is
+    greater than the rate at which SQL (applier) threads on the replica can apply
+    changes. When this happens because the application is legitimately busy, it’s
+    usually not feasible to reduce the rate on the source. Instead, the solution is
+    to increase the rate on the replica by running more SQL (applier) threads. Focus
+    on improving replica performance by tuning multithreaded replication, as outlined
+    in [“Reducing Lag: Multithreaded Replication”](#repl-mtr).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Large transactions—ones that modify an inordinate number of rows—have a greater
+    impact on replicas than the source. On the source, a large transaction that takes
+    two seconds to execute, for example, most likely does not block other transactions
+    because it runs (and commits) in parallel. But on a single-threaded replica, that
+    large transactions blocks all other transactions for two seconds (or however long
+    it takes to execute on the replica—it might be less due to less contention). On
+    a multithreaded replica, other transactions continue to execute, but that large
+    transaction still blocks one thread for two seconds. The solution is smaller transactions.
+    More on this in [“Large Transactions (Transaction Size)”](ch08.html#trx-size).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Transaction throughput is not always driven by the application: backfilling,
+    deleting, and archiving data are common operations that can cause massive replication
+    lag if they don’t control the batch size, as forewarned in [“Batch Size”](ch03.html#batch-size).
+    In addition to proper batch size, these operations should monitor replication
+    lag and slow down when replicas begin to lag. It’s better for an operation to
+    take one day than to lag a replica by one second. [“Risk: Data Loss”](#repl-risk)
+    explains why.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: At some point, transaction throughput will exceed the capacity of a single MySQL
+    instance—source or replica. To increase transaction throughput, you must scale
+    out by sharding the database (see [Chapter 5](ch05.html#ch05)).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Post-Failure Rebuild
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: When MySQL or hardware fails, the instance is fixed and put back into the replication
+    topology. Or a new instance is cloned from an existing instance and takes the
+    place of the failed instance. Either way, the replication topology is rebuilt
+    to restore high availability.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Replicas are used for several purposes, but this chapter discusses only replicas
+    used for high availability.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The fixed (or new) instance will take minutes, hours, or days to *catch up*:
+    to replicate all the binary log events that it missed while it was offline. Technically,
+    this is replication lag, but in practice you can ignore it until the fixed instance
+    has caught up. Once caught up, any lag is legitimate.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Since failure is inevitable and catching up takes time, the only solution is
+    to be aware that the replication lag is due to a post-failure rebuild and wait.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Network Issues
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '*Network issues* cause replication lag by delaying the transfer of binary log
+    events from source to replica—step 2 in [Figure 7-1](#repl-foundation-img). Technically,
+    the network—not replication—is lagging, but quibbling about semantics doesn’t
+    change the end result: the replica is *behind the source*—a long way of saying
+    *lagged*. In this case, you must enlist network engineers to fix the root cause:
+    the network.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The risk caused by a network issue is mitigated by communication and teamwork:
+    talk with the network engineers to ensure that they know what’s at stake for the
+    database when there’s a network issue—it’s quite possible they don’t know because
+    they’re not DBAs or engineers using MySQL.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Risk: Data Loss'
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: '*Replication lag is data loss*.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is true by default for MySQL because the default is asynchronous replication.
+    Fortunately, semisynchronous replication is an option that will not lose any committed
+    transactions. Let’s first examine the risk with asynchronous replication, then
+    it will be clear how semisynchronous replication mitigates the risk.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: As noted in [“Foundation”](#repl-foundation), I defer Group Replication to the
+    future. Moreover, the synchronicity of Group Replication requires careful explanation.^([1](ch07.html#idm45829103536576))
+  prefs: []
+  type: TYPE_NORMAL
+- en: Asynchronous Replication
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '[Figure 7-4](#repl-crash) shows the point in time at which the source crashed.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![emsp 0704](assets/emsp_0704.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 7-4\. Crash on MySQL source with asynchronous replication
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Before crashing, the source committed five transactions to its binary logs.
+    But when it crashed, the replica I/O thread had only fetched the first three transactions.
+    Whether or not the last two transactions are lost depends on two factors: the
+    cause of the crash, and whether a DBA must failover.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If MySQL is the cause of the crash (most likely due to a bug), then it will
+    automatically restart, perform crash recovery, and resume normal operations. (By
+    default, replicas automatically reconnect and resume replication, too.) And since
+    MySQL is truly durable when properly configured, the committed transactions 4
+    and 5 are not lost. There’s just one problem: crash recovery can take several
+    minutes *or hours* to complete—it depends on several factors outside the scope
+    of this book. If you can wait, crash recovery is the ideal solution because no
+    committed transactions are lost.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If hardware or operating system is the cause of the crash, or if the crashed
+    MySQL instance cannot be recovered quickly enough for any reason, then a DBA will
+    failover—promote a replica to the source—and transactions 4 and 5 are lost. This
+    is not an ideal solution, but it’s standard practice because the alternative is
+    worse: a long outage (downtime) while recovering the crashed MySQL instance, which
+    requires exacting data forensics that could take hours or days.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: No data is lost when DBAs failover for maintenance (operations). And since nothing
+    has failed, some DBAs call this *successover*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This example is not contrived to prove the point that *replication lag is data
+    loss*; it’s inevitable with asynchronous replication because all hardware and
+    software (including MySQL) fails eventually.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The only mitigation is a strict adherence to minimizing replication lag. Do
+    not, for example, disregard 10 seconds of replication as “not too far behind.”
+    Instead, treat it as “we’re at risk of losing the last 10 seconds of customer
+    data.” The odds are in your favor that MySQL or the hardware won’t fail at the
+    worst possible moment—when the replica is lagging—but let me relate a cautionary
+    tale about hardware failure.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'One week when I was on-call, I received an alert around 9 a.m. That’s not too
+    early; I was already done with my first cup of coffee. One alert quickly turned
+    into thousands. Database servers everywhere—in multiple, geographically distributed
+    data centers—were failing. It was so bad that I immediately knew: the problem
+    was not hardware or MySQL, because the odds of that many simultaneous but unrelated
+    failures was infinitesimal. Long story short, one of the most experienced engineers
+    in the company had not had his coffee that morning. He had written and run a custom
+    script that went terribly awry. The script didn’t simply reboot servers at random,
+    it turned them off. (In data centers, server power is programmatically controlled
+    through a backplane called Intelligent Platform Management Interface.) Killing
+    power is akin to hardware failure.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The moral of that story is: failure can be caused by human error. Be prepared.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Asynchronous replication is not a best practice because virtually unmitigated
+    data loss is antithetical to the purpose of a persistent data store. Countless
+    companies around the world have been successful with asynchronous replication
+    for more than 20 years. (But “common practice” doesn’t necessarily mean “best
+    practice.”) If you run asynchronous replication, MySQL DBAs and experts will not
+    scoff as long as the following three conditions are true:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: You monitor replication lag with a heartbeat (see [“Monitoring”](#repl-monitoring)).
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: You are alerted any time (not just during business hours) when replication lag
+    is too high.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: You treat replication lag as data loss and fix it immediately.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Many successful companies use asynchronous MySQL replication, but there’s a
+    higher standard to strive for: semisynchronous replication.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Semisynchronous Replication
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: When semisynchronous (or *semisync*) replication is enabled, the source waits
+    for at least one replica to acknowledge each transaction. *Acknowledge* means
+    that the replica has written the binary log events for the transaction to its
+    relay logs. Therefore, the transaction is safely on disk on the replica, but the
+    replica hasn’t applied it yet. (Consequently, replication lag still occurs with
+    semisync replication, as mentioned in [“Replication Lag”](#repl-lag).) Acknowledgment
+    when received, not when applied, is why it’s called *semi*synchronous, not fully
+    synchronous.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Let’s replay the source crash from [“Asynchronous Replication”](#repl-async),
+    but now with semisynchronous replication enabled. [Figure 7-5](#repl-crash-semi)
+    shows the point in time at which the source crashed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![emsp 0705](assets/emsp_0705.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 7-5\. Crash on MySQL source with semisynchronous replication
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'With semisynchronous replication, every committed transaction is guaranteed
+    to have replicated to at least one replica. *Committed transaction* in this context
+    means that the `COMMIT` statement executed by the client has returned—the transaction
+    is complete from the client’s point of view. That’s the usual, high-level understanding
+    of a committed transaction, but down in the plumbing of replication, the technical
+    details differ. The following four steps are an extreme simplification of how
+    a transaction commits when binary logging and semisynchronous replication are
+    enabled:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Prepare transaction commit
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Flush data changes to binary log
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Wait for acknowledgment from at least one replica
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Commit transaction
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: An InnoDB transaction commit is a two-phase commit. In between the two phases
+    (steps 1 and 4), data changes are written and flushed to the binary logs, and
+    MySQL waits for at least one replica to acknowledge the transaction.^([2](ch07.html#idm45829103496928))
+  prefs: []
+  type: TYPE_NORMAL
+- en: In [Figure 7-5](#repl-crash-semi), the dashed outline of the fourth transaction
+    indicates that at least one replica has *not* acknowledged it. The source crashed
+    after step 2, so the transaction is in the binary logs, but the commit did not
+    complete. The client `COMMIT` statement will return an error (not from MySQL because
+    it has crashed; it will probably receive a network error).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Whether or not the fourth transaction is lost depends on the same two factors
+    as before ([“Asynchronous Replication”](#repl-async)): the cause of the crash,
+    and whether a DBA must failover. The important difference is that only one uncommitted
+    transaction per connection can be lost when semisynchronous replication is enabled.
+    Since the transaction did not complete and the client received an error, the potential
+    loss of the uncommitted transaction is less worrisome. The keyword is *less* worrisome:
+    there are edge cases that mean you cannot simply disregard the lost transaction.
+    For example, what if a replica acknowledges the transaction but the source crashes
+    before it receives the acknowledgment? The answer would descend further into replication
+    plumbing than we need to go. The point is: semisynchronous replication guarantees
+    that all committed transactions have replicated to at least one replica, and only
+    one uncommitted transaction per connection can be lost on failure.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The fundamental purpose of a persistent data store is to persist data, not lose
+    it. So why isn’t semisynchronous the default for MySQL? It’s complicated.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'There are successful companies that operate MySQL at scale using semisynchronous
+    replication. One notable company is GitHub, the former employer of renowned MySQL
+    expert Shlomi Noach who wrote a blog post about their use of semisynchronous replication:
+    [“MySQL High Availability at GitHub”](https://oreil.ly/6mLug).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Semisynchronous replication *reduces* availability—that’s not a typo. Although
+    it safeguards transactions, that safeguard means that the current transaction
+    for every connection might stall, timeout, or fail on `COMMIT`. By contrast, `COMMIT`
+    with asynchronous replication is essentially instant and guaranteed as long as
+    the storage on the source is working.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'By default, semisynchronous replication reverts to asynchronous when there
+    are not enough replicas or the source times out waiting for an acknowledgment.
+    This can be effectively disabled by configuration, but the best practice is to
+    allow it because the alternative is worse: a complete outage (the application
+    cannot write to the source).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Performance with semisynchronous replication requires that the source and replicas
+    are on a fast, local network because network latency implicitly throttles transaction
+    throughput on the source. Whether or not this is an issue depends on the local
+    network where you run MySQL. A local network should have submillisecond latency,
+    but that must be verified and monitored, else transaction throughput will suffer
+    the whims of network latency.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Whereas asynchronous replication works without any special configuration, semisynchronous
+    requires specific configuration and tuning. Neither is burdensome for a DBA, but
+    they are careful work nevertheless.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'I think semisynchronous replication is the best practice because data loss
+    is never acceptable—full stop. I advise you to learn more about semisync replication,
+    test and verify it on your network, and use it if possible. Start by reading [“Semisynchronous
+    Replication”](https://oreil.ly/JnxUJ) in the MySQL manual. Or, if you want to
+    be truly prepared for the future, look into [Group Replication](https://oreil.ly/5ZWHQ)
+    and [InnoDB Cluster](https://oreil.ly/JrrYd): the future of MySQL replication
+    and high availability. Although semisynchronous replication and Group Replication
+    elicit debate among MySQL experts, one point garners universal agreement: preventing
+    data loss is a virtue.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Reducing Lag: Multithreaded Replication'
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'By default, MySQL replication is asynchronous *and* single-threaded: one SQL
+    thread on the replica. Even semisynchronous replication is single-threaded by
+    default. The single SQL thread does not cause replication lag—[“Causes”](#repl-causes)
+    are the three main causes—but it is the limiting factor. The solution is *multithreaded
+    replication* (or *parallel replication*): multiple SQL threads applying transactions
+    in parallel. On a multithreaded replica, the SQL threads are called *applier threads*.^([3](ch07.html#idm45829103468976))
+    You can still call them SQL threads if you want—the terms are synonymous—but the
+    MySQL manual uses *applier* in the context of multithreaded replication.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The solution is simple for us as engineers using MySQL, but it’s not simple
+    for MySQL. As you can imagine, transactions cannot be applied in random order:
+    there might be dependencies among transactions. For example, if one transaction
+    inserts a new row, and second transaction updates that row, obviously the second
+    transaction must run after the first. *Transaction dependency tracking* is the
+    art and science (and magic) of determining which transactions—from a serialized
+    record (the binary logs)⁠—can be applied in parallel. It’s both fascinating and
+    impressive, but it’s beyond the scope of this book, so I encourage you to watch
+    the video [“MySQL Parallel Replication (LOGICAL_CLOCK): all the 5.7 (and some
+    of the 8.0) details”](https://oreil.ly/Q8aJv) by renowned MySQL expert Jean-François
+    Gagné.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Strictly speaking, one system variable enables multithreaded replication, but
+    I suspect that you are not going to be surprised when I tell you: it’s more complicated
+    in practice. Configuring MySQL replication is beyond the scope of this book, but
+    multithreaded replication is too important not to give you a *conservative starting
+    point*. A conservative starting point means that the following configuration might
+    not yield the full performance of multithreaded replication. Consequently, you
+    (or DBAs) must tune multithreaded replication—as in [“MySQL Tuning”](ch02.html#mysql-tuning)—to
+    maximize its potential while at the same time taking into account the various
+    ramifications of parallel replication.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'The rest of this section is nontrivial MySQL configuration that should only
+    be done by an engineer with experience configuring MySQL in high performance,
+    high availability environments. The system variables in [Table 7-1](#mtr-sysvars)
+    will *not* affect data integrity or durability in any way, but they will affect
+    performance on source and replica instances. Be aware that:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Replication affects high availability.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[Global transaction identifiers](https://oreil.ly/xYtq3) and [`log-replica-updates`](https://oreil.ly/wAOMO)
+    must be enabled.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Configuring MySQL requires elevated MySQL privileges.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: System variables change between MySQL versions and distributions.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'MariaDB uses different system variables: see [“Parallel Replication”](https://oreil.ly/F5n6J)
+    in the MariaDB documentation.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Be very careful when configuring MySQL, and thoroughly read the relevant sections
+    of the manual for your version and distribution of MySQL.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Table 7-1](#mtr-sysvars) lists three system variables as a conservative starting
+    point for enabling and configuring multithreaded replication. Variable names changed
+    as of MySQL 8.0.26, so the table lists old and new variable names, followed by
+    a recommended value. I do not recommend using multithreaded replication in MySQL
+    older than 5.7.22 because certain replication features from 8.0 were backported
+    into this version.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 7-1\. System variables to enable multithreaded replication
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| MySQL 5.7.22 through 8.0.25 | MySQL 8.0.26 and newer | Value |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| [`slave_parallel_workers`](https://oreil.ly/82SBV) | [`replica_parallel_workers`](https://oreil.ly/kFqAz)
+    | `4` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| [`slave_parallel_type`](https://oreil.ly/s5NOE) | [`replica_parallel_type`](https://oreil.ly/mIft5)
+    | `LOGI⁠CAL_CLOCK` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| [`slave_preserve_com⁠mit_order`](https://oreil.ly/oKRSy) | [`replica_preserve_commit_order`](https://oreil.ly/QGBB1)
+    | `1` |'
+  prefs: []
+  type: TYPE_TB
+- en: Set all three variables on all MySQL instances in the replication topology that
+    are used for high availability (that can be promoted to source).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Setting `replica_parallel_workers` greater than zero is the one system variable
+    that enables multithreaded replication. Four applier threads is a good start;
+    you must tune to find the optimized number of applier threads for your workload
+    and hardware. But, like a magic spell, it must be invoked with `replica_parallel_type`
+    to conjure the full performance of multithreaded replication. Even as of MySQL
+    8.0.26, the default for `replica_parallel_type` is `DATABASE`, which only applies
+    transactions in parallel for different databases—effectively, only one applier
+    thread per database. This is historical: it was the first type of parallelization.
+    But today, the best practice is `rep⁠lica_parallel_type = LOGICAL_CLOCK` because
+    it has no drawbacks when `rep⁠lica_preserve_commit_order` is enabled, and it provides
+    better parallelization because it applies transactions in parallel regardless
+    of database.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`replica_preserve_commit_order` is disabled by default, but I do not think
+    that is a best practice because it allows a multithreaded replica to *commit out
+    of order*: commit transactions in a different order than they were committed on
+    the source. For example, transactions 1, 2, 3 committed in that order on the source
+    might commit in order 3, 1, 2 on the replica. Multithreaded replication only commits
+    out of order when safe (when there are no ordered dependencies among transactions),
+    and table data is (eventually) the same, but committing out of order has consequences
+    that you and especially the DBAs managing MySQL must understand and handle. [“Replication
+    and Transaction Inconsistencies”](https://oreil.ly/Bf04z) in the MySQL manual
+    documents the consequences. When `replica_preserve_commit_order` is enabled, transactions
+    are still applied in parallel, but some transactions might wait for earlier transactions
+    to commit first—this is how commit order is preserved. Although `replica_preserve_commit_order`
+    reduces the effectiveness of parallelization, it’s the best practice until you
+    and the DBAs verify that its consequences are acceptable and handled.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Multithreaded replication works the same for Group Replication.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Since [Table 7-1](#mtr-sysvars) is a conservative starting point for enabling
+    multithreaded replication, it does not enable the latest transaction dependency
+    tracking: `WRITESET`. MySQL transaction dependency tracking is determined by the
+    system variable [`binlog_transaction_dependency_tracking`](https://oreil.ly/5SMUG).
+    The default is `COMMIT_ORDER`, but the latest is `WRITESET`. Benchmarks show that
+    `WRITESET` achieves greater parallelization than `COMMIT_ORDER`. At the time of
+    this writing, `WRITESET` is less than four years old: it was introduced in MySQL
+    8.0 which became GA on April 19, 2018. As a matter of technology, you should use
+    `WRITESET` because it achieves better performance on multithread replicas. But
+    as a matter of policy, it’s up to you (or your DBA) to decide when a feature has
+    matured enough to be used in production. To use `WRITESET` on MySQL 5.7, you must
+    enable system variable [`trans​ac⁠tion_write_set_extraction`](https://oreil.ly/3lKGX).
+    On MySQL 8.0 this system variable is enabled by default but deprecated as of MySQL
+    8.0.26.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Create a new replica to test and tune multithreaded replica. A new replica poses
+    little to no risk since it does not serve the application or high availability.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'There’s one more system variable that you should experiment with: [`bin⁠log_​group_commit_sync_delay`](https://oreil.ly/YMXoI).
+    By default, this variable is disabled (zero) because, as its name suggests, it
+    adds an artificial delay to group commit. Delays are usually bad for performance,
+    but group commit delay is a rare exception—sometimes. On the source, transactions
+    are committed to a binary log in groups, which is an internal optimization aptly
+    named *group commit*. Adding a delay to group commit creates larger groups: more
+    transactions committed per group. Multithreaded replication does not depend on
+    group commit, but it can benefit from larger group commits because more transactions
+    at once helps transaction dependency tracking find more opportunities for parallelization.
+    To experiment with `binlog_group_commit_sync_delay`, start with a value of `10000`:
+    the unit is microseconds, so that’s 10 milliseconds. This will increase transaction
+    commit response time by 10 milliseconds on the source, but it should also increase
+    transaction throughput on the replica. Tuning group commit size with respect to
+    multithreaded replica applier transaction throughput is not easy due to a lack
+    of MySQL metrics. If you go this route, read [“A Metric for Tuning Parallel Replication
+    in MySQL 5.7”](https://oreil.ly/QG4E1) by renowned MySQL expert Jean-François
+    Gagné.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Multithreaded replication is a best practice, but it requires nontrivial MySQL
+    configuration and possibly tuning to achieve maximum performance. Benchmarks and
+    real-world results vary, but multithreaded replication can more than double transaction
+    throughput on replicas. For performance gains like that, it’s well worth the effort.
+    But most importantly: multithreaded replication significantly reduces replication
+    lag, which is critical when using asynchronous replication.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Monitoring
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'The best practice for monitoring replication lag is to use a purpose-built
+    tool. But first, let’s examine the infamous MySQL metric for replication lag:
+    `Sec​onds_​Behind_Source`, as reported by `SHOW REPLICA STATUS`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Before MySQL 8.0.22, the replica lag metric and command were `Sec​onds_​Behind_Master`
+    and `SHOW SLAVE STATUS`, respectively. As of MySQL 8.0.22, the metric and command
+    are `Sec​onds_​Behind_Source` and `SHOW REPLICA STATUS`. I use the current metric
+    and command in this book.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`Seconds_Behind_Source` equals the current time on the replica minus the timestamp
+    of the binary log event that the SQL thread is executing.^([4](ch07.html#idm45829103397152))
+    If the current time on the replica is `T = 100` and the SQL thread is executing
+    a binary log event with timestamp `T = 80`, then `Seconds_Behind_Source = 20`.
+    When everything is working (replication lag notwithstanding), `Seconds_Behind_Source`
+    is relatively accurate, but it’s notorious for three problems:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The first problem occurs when everything is not working. Since `Seconds_​Behind_Source`
+    relies solely on binary log event timestamps, it does not figuratively see (or
+    care about) any issues before the binary log events arrive. If the source or network
+    has a problem that causes binary log events not to arrive, or to arrive slowly,
+    then the SQL thread applies all binary log events and `Seconds_Behind_Source`
+    reports zero lag because, from the SQL thread point of view, that is technically
+    correct: zero events, zero lag. But from our point of view, we know that’s wrong:
+    not only is there replication lag, there’s an issue before the replica, too.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'The second problem is that `Seconds_Behind_Source` is notorious for flapping
+    between zero and a nonzero value. For example, one moment `Seconds_Behind_Source`
+    reports 500 seconds of lag, the next moment it reports zero lag, and a moment
+    later it reports 500 seconds of lag again. This problem is related to the first
+    problem: when events trickle into the relay logs because of an issue before the
+    replica, the SQL thread oscillates noticeably between working (applying the latest
+    event) and waiting (for the next event). That causes `Seconds_Behind_Source` to
+    flap between a value (SQL thread is working) and zero (SQL thread is waiting).'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'The third problem is that `Seconds_Behind_Source` does not precisely answer
+    the question that engineers really want to know: *when will the replica catch
+    up?* When will replica lag be effectively zero because it’s applying the latest
+    transactions from the source? Presuming everything is working (replication lag
+    notwithstanding), the value of `Seconds_Behind_Source` only indicates how long
+    ago the current event being applied was executed on the source; it does *not*
+    precisely indicate how long until the replica catches up to the source. The reason
+    is that replicas apply transactions at a different rate than the source.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'For example, suppose that 10 transactions execute concurrently on the source,
+    and each transaction takes 1 second. The total execution time is 1 second and
+    the rate is 10 TPS because the transactions executed concurrently on the source.
+    On a single-threaded replica, which applies each transaction serially, the worst-case
+    total execution time and rate *could be* 10 seconds and 1 TPS, respectively. I
+    emphasize *could be* because it’s also possible that the replica applies all 10
+    transactions significantly faster because the replica isn’t burdened with the
+    full workload and it doesn’t execute SQL statements (it applies binary log events).
+    This could happen if the 1 second execution time per transaction on the source
+    was due to a terrible `WHERE` clause that accessed a million rows but only matched
+    and updated a single row. The lucky replica updates that single row in almost
+    no time. On a multithreaded replica (see [“Reducing Lag: Multithreaded Replication”](#repl-mtr)),
+    the total execution time and rate vary based on at least two factors: the number
+    of applier threads and whether the transactions can be applied in parallel. Either
+    way, the point is: replicas apply transactions at a different rate than the source,
+    and since there’s no way to know the difference, `Seconds_Behind_Source` cannot—and
+    does not—precisely indicate when a replica will catch up.'
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: 'Despite these problems, `Seconds_Behind_Source` provides value: it’s a ballpark
+    estimate of how long until the replica catches up to the source: seconds, minutes,
+    hours, days? More on recovery time in the next section.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'MySQL 8.0 introduced significantly better visibility into MySQL replication,
+    including replication lag. There’s just one catch: it provides primitives, not
+    ready-to-use metrics like `Seconds_Behind_Source`. If you’re using MySQL 8.0,
+    talk with your DBA about [Performance Schema replication tables](https://oreil.ly/xDKOd)
+    that expose a new wealth of information about MySQL replication. Otherwise, the
+    best practice for monitoring replication lag is to use a purpose-built tool. Instead
+    of relying on binary log event timestamps, tools use their own timestamps. A tool
+    writes timestamps at regular intervals to a table, then reports replication lag
+    as the difference of the current time on a replica minus the latest timestamp
+    in the table. Fundamentally, the approach is similar to how MySQL calculates `Seconds_Behind_Source`,
+    but there are three important differences when using a tool:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: A tool writes timestamps at regular intervals, which means that it’s not susceptible
+    to the first problem of `Seconds_Behind_Source`. If there’s any issue before the
+    binary log events arrive, replication lag from a tool will immediately begin to
+    increase because its timestamp (written to a table) stops incrementing.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'A tool precludes the second problem of `Seconds_Behind_Source`: replication
+    lag from a tool does not flap; it can only be (effectively) zero if its timestamp
+    is (effectively) equal to the current time.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: A tool can measure replication lag and write timestamps at subsecond intervals
+    (every 200 milliseconds, for example). A single second of replication lag is too
+    much for high performance applications—or any application when using asynchronous
+    replication.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The de facto tool for monitoring MySQL replication is [`pt-heartbeat`](https://oreil.ly/sTvro).
+    (Timestamps written by replication lag monitoring tools are called *heartbeats*.)
+    This venerable tool has seen more than a decade of use and success because it’s
+    simple and effective. Use it to start monitoring replication lag, or use it to
+    learn how to write your own tool.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Recovery Time
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: When a replica has a significant amount of lag, the most pressing question is
+    often “When will it recover?” When will the replica catch up to the source so
+    that it’s executing (applying) the latest transactions? There’s no precise answer.
+    But replication lag always recovers after the cause is fixed. I return to this
+    notion at the end of the section. Until then, there’s one more characteristic
+    of replication lag to understand.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Another common and important characteristic of replication lag is the inflection
+    point between increasing lag and when the replica begins to recover (decreasing
+    lag). In [Figure 7-6](#repl-lag-graph), the inflection point is marked by the
+    dotted line at time 75.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'When replication lag begins, the situation looks increasingly dire as lag increases.
+    But this is normal. Presuming the replica isn’t broken, the SQL threads are working
+    hard, but the cause has not been fixed yet, so the backlog of binary log events
+    continues to increase. As long as the cause persists, replication lag will increase.
+    But again: this is normal. Very soon after the cause is fixed, the proverbial
+    tide will turn, creating an inflection point in the graph of replication lag,
+    as shown in [Figure 7-6](#repl-lag-graph) at time 75. The replica is still lagged,
+    but it’s applying binary log events faster than the I/O thread is dumping them
+    into the relay logs. Post–inflection point, replica lag usually decreases with
+    noticeable and satisfying haste.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![emsp 0706](assets/emsp_0706.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 7-6\. Inflection point in graph of replication lag
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Recovery time is not very meaningful before the inflection point because, in
+    theory, if the cause is never fixed, then the replica will never recover. When
+    replication lag is increasing steadily (pre–inflection point), don’t be distracted
+    by the value; instead, focus on fixing the cause. Lag will increase until the
+    cause is fixed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Recovery time is more meaningful after the inflection point and it’s usually
+    faster than `Seconds_Behind_Source` or the value reported by tools. As explained
+    in [“Monitoring”](#repl-monitoring), despite replication lag, a single SQL thread
+    is very fast because the replica doesn’t have to execute the full workload that
+    besets the source. As a result, replicas often apply transactions faster than
+    the source, which is how replicas eventually catch up.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In my experience, if replication lag is measured in days, it often recovers
+    in hours (post–inflection point)—perhaps many hours, but hours nevertheless. Likewise,
+    several hours of lag often recovers in a few hours, and several minutes of lag
+    often recovers before you can finish a cup of coffee.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Returning to the notions that there’s no precise answer and lag always recovers,
+    the end result is that a precise recovery time is not as useful or meaningful
+    as it first seems. Even if you could know the exact time that a replica will recover,
+    you cannot do anything but wait. MySQL replication is remarkably dogged. As long
+    as the replica doesn’t break, MySQL *will* recover—it always does. Fix the cause
+    as quickly as possible, wait for the inflection point, then replication lag indicates
+    a worst case recovery time: MySQL usually recovers more quickly because SQL threads
+    are fast.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Summary
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'This chapter investigated MySQL replication lag. Replication is the foundation
+    of MySQL high availability, and replication lag is data loss. The main takeaways
+    are:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'MySQL has three types of replication: asynchronous, semisynchronous, and Group
+    Replication.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Asynchronous (async) replication is the default.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Asynchronous replication can lose numerous transactions on failure.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Semisynchronous (semisync) replication does not lose any committed transactions
+    on failure, only one uncommitted transaction per client connection.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Group Replication is the future of MySQL replication and high availability
+    (but not covered in this chapter or book): it turns MySQL instances into a cluster.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The foundation of MySQL async and semisync replication is sending transactions,
+    encoded as binary log events, from a source to a replica.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Semisync replication makes a transaction commit on the source wait for at least
+    one replica to acknowledge receiving and saving (not applying) the transaction.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: A replica has an I/O thread that fetches binary log events from the source and
+    stores them in local relay logs.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: A replica has, by default, one SQL thread that executes binary log events from
+    the local relay logs.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Multithreaded replication can be enabled to run multiple SQL threads (applier
+    threads).
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Replication lag has three main causes: (high) transaction throughput on the
+    source, a MySQL instance catching up after failure and rebuild, or network issues.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'SQL (applier) threads are the limiting factor in replication lag: more SQL
+    threads reduce lag by applying transaction in parallel.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Semisync replication can incur replication lag.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Replication lag is data loss, especially with asynchronous replication.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Enabling multithreaded replication is the best way to reduce replication lag.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The MySQL metric for replication lag, `Seconds_Behind_Source`, can be misleading;
+    avoid relying on it.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Use a purpose-built tool to measure and report MySQL replication lag at subsecond
+    intervals.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Recovery time from replication lag is imprecise and difficult to calculate.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: MySQL will recover, eventually—it always does once the cause is fixed.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The next chapter examines MySQL transactions.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Practice: Monitor Subsecond Lag'
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'The goal of this practice is to monitor subsecond replication lag and determine:
+    is your replica lagging beyond the 1-second resolution that `Seconds_Behind_Source`
+    can report? For example, is your replica lagging by 800 milliseconds (which is
+    far greater than network latency)? A tool is needed to monitor subsecond lag:
+    [`pt⁠-⁠heart⁠beat`](https://oreil.ly/sTvro).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To complete this practice, you need:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: A compute instance to run `pt-heartbeat` that can connect to the source and
+    a replica
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: MySQL `SUPER` or `GRANT OPTION` privileges to create a user; or ask your DBA
+    to create the user
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: MySQL `CREATE` privileges to create a database; or ask your DBA to create the
+    database
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Every MySQL configuration and environment is different, so adapt the following
+    example as needed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Create a database for `pt-heartbeat` to use:'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: You can use a different database name; I just chose `percona` as an example.
+    If you change the database name, be sure to change it in the following commands.
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: 'Create a MySQL user for `pt-heartbeat` and grant it the privileges that it
+    needs:'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: You can use a different MySQL username and password; I just chose `pt-heartbeat`
+    and `percona` (respectively) as an example. You should definitely change the password
+    if running this in production. (The password is set by the `IDENTIFIED BY` clause.)
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: 'Run `pt-heartbeat` in update-mode to write heartbeats to a table in the `percona`
+    database:'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: 'A quick breakdown of those command-line arguments:'
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: '`--create-table`'
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: Automatically create the `heartbeat` table in the specified database, if needed.
+    The first `GRANT` statement allows the `pt-heartbeat` user to `CREATE` the table.
+    If not using this option, read the `pt-heartbeat` documentation to learn how to
+    create the `heartbeat` table manually.
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: '`--database`'
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: Specify the database to use. `pt-heartbeat` requires this option.
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: '`--interval`'
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: Write heartbeats every 200 milliseconds. This option determines the maximum
+    resolution of `pt-heartbeat`, which is the smallest amount of lag that it can
+    detect. The default is 1.0 second, which is not subsecond. The maximum resolution
+    is 0.01 seconds (10 milliseconds). Therefore, 0.2 seconds is a little conservative,
+    so experiment with lower values (high resolution).
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: '`--update`'
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: Write heartbeats to `heartbeat` table in `--database` every `--interval` seconds.
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: '`h=SOURCE_ADDR,u=pt-heartbeat,p=percona`'
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: The data source name (DSN) to connect to MySQL. The `h` specifies the hostname.
+    Change `SOURCE_ADDR` to the hostname of the source instance. The `u` specifies
+    the username. The `p` specifies the password.
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: Read the [`pt-heartbeat` documentation](https://oreil.ly/sTvro) for further
+    details on command-line options and the DSN.
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: If the command is successful when run, it prints nothing and runs silently.
+    Else, it prints an error and exits.
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: 'Run `pt-heartbeat` again but in monitor mode to print replication lag:'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: Change `REPLICA_ADDR` in the DSN to the hostname of a replica instance.
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: In monitor mode, `--interval` is how often to check and print replication lag.
+    The update mode instance of `pt-heartbeat` is writing heartbeats every 0.2 seconds
+    (200 milliseconds), but the monitor mode instance of `pt-heartbeat` checks and
+    prints replication lag a little more slowly (every 0.5 seconds) for easy reading.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If the command in step four is successful when run, it prints lines like:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: The first field is the current replication lag. The three fields between the
+    brackets are moving averages for the last 1, 5, and 15 minutes of replication
+    lag.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In this example, the first line shows zero lag. Then I intentionally lagged
+    my replica for 1.1 seconds. Consequently, the second line shows 200 milliseconds
+    of replication lag, which is the maximum resolution because the update-mode instance
+    of `pt-heartbeat` is running with `--interval 0.2`. Half a second later (due to
+    the monitor-mode instance of `pt-heartbeat` running with `--interval 0.5`), the
+    tool reports 0.7 seconds (700 milliseconds) of replication lag on the third line.
+    But then my fake 1.1 seconds of lag ends, so the last (fourth) line correctly
+    reports zero lag.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This example is contrived, but it demonstrates how `pt-heartbeat` can monitor
+    and report subsecond replication lag. Try it on your network—the tool is safe
+    to use.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([1](ch07.html#idm45829103536576-marker)) [“MySQL Group Replication…Synchronous
+    or Asynchronous Replication?”](https://oreil.ly/Gv6GR) by renowned MySQL expert
+    Frédéric Descamps explains the synchronicity of Group Replication.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([2](ch07.html#idm45829103496928-marker)) I presume [`sync_binlog` = 1](https://oreil.ly/lbfwm).
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([3](ch07.html#idm45829103468976-marker)) In the MySQL manual, the full term
+    is *applier worker thread*, but I think *worker* is redundant since every thread
+    is a worker of some type.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([4](ch07.html#idm45829103397152-marker)) Technically, it’s the event timestamp
+    plus its execution time. Also, the clock skew between source and replica is subtracted
+    from `Seconds_Behind_Source` when it’s reported by `SHOW REPLICA STATUS`.
+  prefs: []
+  type: TYPE_NORMAL

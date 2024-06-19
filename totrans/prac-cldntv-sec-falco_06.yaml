@@ -1,0 +1,1096 @@
+- en: Chapter 4\. Data Sources
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: In this chapter we’ll take a deep dive into the kernel of the operating system
+    and Falco’s data collection stack. You’ll learn how Falco captures the different
+    types of events that feed its rule engine, how its data collection process compares
+    to alternative approaches, and why it was built the way it is. You’ll get to understand
+    the details well enough that you will be able to pick and deploy the right drivers
+    and plugins for your needs by the end of this chapter.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The first order of business is understanding what data sources you can use
+    in Falco. Falco’s data sources can be grouped into two main families: system calls
+    and plugins. System calls are Falco’s original data source. They come from the
+    kernel of the operating system and offer visibility into the activities of processes,
+    containers, virtual machines, and hosts. Falco uses them to protect workloads
+    and applications. The second family of data sources, plugins*,* is relatively
+    new: support was added in 2022\. Plugins connect various types of inputs to Falco,
+    such as cloud logs and APIs.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Falco previously supported Kubernetes audit logs as a third, separate source
+    type; starting from Falco 0.32, however, this data source has been reimplemented
+    as a plugin, so we won’t cover it in this chapter.
+  prefs: []
+  type: TYPE_NORMAL
+- en: System Calls
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'As we’ve stated several times already, system calls are a key source of data
+    for Falco and one of the ingredients that make it unique. But what exactly is
+    a system call? Let’s start with a high-level definition, courtesy of [Wikipedia](https://oreil.ly/pbS0B):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: In computing, a system call (commonly abbreviated to syscall) is the programmatic
+    way in which a computer program requests a service from the kernel of the operating
+    system on which it is executed. This may include hardware-related services (for
+    example, accessing a hard disk drive or accessing the device’s camera), creation
+    and execution of new processes, and communication with integral kernel services
+    such as process scheduling.
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: 'Let’s unpack this. At the highest level of abstraction, a computer consists
+    of a bunch of hardware that runs a bunch of software. In modern computing, however,
+    it’s extremely unusual for a program to run directly on the hardware. Instead,
+    in the vast majority of cases, programs run on top of an operating system. Falco’s
+    drivers focus specifically on the operating system powering the cloud and the
+    modern data center: Linux.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'An *operating system* is a piece of software designed to conduct and support
+    the execution of other software. Among many other things, the OS takes care of:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Scheduling processes
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Managing memory
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Mediating hardware access
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Implementing network connectivity
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Handling concurrency
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Clearly, the vast majority of this functionality needs to be exposed to the
+    programs that are running on top of the OS, so that they can do something useful.
+    And clearly, the best way for a piece of software to expose functionality is to
+    offer an *application programming interface* (API): a set of functions that client
+    programs can call. This is what system calls *almost* are: APIs to interact with
+    the operating system.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Wait, why almost?
+  prefs: []
+  type: TYPE_NORMAL
+- en: Well, the operating system is a unique piece of software, and you can’t just
+    call it like you would a library. The OS runs in a separate execution mode, called
+    privileged mode, that’s isolated from user mode, which is the context used for
+    executing regular processes (that is, running programs). This separation makes
+    calling the OS more complicated. With some CPUs, you invoke a system call by triggering
+    an interrupt. With most modern CPUs, however, you need to use a specific CPU instruction.
+    If we exclude this additional level of complexity, it is fair to say that system
+    calls are APIs to access operating system functionality. There are lots of them,
+    each with their own input arguments and return value.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Every program, with no exceptions, makes extensive and constant use of the
+    system call interface for anything that is not pure computation: reading input,
+    generating output, accessing the disk, communicating on the network, running a
+    new program, and so on. This means, as you can imagine, that observing system
+    calls gives a very detailed picture of what each process does.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Operating system developers have long treated the system call interface as a
+    stable API. This means that you can expect it to stay the same even if, inside,
+    the kernel changes dramatically. This is important because it guarantees consistency
+    across time and execution environments, making the system call API an ideal choice
+    for collecting reliable security signals. Falco rules, for example, can reference
+    specific system calls and assume that using them will work on any Linux distribution.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Examples
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Linux offers *many* system calls—more than 300 of them. Going over all of them
+    would be next to impossible and very boring, so we’ll spare you that. However,
+    we do want to give you an idea of the kinds of system calls that are available.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Table 4-1](#noteworthy_system_call_categories) includes some of the system
+    call categories that are most relevant for a security tool like Falco. For each
+    category, the table includes examples of representative system calls. You can
+    find more information on each by entering `**man 2 *X***`, where `***X***` is
+    the system call name, in a Linux terminal or in your browser’s search bar.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 4-1\. Noteworthy system call categories
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Category | Examples |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| File I/O | `open`, `creat`, `close`, `read`, `write`, `ioctl`, `link`, `unlink`,
+    `chdir`, `chmod`, `stat`, `seek`, `mount`, `rename`, `mkdir`, `rmdir` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Network | `socket`, `bind`, `connect`, `listen`, `accept`, `sendto`, `recvfrom`,
+    `getsockopt`, `setsockopt`, `shutdown` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Interprocess communication | `pipe`, `futex`, `inotify_add_watch`, `eventfd`,
+    `semop`, `semget`, `semctl`, `msgctl` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Process management | `clone`, `execve`, `fork`, `nice`, `kill`, `prctl`,
+    `exit`, `setrlimit`, `setpriority`, `capset` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Memory management | `brk`, `mmap`, `mprotect`, `mlock`, `madvise` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| User management | `setuid`, `getuid`, `setgid`, `getgid` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| System | `sethostname`, `setdomainname`, `reboot`, `syslog`, `uname`, `swapoff`,
+    `init_module`, `delete_module` |'
+  prefs: []
+  type: TYPE_TB
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: If you are interested in taking a look at the full list of Linux system calls,
+    type `**man syscalls**` into a Linux terminal or a search engine. This will show
+    the official Linux manual page, which includes a comprehensive list of system
+    calls with hyperlinks to take a deeper look at many of them. In addition, software
+    engineer Filippo Valsorda offers a nicely organized and searchable [list](https://oreil.ly/P12lw)
+    on his personal home page.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Observing System Calls
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Given how crucial system calls are for Falco and for runtime security in general,
+    it’s important that you learn how to capture, observe, and interpret them. This
+    is a valuable skill that you will find useful in many situations. We’re going
+    to show you two different tools you can use for this purpose: strace and sysdig.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: strace
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'strace is a tool that you can expect to find on pretty much every machine running
+    a Unix-compatible operating system. In its simplest form, you use it to run a
+    program, and it will print every system call issued by the program to standard
+    error. In other words, add `**strace**` to the beginning of an arbitrary command
+    line and you will see all of the system calls that command line generates:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note how strace’s output mimics C syntax and looks like a stream of function
+    invocations, with the addition of the return value after the `=` symbol at the
+    end of each line. For example, take a look at the `write` syscall (in bold) that
+    outputs the “hello world” string to standard output (file descriptor 1). It returns
+    the value `12`, which is the number of bytes that have been successfully written.
+    Note how the string “hello world” is printed to standard output *before* the `write`
+    system call returns and strace prints its return value on the screen.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'A second way to use strace is pointing it to a running process by specifying
+    the process ID (PID) on the command line:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: strace has some pros and some cons. It’s broadly supported, so either it’s already
+    available or it’s an easy package install away. It’s also simple to use and ideal
+    when you need to inspect a single process, which makes it perfect for debugging
+    use cases.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As for disadvantages, strace instruments individual processes, which makes it
+    unsuitable for inspecting the activity of the whole system or when you don’t have
+    a specific process to start from. Further, strace is based on ptrace for system
+    call collection, which makes it very slow and unsuitable for use in production
+    environments. You should expect a process to slow down substantially (sometimes
+    by orders of magnitude) when you attach strace to it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: sysdig
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: We introduced sysdig in [Chapter 3](ch03.xhtml#understanding_falcoapostr)’s
+    discussion of trace files. sysdig is more sophisticated than strace and includes
+    several advanced features. While this can make it a bit harder to use, the good
+    news is that sysdig shares Falco’s data model, output format, and filtering syntax—so
+    you can use a lot of what you learn about Falco in sysdig, and vice versa.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The first thing to keep in mind is that you don’t point sysdig to an individual
+    process like you do with strace. Instead, you just run it and it will capture
+    every system call invoked on the machine, inside or outside containers:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Usually this is too noisy and not very useful, so you can restrict what sysdig
+    shows you by using filters. sysdig accepts the same filtering syntax as Falco
+    (which, incidentally, makes it a great tool to test and troubleshoot Falco rules).
+    Here’s an example where we restrict sysdig to capturing system calls for processes
+    named “cat”:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This output requires a little more explanation than strace’s. The fields sysdig
+    prints are:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Incremental event number
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Event timestamp
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: CPU ID
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Command name
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Process ID and thread ID (TID), separated by a dot
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Event direction (`>` means *enter*, while `<` means *exit*)
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Event type (for our purposes, this is the system call name)
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: System call arguments
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Unlike strace, sysdig prints *two* lines for each system call: the *enter*
+    line is generated when the system call starts and the *exit* line is printed when
+    the system call returns. This approach works well if you need to identify how
+    long a system call took to run or pinpoint a process that is stuck in a system
+    call.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Also note that, by default, sysdig prints thread IDs in addition to process
+    IDs. *Threads* are the core execution unit for the operating system and thus for
+    sysdig as well. Multiple threads can exist within the same process or command
+    and share resources, such as memory. The TID is the basic identifier to follow
+    when tracking execution activity in your machine. You do that by just looking
+    at the TID number, or by filtering out the noise with a command line like this
+    one:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: which will preserve the execution flow only for thread 1234.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Threads live inside processes, which are identified by a process ID. A lot of
+    the processes running on an average Linux box are single-threaded, and in that
+    case `thread.tid` is the same as `proc.pid`. Filtering by `proc.pid` is useful
+    to observe how threads interact with each other inside a process.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Trace files
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'As you learned in [Chapter 3](ch03.xhtml#understanding_falcoapostr), you can
+    instruct sysdig to save the system calls it captures to a trace file, like so:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You will likely want to use a filter to keep the file size under control. For
+    example:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You can also use filters when reading trace files:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: sysdig’s filters are important enough that we will devote a full chapter ([Chapter 6](ch06.xhtml#fields_and_filters))
+    to them.
+  prefs: []
+  type: TYPE_NORMAL
+- en: We recommend you play with sysdig and explore the activity of common programs
+    in Linux. This will be helpful later, when creating or interpreting Falco rules.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Capturing System Calls
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: All right, system calls are cool and we need to capture them. So what’s the
+    best way to do it?
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Earlier in this chapter, we described how system calls involve transitioning
+    the execution flow from a running process to the kernel of the operating system.
+    Intuitively, and as shown in [Figure 4-1](#system_call_capture_options), there
+    are two places where system calls can be captured: in the running process or the
+    operating system kernel.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![](Images/pcns_0401.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 4-1\. System call capture options
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Capturing system calls in a running process typically involves modifying either
+    the process or some of its libraries with some kind of instrumentation. The fact
+    that most programs in Linux use the C standard library, also known as *glibc*,
+    to execute system calls makes instrumenting it quite appealing. As a consequence,
+    there are abundant tools and frameworks to modify *glibc* (and other system libraries)
+    for instrumentation purposes. These techniques can be static, changing the library’s
+    source code and recompiling it, or dynamic, finding its location in the address
+    space of the target process and inserting hooks in it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Another method to capture system calls without instrumenting the OS kernel involves
+    using the operating system’s debugging facilities. For example, strace uses a
+    facility called *ptrace*,^([1](ch04.xhtml#ch01fn2)) which is at the base of tools
+    like the GNU debugger (gdb).
+  prefs: []
+  type: TYPE_NORMAL
+- en: The second option involves intercepting the system call execution after it has
+    transitioned to the operating system. This requires running some code in the OS
+    kernel itself. It tends to be more delicate and riskier, because running code
+    in the kernel requires elevated privileges. Anything running in the kernel has
+    potential control of the machine, its processes, its users, and its hardware.
+    Therefore, a bug in anything that runs inside the kernel can cause major security
+    risks, data corruption, or, in some cases, even a machine crash. This is why many
+    security tools pick instrumentation option 1 and capture system calls at the user
+    level, inside the process.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Falco does the opposite: it sits squarely on the kernel instrumentation side.
+    The rationale behind this choice can be summarized in three words: accuracy, performance,
+    and scalability. Let’s explore each in turn.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Accuracy
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: User-level instrumentation techniques—in particular, those that work at the
+    *glibc* level—have a couple of major problems. First, a motivated attacker can
+    evade them by, well, not using *glibc*! You don’t *have* to use a library to issue
+    system calls, and attackers can easily craft a simple sequence of CPU instructions
+    instead, completely bypassing the *glibc* instrumentation. Not good.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Even worse, there are major categories of software that just don’t load *glibc*
+    at all. For example, statically linked C programs, very common in containers,
+    import *glibc* functions at compile time and embed them in their executables.
+    With these programs, you don’t have the option to replace or modify the library.
+    The same goes for programs written in Go, which has its own statically linked
+    system call interface library.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Kernel-level capture doesn’t suffer from these limitations. It supports any
+    language, any stack, and any framework, because system call collection happens
+    at a level below all of the libraries and abstraction layers. This means that
+    kernel-level instrumentation is much harder for attackers to evade.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Performance
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Some user-level capture techniques, such as using ptrace, have significant overhead
+    because they generate a high number of context switches. Every single system call
+    needs to be uniquely delivered to a separate process, which requires the execution
+    to ping-pong between processes. This is very, very slow, to the point that it
+    becomes an impediment to using such techniques in production, where such a substantial
+    impact on the instrumented processes is not acceptable.
+  prefs: []
+  type: TYPE_NORMAL
+- en: It’s true that *glibc*-based capture can be more efficient, but it still introduces
+    high overhead for basic operations like timestamping events. Kernel-level capture,
+    by contrast, requires zero context switches and can collect all of the necessary
+    context, like timestamps, from within the kernel. This makes it much faster than
+    any other technique, and thus the most suitable for production.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Scalability
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: As the name implies, process-level capture requires “doing something” for every
+    single process. What that something is can vary, but it still introduces an overhead
+    that is proportional to the number of observed processes. That’s not the case
+    with kernel-level instrumentation. Take a look at [Figure 4-2](#system_call_capture_scalabilitycomma_pr).
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you insert kernel instrumentation in the right place, it is possible to have
+    one single instrumentation point (labeled 2 in [Figure 4-2](#system_call_capture_scalabilitycomma_pr)),
+    no matter how many processes are running. This ensures not only maximum efficiency
+    but also the certainty that you will never miss anything, because no process escapes
+    kernel-level capture.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![](Images/pcns_0402.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 4-2\. System call capture scalability, process-level versus kernel
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: So What About Stability and Security?
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: We mentioned that kernel-level instrumentation is more delicate, because a bug
+    can cause serious problems. You might wonder, “Am I taking additional risk by
+    choosing a tool like Falco, which is based on kernel instrumentation, instead
+    of a product based on user-level instrumentation?”
+  prefs: []
+  type: TYPE_NORMAL
+- en: Not really. First of all, kernel-level instrumentation benefits from well-documented,
+    stable hooking interfaces, while approaches like *glibc*-based capture are less
+    clean and intrinsically riskier. They cannot crash the machine, but they can absolutely
+    crash the instrumented process, with results that are typically bad. In addition
+    to that, technologies like eBPF greatly reduce the risk involved in running code
+    in the kernel, making kernel-level instrumentation viable even for risk-averse
+    users.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Kernel-Level Instrumentation Approaches
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'We hope we’ve convinced you that, whenever it’s available, kernel instrumentation
+    is the way to go for runtime security. The question now becomes, what is the best
+    mechanism to implement it? Among the different available approaches, two are relevant
+    for a tool like Falco: kernel modules or eBPF probes. Let’s take a look at each
+    of these approaches.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Kernel modules
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: Loadable kernel modules are pieces of code that can be loaded into the kernel
+    at runtime. Historically, modules have been heavily used in Linux (and many other
+    operating systems) to make the kernel extensible, efficient, and smaller.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Kernel modules extend the kernel’s functionality without the need to reboot
+    the system. They are typically used to implement device drivers, network protocols,
+    and filesystems. Kernel modules are written in C and are compiled for the specific
+    kernel inside which they will run. In other words, it’s not possible to compile
+    a module on one machine and then use it on another one (unless they have exactly
+    the same kernel). Kernel modules can also be unloaded when the user doesn’t need
+    them anymore, to save memory.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Linux has supported kernel modules for a very long time, so they work even with
+    very old versions of Linux. They also have extensive access to the kernel, which
+    means there are very few restrictions on what they can do. That makes them a great
+    choice to collect the detailed information required by a runtime security tool
+    like Falco. Since they are written in C, kernel modules are also very efficient
+    and therefore a great option when performance is important.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If you want to see the list of modules that are loaded in your Linux box, use
+    this command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: eBPF
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: As mentioned in [Chapter 1](ch01.xhtml#introducing_falco), eBPF is the “next
+    generation” of the Berkeley Packet Filter (BPF). BPF was designed in 1992 for
+    network packet filtering with BSD operating systems, and it is still used today
+    by tools like Wireshark. BPF’s innovation was the ability to execute arbitrary
+    code in the kernel of the operating system. Since such code has more or less unlimited
+    privileges on the machine, however, this is potentially risky and must be done
+    with care.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Figure 4-3](#bpf_filter_deployment_steps) shows how BPF safely runs arbitrary
+    packet filters in the kernel.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![](Images/pcns_0403.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 4-3\. BPF filter deployment steps
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Let’s take a look at the steps depicted here:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The user inputs a filter in a program like Wireshark (e.g., `port 80`).
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'The filter is fed to a compiler, which converts it into bytecode for a virtual
+    machine. This is conceptually similar to compiling a Java program, but both the
+    program and the virtual machine (VM) instruction set are much simpler when using
+    BPF. Here, for example, is what our `port 80` filter becomes after being compiled:'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: To prevent a compiled filter from doing damage, it is analyzed by a verifier
+    before being injected into the kernel. The verifier examines the bytecode and
+    determines if the filter has dangerous attributes (for example, infinite loops
+    that would cause the filter to never return, consuming a lot of kernel CPU).
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: If the filter code is not safe, the verifier rejects it, returns an error to
+    the user, and stops the loading process. If the verifier is happy, the bytecode
+    is delivered to the virtual machine, which runs it against every incoming packet.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: eBPF is a more recent (and much more capable) version of BPF, added to Linux
+    in 2014 and first included with kernel version 3.18\. eBPF takes BPF’s concepts
+    to new levels, delivering more efficiency and taking advantage of newer hardware.
+    Most importantly, with hooks throughout the kernel, eBPF enables use cases that
+    go beyond simple packet filtering, such as tracing, performance analysis, debugging,
+    and security. It’s essentially a general-purpose code execution VM that guarantees
+    the programs it runs won’t cause damage.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Here are some of the improvements that eBPF introduces over classic BPF:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: A more advanced instruction set, which means eBPF can run much more sophisticated
+    programs.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: A just-in-time (JIT) compiler. While classic BPF was interpreted, eBPF programs,
+    after being validated, are converted into native CPU instructions. This means
+    they run much faster, at close to native CPU speeds.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The ability to write real C programs instead of just simple packet filters.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: A mature set of libraries that let you control eBPF from languages like Go.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The ability to run subprograms and helper functions.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Safe access to several kernel objects. eBPF programs can safely “peek” into
+    kernel structures to collect information and context, which are gold for tools
+    like Falco.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The concept of *maps,* memory areas that can be used to exchange data with the
+    user level efficiently and easily.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: A much more sophisticated verifier, which lets eBPF programs do more while preserving
+    their safety.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The ability to run in many more places in the kernel than the network stack,
+    using facilities like tracepoints, kprobes, uprobes, Linux Security Modules hooks,
+    and Userland Statically Defined Tracing (USDT).
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: eBPF is evolving quickly and is rapidly becoming the standard way to extend
+    the Linux kernel. eBPF scripts are flexible and safe and run extremely fast, making
+    them perfect for capturing runtime activity.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Falco Drivers
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'Falco offers two different driver implementations that implement both the approaches
+    we just described: a kernel module and an eBPF probe. The two implementations
+    have the same functionality and are interchangeable when using Falco. Therefore,
+    we can describe how they work without focusing on a specific one.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The high-level capture flow is shown in [Figure 4-4](#the_driverapostrophes_capture_flow).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![](Images/pcns_0404.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 4-4\. The driver’s capture flow
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'The approach used by the Falco drivers to capture a system call involves three
+    main steps, labeled in the figure:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'A kernel facility called a tracepoint intercepts the execution of the system
+    call. The tracepoint makes it possible to insert a hook at a specific place in
+    the operating system kernel so that a callback function will be called every time
+    kernel execution reaches that point.^([2](ch04.xhtml#idm45324227765696)) The Falco
+    drivers install two tracepoints for system calls: one where system calls enter
+    the kernel, and another one where they exit the kernel and give control back to
+    the caller process.'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: While in the tracepoint callback, the driver “packs” the system call arguments
+    into a shared memory buffer. During this phase, the system call is also time­stam⁠ped
+    and additional context is collected from the operating system (for example, the
+    thread ID, or the connection details for some socket syscalls). This phase needs
+    to be super-efficient, because the system call cannot be executed until the driver’s
+    tracepoint callback returns.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: The shared buffer now contains the system call data, and Falco can access it
+    directly through *libscap* (introduced in [Chapter 3](ch03.xhtml#understanding_falcoapostr)).
+    No data is copied during this phase, which minimizes CPU utilization while optimizing
+    cache coherency.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: There are a few things to keep in mind with regard to system call capture in
+    Falco. The first one is that the way system calls are packed in the buffer is
+    flexible and doesn’t necessarily reflect the arguments of the original calls.
+    In some cases, the driver skips unneeded arguments to maximize performance. In
+    other cases, the driver adds fields that contain state, useful context, or additional
+    information. For example, a `clone` event in Falco contains many fields that add
+    information about the newly created process, like the environment variables.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The second thing to keep in mind is that, even if system calls are by far the
+    most important sources of data that the drivers capture, they are not the only
+    ones. Using tracepoints, the drivers hook into other places in the kernel, like
+    the scheduler, to capture context switches and signal deliveries. Take a look
+    at this command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: This line of code displays events captured through the context switch tracepoint.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Which Driver Should You Use?
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'If you’re not sure which driver you should use, here are some simple guidelines:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Use the kernel module when you have an I/O-intensive workload and you care about
+    keeping the instrumentation overhead as low as possible. The kernel module has
+    lower overhead than the eBPF probe, and on machines that generate a high number
+    of system calls it will have less of a performance impact on running processes.
+    It’s not easy to estimate how much better the kernel module will perform, since
+    this depends on how many system calls a process is making, but expect the difference
+    to be noticeable with disk- or network-intensive workloads that generate many
+    system calls every second.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: You should also use the kernel module when you need to support a kernel older
+    than Linux version 4.12.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Use the eBPF probe in all other situations.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: That’s it!
+  prefs: []
+  type: TYPE_NORMAL
+- en: Capturing System Calls Within Containers
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The beauty of tracepoint-based kernel-level capture is that it sees everything
+    that runs in a machine, inside or outside a container. Nothing escapes it. It
+    is also easy to deploy, with no need to run anything inside the monitored containers,
+    and it doesn’t require sidecars.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Figure 4-5](#deploying_falco_in_a_containerized_envi) shows how you deploy
+    Falco in a containerized environment, with a simplified diagram of a machine running
+    three containers (labeled 1, 2, and 3) based on different container runtimes.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![](Images/pcns_0405.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 4-5\. Deploying Falco in a containerized environment
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: In such a scenario, Falco is typically installed as a container. Orchestrators
+    like Kubernetes make it easy to deploy Falco on every host, with facilities like
+    DaemonSets and Helm charts.
+  prefs: []
+  type: TYPE_NORMAL
+- en: When the Falco container starts, it installs the driver in the operating system.
+    Once installed, the driver can see the system calls of any process in any container,
+    with no further user action required, because all of these system calls go through
+    the same tracepoint. Advanced logic in the driver can attribute each captured
+    system call to its container so that Falco always knows which container has generated
+    a system call. Falco also fetches metadata from the container runtime, making
+    it easy to create rules that rely on container labels, image names, and other
+    metadata. (Falco includes a further level of enrichment based on Kubernetes metadata,
+    which we’ll discuss in the next chapter.)
+  prefs: []
+  type: TYPE_NORMAL
+- en: Running the Falco Drivers
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Now that you have an idea of how they work, let’s take a look at how to deploy
+    and use the two Falco drivers on a local machine. (If you want to install Falco
+    in production environments, see Chapters [9](ch09.xhtml#installing_falco) and
+    [10](ch10.xhtml#configuring_and_running).)
+  prefs: []
+  type: TYPE_NORMAL
+- en: Kernel Module
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Falco, by default, runs using the kernel module, so no additional steps are
+    required if you want to use that as your driver. Just run Falco, and it will pick
+    up the kernel module. If you want to unload the kernel module and load a different
+    version, for example because you have built your own customized module, use the
+    following commands:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: eBPF Probe
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'To enable eBPF support in Falco, you need to set the `FALCO_BPF_PROBE` environment
+    variable. If you set it to an empty value (`FALCO_BPF_PROBE=""`), Falco will load
+    the eBPF probe from *~/.falco/falco-bpf.o*. Otherwise, you can explicitly point
+    to the path where the eBPF probe resides:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: After setting the environment variable, just run Falco normally and it will
+    use the eBPF probe.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: To ensure that Falco’s eBPF probe (and any other eBPF program) runs with the
+    best performance, make sure that your kernel has `CONFIG_BPF_JIT` enabled and
+    that `net.core.bpf_jit_enable` is set to `1`. This enables the BPF JIT compiler
+    in the kernel, substantially speeding up the execution of eBPF programs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Using Falco in Environments Where Kernel Access Is Not Available: pdig'
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Kernel instrumentation, whenever possible, is always the way to go. But what
+    if you want to run Falco in environments where access to the kernel is not allowed?
+    This is common in managed container environments, like AWS Fargate. In such environments,
+    installing a kernel module is not an option because the cloud provider blocks
+    it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'For these situations, the Falco developers have implemented a user-level instrumentation
+    driver called [*pdig*](https://oreil.ly/amRqP). It is built on top of ptrace,
+    so it uses the same approach as strace. Like strace, pdig can operate in two ways:
+    it can run a program that you specify on the command line, or it can attach to
+    a running process. Either way, pdig instruments the process and its children in
+    a way that produces a Falco-compatible stream of events.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note that pdig, like strace, requires you to enable `CAP_SYS_PTRACE` for the
+    container runtime. Make sure you launch your container with this capability, or
+    pdig will fail.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The eBPF probe and kernel module work at the global host level, whereas pdig
+    works at the process level. This can make container instrumentation more challenging.
+    Fortunately, pdig can track the children of an instrumented process. This means
+    that running the entrypoint of a container with pdig will allow you to capture
+    every system call generated by any process for that container.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The biggest limitation of pdig is performance. ptrace is versatile, but it introduces
+    substantial overhead on the instrumented processes. pdig employs several tricks
+    to reduce this overhead, but it’s still substantially slower than the kernel-level
+    Falco drivers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Running Falco with pdig
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'You run pdig with the path (and arguments, if any) of the process you want
+    to trace, much as you would with strace. Here’s an example:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  prefs: []
+  type: TYPE_PRE
+- en: The `-a` option enables the full filter, which provides a richer set of instrumented
+    system calls. You probably don’t want to use this option with Falco, for performance
+    reasons.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You can also attach to a running process with the `-p` option:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE14]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'To observe any effect, you will need to have Falco running in a separate process.
+    Use the `-u` command-line flag:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE15]'
+  prefs: []
+  type: TYPE_PRE
+- en: This will enable user-space instrumentation.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Falco Plugins
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'In addition to system calls, Falco can collect and process many other types
+    of data, such as application logs and cloud activity streams. Let’s round out
+    this chapter by exploring the mechanism at the base of this functionality: Falco’s
+    plugins framework.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Plugins are a modular, flexible way to extend Falco ingestion. Anyone can use
+    them to add a new source of data, local or remote, to Falco. [Figure 4-6](#falco_plugin)
+    indicates where plugins sit in the Falco capture stack: they are inputs for *libscap*
+    and act as alternatives to the drivers that are used when capturing system calls.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Plugins are implemented as shared libraries that conform to a documented API.
+    They allow you to add new event sources that you can then evaluate using filtering
+    expressions and Falco rules. They also let you define new fields that can extract
+    information from events.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![](Images/pcns_0406.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 4-6\. Falco plugins
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Plugin Architecture Concepts
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Plugins are dynamic shared libraries (*.so* files in Unix, *.dll* files in Windows)
+    that export C calling convention functions. Falco dynamically loads these libraries
+    and calls the exported functions. Plugins are versioned using semantic versioning
+    to minimize regressions and compatibility issues. They can be written in any language,
+    as long as they export the required functions. Go is the preferred language for
+    writing plugins, followed by C/C++.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Plugins include two main pieces of functionality, also called *capabilities*:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Event sourcing
+  prefs: []
+  type: TYPE_NORMAL
+- en: This capability is used to implement a new event source. An event source can
+    “open” and “close” a stream of events and can return an event to *libscap* via
+    a `next` method. In other words, it’s used to feed new “stuff” to Falco.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Field extraction
+  prefs: []
+  type: TYPE_NORMAL
+- en: Field extraction focuses on producing fields from events generated by other
+    plugins or by the core libraries. Fields, you’ll recall, are the basic components
+    of Falco rules, so exposing new fields is equivalent to expanding the applicability
+    of Falco rules to new domains. An example is JSON parsing, where a plugin might
+    be able to extract fields from arbitrary JSON payloads. You’ll learn more about
+    fields in [Chapter 6](ch06.xhtml#fields_and_filters).
+  prefs: []
+  type: TYPE_NORMAL
+- en: An individual plugin can offer the event sourcing capability, field extraction
+    capability, or both at the same time. Capabilities are exported by implementing
+    certain functions in the plugin API interface.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To make it easier to write plugins, there are [Go](https://oreil.ly/ylcdv) and
+    [C++](https://oreil.ly/0c2CH) SDKs that handle the details of memory management
+    and type conversion. They provide a streamlined way to implement plugins without
+    having to deal with all the details of lower-level functions that make up the
+    plugin API.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The libraries will do everything possible to validate data that comes from the
+    plugins, to protect Falco and other consumers from corrupted data. However, for
+    performance reasons plugins are trusted, and because they run in the same thread
+    and address space as Falco, they *could* crash the program. Falco assumes that
+    you, as a user, are in control and will make sure only plugins you have vetted
+    are loaded or packaged.
+  prefs: []
+  type: TYPE_NORMAL
+- en: How Falco Uses Plugins
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Falco loads plugins based on the configuration in *falco.yaml*. As of summer
+    2022, when this book went to press, if a source plugin is loaded, the only events
+    processed are from that plugin, and system call capture is disabled. Also, a running
+    Falco instance can use only one plugin. If, on a single machine, you want Falco
+    to collect data from multiple plugins or from plugins and drivers, you will need
+    to run multiple Falco instances and use a different source for each of them.^([3](ch04.xhtml#ch01fn3))
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Falco configures plugins via the `plugins` property in *falco.yaml*. Here’s
+    an example:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE16]'
+  prefs: []
+  type: TYPE_PRE
+- en: The `plugins` property in *falco.yaml* defines the set of plugins that Falco
+    can load, and the `load_plugins` property controls which plugins load when Falco
+    starts.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The mechanics of loading a plugin are implemented in *libscap* and leverage
+    the dynamic library functionality of the operating system.^([4](ch04.xhtml#ch01fn4))
+    The plugin loading code also ensures that:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The plugin is valid (i.e., it exports the set of expected symbols).
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The plugin’s API version number is compatible with the plugin framework.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Only one source plugin is loaded at a time for a given event source.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: If a mix of source and extractor plugins is loaded for a given event source,
+    the exported fields have unique names that don’t overlap across plugins.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: An up-to-date list of available Falco plugins can be found in the [plugins repository](https://oreil.ly/g495C)
+    under the Falcosecurity GitHub organization. As of this writing, the Falcosecurity
+    organization officially maintains plugins for CloudTrail, GitHub, Okta, Kubernetes
+    audit logs, and JSON. In addition to these, there are third-party plugins available
+    for seccomp and Docker.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you are interested in writing your own plugins, you will find everything
+    you need to know in [Chapter 14](ch14.xhtml#falco_development). If you’re impatient
+    and just want to get to the code, you can find the source code for all the currently
+    available plugins in the plugins repo.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Conclusion
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Congratulations on making it to the end of a rich chapter packed with a lot
+    of information! What you learned here is at the core of understanding and operating
+    Falco. It also constitutes a solid architectural foundation that will be useful
+    every time you need to run or deploy a security tool on Linux.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Next, you’re going to learn about how context is added to the captured data
+    to make Falco even more powerful.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([1](ch04.xhtml#ch01fn2-marker)) Run `**man 2 ptrace**` for more information
+    on this.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([2](ch04.xhtml#idm45324227765696-marker)) For more information, see the article
+    [“Using the Linux Kernel Tracepoints”](https://oreil.ly/5ulP5) by Mathieu Desnoyer.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([3](ch04.xhtml#ch01fn3-marker)) Note that the Falco developers are working
+    on removing this limitation. As a consequence, in the future Falco will be able
+    to receive data from multiple plugins at the same time or to capture system calls
+    and at the same time use plugins.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([4](ch04.xhtml#ch01fn4-marker)) A dynamic library is loaded using `dlopen/dlsym`
+    in Unix, or `LoadLibrary/GetProcAddress` in Windows.
+  prefs: []
+  type: TYPE_NORMAL

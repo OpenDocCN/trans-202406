@@ -1,0 +1,2351 @@
+- en: Chapter 2\. Linux Networking
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: To understand the implementation of networking in Kubernetes, we will need to
+    understand the fundamentals of networking in Linux. Ultimately, Kubernetes is
+    a complex management tool for Linux (or Windows!) machines, and this is hard to
+    ignore while working with the Kubernetes network stack. This chapter will provide
+    an overview of the Linux networking stack, with a focus on areas of note in Kubernetes.
+    If you are highly familiar with Linux networking and network management, you may
+    want to skim or skip this chapter.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: This chapter introduces many Linux programs. Manual, or *man*, pages, accessible
+    with `man <program>`, will provide more detail.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Basics
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Let’s revisit our Go web server, which we used in [Chapter 1](ch01.xhtml#networking_introduction).
+    This web server listens on port 8080 and returns “Hello” for HTTP requests to
+    / (see [Example 2-1](#EX1_Ch02)).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 2-1\. Minimal web server in Go
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Ports 1–1023 (also known as *well-known ports*) require root permission to bind
+    to.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Programs should always be given the least permissions necessary to function,
+    which means that a typical web service should not be run as the root user. Because
+    of this, many programs will listen on port 1024 or higher (in particular, port
+    8080 is a common choice for HTTP services). When possible, listen on a nonprivileged
+    port, and use infrastructure redirects (load balancer forwarding, Kubernetes services,
+    etc.) to forward an externally visible privileged port to a program listening
+    on a nonprivileged port.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This way, an attacker exploiting a possible vulnerability in your service will
+    not have overly broad permissions available to them.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Suppose this program is running on a Linux server machine and an external client
+    makes a request to `/`. What happens on the server? To start off, our program
+    needs to listen to an address and port. Our program creates a socket for that
+    address and port and binds to it. The socket will receive requests addressed to
+    both the specified address and port - `8080` with any IP address in our case.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '`0.0.0.0` in IPv4 and `[::]` in IPv6 are wildcard addresses. They match all
+    addresses of their respective protocol and, as such, listen on all available IP
+    addresses when used for a socket binding.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is useful to expose a service, without prior knowledge of what IP addresses
+    the machines running it will have. Most network-exposed services bind this way.
+  prefs: []
+  type: TYPE_NORMAL
+- en: There are multiple ways to inspect sockets. For example, `ls -lah /proc/<server
+    proc>/fd` will list the sockets. We will discuss some programs that can inspect
+    sockets at the end of this chapter.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The kernel maps a given packet to a specific connection and uses an internal
+    state machine to manage the connection state. Like sockets, connections can be
+    inspected through various tools, which we will discuss later in this chapter.
+    Linux represents each connection with a file. Accepting a connection entails a
+    notification from the kernel to our program, which is then able to stream content
+    to and from the file.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Going back to our Golang web server, we can use `strace` to show what the server
+    is doing:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Because `strace` captures all the system calls made by our server, there is
+    a *lot* of output. Let’s reduce it somewhat to the relevant network syscalls.
+    Key points are highlighted, as the Go HTTP server performs many syscalls during
+    startup:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](Images/1.png)](#co_linux_networking_CO1-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Open a file descriptor.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](Images/2.png)](#co_linux_networking_CO1-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Create a TCP socket for IPv6 connections.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![3](Images/3.png)](#co_linux_networking_CO1-3)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Disable `IPV6_V6ONLY` on the socket. Now, it can listen on IPv4 and IPv6.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![4](Images/4.png)](#co_linux_networking_CO1-4)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Bind the IPv6 socket to listen on port 8080 (all addresses).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![5](Images/5.png)](#co_linux_networking_CO1-5)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Wait for a request.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Once the server has started, we see the output from `strace` pause on `epoll_wait`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'At this point, the server is listening on its socket and waiting for the kernel
+    to notify it about packets. When we make a request to our listening server, we
+    see the “Hello” message:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: If you are trying to debug the fundamentals of a web server with `strace`, you
+    will probably not want to use a web browser. Additional requests or metadata sent
+    to the server may result in additional work for the server, or the browser may
+    not make expected requests. For example, many browsers try to request a favicon
+    file automatically. They will also attempt to cache files, reuse connections,
+    and do other things that make it harder to predict the exact network interaction.
+    When simple or minimal reproduction matters, try using a tool like `curl` or `telnet`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In `strace`, we see the following from our server process:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: After inspecting the socket, our server writes response data (“Hello” wrapped
+    in the HTTP protocol) to the file descriptor. From there, the Linux kernel (and
+    some other userspace systems) translates the request into packets and transmits
+    those packets back to our cURL client.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To summarize what the server is doing when it receives a request:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Epoll returns and causes the program to resume.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: The server sees a connection from `::ffff:10.0.0.57`, the client IP address
+    in this example.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: The server inspects the socket.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'The server changes `KEEPALIVE` options: it turns `KEEPALIVE` on, and sets a
+    180-second interval between `KEEPALIVE` probes.'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: This is a bird’s-eye view of networking in Linux, from an application developer’s
+    point of view. There’s a lot more going on to make everything work. We’ll look
+    in more detail at parts of the networking stack that are particularly relevant
+    for Kubernetes users.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Network Interface
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Computers use a *network interface* to communicate with the outside world. Network
+    interfaces can be physical (e.g., an Ethernet network controller) or virtual.
+    Virtual network interfaces do not correspond to physical hardware; they are abstract
+    interfaces provided by the host or hypervisor.
+  prefs: []
+  type: TYPE_NORMAL
+- en: IP addresses are assigned to network interfaces. A typical interface may have
+    one IPv4 address and one IPv6 address, but multiple addresses can be assigned
+    to the same interface.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Linux itself has a concept of a network interface, which can be physical (such
+    as an Ethernet card and port) or virtual. If you run `ifconfig`, you will see
+    a list of all network interfaces and their configurations (including IP addresses).
+  prefs: []
+  type: TYPE_NORMAL
+- en: The *loopback interface* is a special interface for same-host communication.
+    `127.0.0.1` is the standard IP address for the loopback interface. Packets sent
+    to the loopback interface will not leave the host, and processes listening on
+    `127.0.0.1` will be accessible only to other processes on the same host. Note
+    that making a process listen on `127.0.0.1` is not a security boundary. CVE-2020-8558
+    was a past Kubernetes vulnerability, in which `kube-proxy` rules allowed some
+    remote systems to reach `127.0.0.1`. The loopback interface is commonly abbreviated
+    as `lo`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The `ip` command can also be used to inspect network interfaces.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Let’s look at a typical `ifconfig` output; see [Example 2-2](#EX0202).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 2-2\. Output from `ifconfig` on a machine with one pysical network interface
+    (ens4), and the loopback interface
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: Container runtimes create a virtual network interface for each pod on a host,
+    so the list would be much longer on a typical Kubernetes node. We’ll cover container
+    networking in more detail in [Chapter 3](ch03.xhtml#container_networking_basics).
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Bridge Interface
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The bridge interface (shown in [Figure 2-1](#img-bridge)) allows system administrators
+    to create multiple layer 2 networks on a single host. In other words, the bridge
+    functions like a network switch between network interfaces on a host, seamlessly
+    connecting them. Bridges allow pods, with their individual network interfaces,
+    to interact with the broader network via the node’s network interface.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Bridge](Images/neku_0201.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 2-1\. Bridge interface
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: You can read more about Linux bridging in the [documentation](https://oreil.ly/4BRsA).
+  prefs: []
+  type: TYPE_NORMAL
+- en: In [Example 2-3](#Veth), we demonstrate how to create a bridge device named
+    `br0` and attach a virtual Ethernet (veth) device, `veth`, and a physical device,
+    `eth0`, using `ip`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 2-3\. Creating bridge interface and connecting veth pair
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: Bridges can also be managed and created using the `brctl` command. [Example 2-4](#Brctl)
+    shows some options available with `brctl`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 2-4\. `brctl` options
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: The veth device is a local Ethernet tunnel. Veth devices are created in pairs,
+    as shown in [Figure 2-1](#img-bridge), where the pod sees an `eth0` interface
+    from the veth. Packets transmitted on one device in the pair are immediately received
+    on the other device. When either device is down, the link state of the pair is
+    down. Adding a bridge to Linux can be done with using the `brctl` commands or
+    `ip`. Use a veth configuration when namespaces need to communicate to the main
+    host namespace or between each other.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Example 2-5](#Veth-Create) shows how to set up a veth configuration.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 2-5\. Veth creation
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: In [Example 2-5](#Veth-Create), we show the steps to create two network namespaces
+    (not to be confused with Kubernetes namespaces), `net1` and `net2`, and a pair
+    of veth devices, with `veth1` assigned to namespace `net1` and `veth2` assigned
+    to namespace `net2`. These two namespaces are connected with this veth pair. Assign
+    a pair of IP addresses, and you can ping and communicate between the two namespaces.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Kubernetes uses this in concert with the CNI project to manage container network
+    namespaces, interfaces, and IP addresses. We will cover more of this in [Chapter 3](ch03.xhtml#container_networking_basics).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Packet Handling in the Kernel
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The Linux kernel is responsible for translating between packets, and a coherent
+    stream of data for programs. In particular, we will look at how the kernel handles
+    connections because routing and firewalling, key things in Kubernetes, rely heavily
+    on Linux’s underlying packet management.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Netfilter
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Netfilter, included in Linux since 2.3, is a critical component of packet handling.
+    Netfilter is a framework of kernel hooks, which allow userspace programs to handle
+    packets on behalf of the kernel. In short, a program registers to a specific Netfilter
+    hook, and the kernel calls that program on applicable packets. That program could
+    tell the kernel to do something with the packet (like drop it), or it could send
+    back a modified packet to the kernel. With this, developers can build normal programs
+    that run in userspace and handle packets. Netfilter was created jointly with `iptables`,
+    to separate kernel and userspace code.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '[*netfilter.org*](https://netfilter.org) contains some excellent documentation
+    on the design and use of both Netfilter and `iptables`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Netfilter has five hooks, shown in [Table 2-1](#webfilter_hooks).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Netfilter triggers each hook under specific stages in a packet’s journey through
+    the kernel. Understanding Netfilter’s hooks is key to understanding `iptables`
+    later in this chapter, as `iptables` directly maps its concept of *chains* to
+    Netfilter hooks.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 2-1\. Netfilter hooks
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Netfilter hook | Iptables chain name | Description |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| NF_IP_PRE_ROUTING | PREROUTING | Triggers when a packet arrives from an external
+    system. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| NF_IP_LOCAL_IN | INPUT | Triggers when a packet’s destination IP address
+    matches this machine. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| NF_IP_FORWARD | NAT | Triggers for packets where neither source nor destination
+    matches the machine’s IP addresses (in other words, packets that this machine
+    is routing on behalf of other machines). |'
+  prefs: []
+  type: TYPE_TB
+- en: '| NF_IP_LOCAL_OUT | OUTPUT | Triggers when a packet, originating from the machine,
+    is leaving the machine. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| NF_IP_POST_ROUTING | POSTROUTING | Triggers when any packet (regardless of
+    origin) is leaving the machine. |'
+  prefs: []
+  type: TYPE_TB
+- en: Netfilter triggers each hook during a specific phase of packet handling, and
+    under specific conditions, we can visualize Netfilter hooks with a flow diagram,
+    as shown in [Figure 2-2](#img-nftables-packet-flow).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![neku 0202](Images/neku_0202.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 2-2\. The possible flows of a packet through Netfilter hooks
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'We can infer from our flow diagram that only certain permutations of Netfilter
+    hook calls are possible for any given packet. For example, a packet originating
+    from a local process will always trigger `NF_IP_LOCAL_OUT` hooks and then `NF_IP_POST_ROUTING`
+    hooks. In particular, the flow of Netfilter hooks for a packet depends on two
+    things: if the packet source is the host and if the packet destination is the
+    host. Note that if a process sends a packet destined for the same host, it triggers
+    the `NF_IP_LOCAL_OUT` and then the `NF_IP_POST_ROUTING` hooks before “reentering”
+    the system and triggering the `NF_IP_PRE_ROUTING` and `NF_IP_LOCAL_IN` hooks.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: In some systems, it is possible to spoof such a packet by writing a fake source
+    address (i.e., spoofing that a packet has a source and destination address of
+    `127.0.0.1`). Linux will normally filter such a packet when it arrives at an external
+    interface. More broadly, Linux filters packets when a packet arrives at an interface
+    and the packet’s source address does not exist on that network. A packet with
+    an “impossible” source IP address is called a *Martian packet*. It is possible
+    to disable filtering of Martian packets in Linux. However, doing so poses substantial
+    risk if any services on the host assume that traffic from localhost is “more trustworthy”
+    than external traffic. This can be a common assumption, such as when exposing
+    an API or database to the host without strong authentication.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Kubernetes has had at least one CVE, CVE-2020-8558, in which packets from another
+    host, with the source IP address falsely set to `127.0.0.1`, could access ports
+    that should be accessible only locally. Among other things, this means that if
+    a node in the Kubernetes control plane ran `kube-proxy`, other machines on the
+    node’s network could use “trust authentication” to connect to the API server,
+    effectively owning the cluster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This was not technically a case of Martian packets not being filtered, as offending
+    packets would come from the loopback device, which *is* on the same network as
+    `127.0.0.1`. You can read the reported issue on [GitHub](https://oreil.ly/A5HtN).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Table 2-2](#table0202) shows the Netfilter hook order for various packet sources
+    and destinations.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 2-2\. Key netfilter packet flows
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Packet source | Packet destination | Hooks (in order) |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Local machine | Local machine | `NF_IP_LOCAL_OUT`, `NF_IP_LOCAL_IN` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Local machine | External machine | `NF_IP_LOCAL_OUT`, `NF_IP_POST_ROUTING`
+    |'
+  prefs: []
+  type: TYPE_TB
+- en: '| External machine | Local machine | `NF_IP_PRE_ROUTING`, `NF_IP_LOCAL_IN`
+    |'
+  prefs: []
+  type: TYPE_TB
+- en: '| External machine | External machine | `NF_IP_PRE_ROUTING`, `NF_IP_FORWARD`,
+    `NF_IP_POST_ROUTING` |'
+  prefs: []
+  type: TYPE_TB
+- en: Note that packets from the machine to itself will trigger `NF_IP_LOCAL_OUT`
+    and `NF_IP_POST_ROUTING` and then “leave” the network interface. They will “reenter”
+    and be treated like packets from any other source.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Network address translation (NAT) only impacts local routing decisions in the
+    `NF_IP_PRE_ROUTING` and `NF_IP_LOCAL_OUT` hooks (e.g., the kernel makes no routing
+    decisions after a packet reaches the `NF_IP_LOCAL_IN` hook). We see this reflected
+    in the design of `iptables`, where source and destination NAT can be performed
+    only in specific hooks/chains.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Programs can register a hook by calling `NF_REGISTER_NET_HOOK` (`NF_REGISTER_HOOK`
+    prior to Linux 4.13) with a handling function. The hook will be called every time
+    a packet matches. This is how programs like `iptables` integrate with Netfilter,
+    though you will likely never need to do this yourself.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'There are several actions that a Netfilter hook can trigger, based on the return
+    value:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Accept
+  prefs: []
+  type: TYPE_NORMAL
+- en: Continue packet handling.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Drop
+  prefs: []
+  type: TYPE_NORMAL
+- en: Drop the packet, without further processing.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Queue
+  prefs: []
+  type: TYPE_NORMAL
+- en: Pass the packet to a userspace program.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Stolen
+  prefs: []
+  type: TYPE_NORMAL
+- en: Doesn’t execute further hooks, and allows the userspace program to take ownership
+    of the packet.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Repeat
+  prefs: []
+  type: TYPE_NORMAL
+- en: Make the packet “reenter” the hook and be reprocessed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Hooks can also return mutated packets. This allows programs to do things such
+    as reroute or masquerade packets, adjust packet TTLs, etc.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Conntrack
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Conntrack is a component of Netfilter used to track the state of connections
+    to (and from) the machine. Connection tracking directly associates packets with
+    a particular connection. Without connection tracking, the flow of packets is much
+    more opaque. Conntrack can be a liability or a valuable tool, or both, depending
+    on how it is used. In general, Conntrack is important on systems that handle firewalling
+    or NAT.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Connection tracking allows firewalls to distinguish between responses and arbitrary
+    packets. A firewall can be configured to allow inbound packets that are part of
+    an existing connection but disallow inbound packets that are not part of a connection.
+    To give an example, a program could be allowed to make an outbound connection
+    and perform an HTTP request, without the remote server being otherwise able to
+    send data or initiate connections inbound.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'NAT relies on Conntrack to function. `iptables` exposes NAT as two types: SNAT
+    (source NAT, where `iptables` rewrites the source address) and DNAT (destination
+    NAT, where `iptables` rewrites the destination address). NAT is extremely common;
+    the odds are overwhelming that your home router uses SNAT and DNAT to fan traffic
+    between your public IPv4 address and the local address of each device on the network.
+    With connection tracking, packets are automatically associated with their connection
+    and easily modified with the same SNAT/DNAT change. This enables consistent routing
+    decisions, such as “pinning” a connection in a load balancer to a specific backend
+    or machine. The latter example is highly relevant in Kubernetes, due to `kube-proxy`’s
+    implementation of service load balancing via `iptables`. Without connection tracking,
+    every packet would need to be *deterministically* remapped to the same destination,
+    which isn’t doable (suppose the list of possible destinations could change…).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Conntrack identifies connections by a tuple, composed of source address, source
+    port, destination address, destination port, and L4 protocol. These five pieces
+    of information are the minimal identifiers needed to identify any given L4 connection.
+    All L4 connections have an address and port on each side of the connection; after
+    all, the internet uses addresses for routing, and computers use port numbers for
+    application mapping. The final piece, the L4 protocol, is present because a program
+    will bind to a port in TCP *or* UDP mode (and binding to one does not preclude
+    binding to the other). Conntrack refers to these connections as *flows*. A flow
+    contains metadata about the connection and its state.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Conntrack stores flows in a hash table, shown in [Figure 2-3](#img-conntrack-hashtable),
+    using the connection tuple as a key. The size of the keyspace is configurable.
+    A larger keyspace requires more memory to hold the underlying array but will result
+    in fewer flows hashing to the same key and being chained in a linked list, leading
+    to faster flow lookup times. The maximum number of flows is also configurable.
+    A severe issue that can happen is when Conntrack runs out of space for connection
+    tracking, and new connections cannot be made. There are other configuration options
+    too, such as the timeout for a connection. On a typical system, default settings
+    will suffice. However, a system that experiences a huge number of connections
+    will run out of space. If your host runs directly exposed to the internet, overwhelming
+    Conntrack with short-lived or incomplete connections is an easy way to cause a
+    denial of service (DOS).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Conntrack Hashtable](Images/neku_0203.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 2-3\. The structure of Conntrack flows
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Conntrack’s max size is normally set in `/proc/sys/net/nf_conntrack_max`, and
+    the hash table size is normally set in `/sys/module/nf_conntrack/parameters/hashsize`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Conntrack entries contain a connection state, which is one of four states. It
+    is important to note that, as a layer 3 (Network layer) tool, Conntrack states
+    are distinct from layer 4 (Protocol layer) states. [Table 2-3](#conntrack_states)
+    details the four states.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 2-3\. Conntrack states
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| State | Description | Example |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| NEW | A valid packet is sent or received, with no response seen. | TCP SYN
+    received. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| ESTABLISHED | Packets observed in both directions. | TCP SYN received, and
+    TCP SYN/ACK sent. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| RELATED | An additional connection is opened, where metadata indicates that
+    it is “related” to an original connection. Related connection handling is complex.
+    | An FTP program, with an ESTABLISHED connection, opens additional data connections.
+    |'
+  prefs: []
+  type: TYPE_TB
+- en: '| INVALID | The packet itself is invalid, or does not properly match another
+    Conntrack connection state. | TCP RST received, with no prior connection. |'
+  prefs: []
+  type: TYPE_TB
+- en: Although Conntrack is built into the kernel, it may not be active on your system.
+    Certain kernel modules must be loaded, and you must have relevant `iptables` rules
+    (essentially, Conntrack is normally not active if nothing needs it to be). Conntrack
+    requires the kernel module `nf_conntrack_ipv4` to be active. `lsmod | grep nf_conntrack`
+    will show if the module is loaded, and `sudo modprobe nf_conntrack` will load
+    it. You may also need to install the `conntrack` command-line interface (CLI)
+    in order to view Conntrack’s state.
+  prefs: []
+  type: TYPE_NORMAL
+- en: When Conntrack is active, `conntrack -L` shows all current flows. Additional
+    Conntrack flags will filter which flows are shown.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s look at the anatomy of a Conntrack flow, as displayed here:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: The expected return packet is of the form `<source ip> <dest ip> <source port>
+    <dest port>`. This is the identifier that we expect to see when the remote system
+    sends a packet. Note that in our example, the source and destination values are
+    in reverse for address and ports. This is often, but not always, the case. For
+    example, if a machine is behind a router, packets destined to that machine will
+    be addressed to the router, whereas packets from the machine will have the machine
+    address, not the router address, as the source.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the previous example from machine `10.0.0.2`, `10.0.0.1` has established
+    a TCP connection from port 49431 to port 22 on `10.0.0.2`. You may recognize this
+    as being an SSH connection, although Conntrack is unable to show application-level
+    behavior.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Tools like `grep` can be useful for examining Conntrack state and ad hoc statistics:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: Routing
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: When handling any packet, the kernel must decide where to send that packet.
+    In most cases, the destination machine will not be within the same network. For
+    example, suppose you are attempting to connect to `1.2.3.4` from your personal
+    computer. `1.2.3.4` is not on your network; the best your computer can do is pass
+    it to another host that is closer to being able to reach `1.2.3.4`. The route
+    table serves this purpose by mapping known subnets to a gateway IP address and
+    interface. You can list known routes with `route` (or `route -n` to show raw IP
+    addresses instead of hostnames). A typical machine will have a route for the local
+    network and a route for `0.0.0.0/0`. Recall that subnets can be expressed as a
+    CIDR (e.g., `10.0.0.0/24`) or an IP address and a mask (e.g., `10.0.0.0` and `255.255.255.0`).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This is a typical routing table for a machine on a local network with access
+    to the internet:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: In the previous example, a request to `1.2.3.4` would be sent to `10.0.0.1`,
+    on the `eth0` interface, because `1.2.3.4` is in the subnet described by the first
+    rule (`0.0.0.0/0`) and not in the subnet described by the second rule (`10.0.0.0/24`).
+    Subnets are specified by the destination and `genmask` values.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Linux prefers to route packets by *specificity* (how “small” a matching subnet
+    is) and then by weight (“metric” in `route` output). Given our example, a packet
+    addressed to `10.0.0.1` will always be sent to gateway `0.0.0.0` because that
+    route matches a smaller set of addresses. If we had two routes with the same specificity,
+    then the route with a lower metric wiould be preferred.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Some CNI plugins make heavy use of the route table.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Now that we’ve covered some key concepts in how the Linux kernel handles packets,
+    we can look at how higher-level packet and connection routing works.
+  prefs: []
+  type: TYPE_NORMAL
+- en: High-Level Routing
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Linux has complex packet management abilities. Such tools allow Linux users
+    to create firewalls, log traffic, route packets, and even implement load balancing.
+    Kubernetes makes use of some of these tools to handle node and pod connectivity,
+    as well as manage Kubernetes services. In this book, we will cover the three tools
+    that are most commonly seen in Kubernetes. All Kubernetes setups will make some
+    use of `iptables`, but there are many ways that services can be managed. We will
+    also cover IPVS (which has built-in support in `kube-proxy`), and eBPF, which
+    is used by Cilium (a `kube-proxy` alternative).
+  prefs: []
+  type: TYPE_NORMAL
+- en: We will reference this section in [Chapter 4](ch04.xhtml#kubernetes_networking_introduction),
+    when we cover services and `kube-proxy`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: iptables
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '`iptables` is staple of Linux sysadmins and has been for many years. `iptables`
+    can be used to create firewalls and audit logs, mutate and reroute packets, and
+    even implement crude connection fan-out. `iptables` uses Netfilter, which allows
+    `iptables` to intercept and mutate packets.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`iptables` rules can become extremely complex. There are many tools that provide
+    a simpler interface for managing `iptables` rules; for example, firewalls like
+    `ufw` and `firewalld`. Kubernetes components (specifically, `kubelet` and `kube-proxy`)
+    generate `iptables` rules in this fashion. Understanding `iptables` is important
+    to understand access and routing for pods and nodes in most clusters.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Most Linux distributions are replacing `iptables` with `nftables`, a similar
+    but more performant tool built atop Netfilter. Some distros already ship with
+    a version of `iptables` that is powered by `nftables`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Kubernetes has many known issues with the `iptables`/`nftables` transition.
+    We highly recommend not using a `nftables`-backed version of `iptables` for the
+    foreseeable future.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'There are three key concepts in `iptables`: tables, chains, and rules. They
+    are considered hierarchical in nature: a table contains chains, and a chain contains
+    rules.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Tables organize rules according to the type of effect they have. `iptables`
+    has a broad range of functionality, which tables group together. The three most
+    commonly applicable tables are: Filter (for firewall-related rules), NAT (for
+    NAT-related rules), and Mangle (for non-NAT packet-mutating rules). `iptables`
+    executes tables in a specific order, which we’ll cover later.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Chains contain a list of rules. When a packet executes a chain, the rules in
+    the chain are evaluated in order. Chains exist within a table and organize rules
+    according to Netfilter hooks. There are five built-in, top-level chains, each
+    of which corresponds to a Netfilter hook (recall that Netfilter was designed jointly
+    with `iptables`). Therefore, the choice of which chain to insert a rule dictates
+    if/when the rule will be evaluated for a given packet.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Rules are a combination condition and action (referred to as a *target*). For
+    example, “if a packet is addressed to port 22, drop it.” `iptables` evaluates
+    individual packets, although chains and tables dictate which packets a rule will
+    be evaluated against.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The specifics of table → chain → target execution are complex, and there is
+    no end of fiendish diagrams available to describe the full state machine. Next,
+    we’ll examine each portion in more detail.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: It may help to refer to earlier material as you progress through this section.
+    The designs of tables, chains, and rules are tightly intertwined, and it is hard
+    to properly understand one without understanding the others.
+  prefs: []
+  type: TYPE_NORMAL
+- en: iptables tables
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: A table in `iptables` maps to a particular *capability set*, where each table
+    is “responsible” for a specific type of action. In more concrete terms, a table
+    can contain only specific target types, and many target types can be used only
+    in specific tables. `iptables` has five tables, which are listed in [Table 2-4](#iptables_tables).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 2-4\. `iptables` tables
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Table | Purpose |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Filter | The Filter table handles acceptance and rejection of packets. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| NAT | The NAT table is used to modify the source or destination IP addresses.
+    |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Mangle | The Mangle table can perform general-purpose editing of packet headers,
+    but it is not intended for NAT. It can also “mark” the packet with `iptables`-only
+    metadata. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Raw | The Raw table allows for packet mutation before connection tracking
+    and other tables are handled. Its most common use is to disable connection tracking
+    for some packets. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Security | SELinux uses the Security table for packet handling. It is not
+    applicable on a machine that is not using SELinux. |'
+  prefs: []
+  type: TYPE_TB
+- en: We will not discuss the Security table in more detail in this book; however,
+    if you use SELinux, you should be aware of its use.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`iptables` executes tables in a particular order: Raw, Mangle, NAT, Filter.
+    However, this order of execution is broken up by chains. Linux users generally
+    accept the mantra of “tables contains chains,” but this may feel misleading. The
+    order of execution is chains, *then* tables. So, for example, a packet will trigger
+    `Raw PREROUTING`, `Mangle PREROUTING`, `NAT PREROUTING`, and then trigger the
+    Mangle table in either the `INPUT` or `FORWARD` chain (depending on the packet).
+    We’ll cover this in more detail in the next section on chains, as we put more
+    pieces together.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: iptables chains
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: '`iptables` chains are a list of rules. When a packet triggers or passes through
+    a chain, each rule is sequentially evaluated, until the packet matches a “terminating
+    target” (such as `DROP`), or the packet reaches the end of the chain.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The built-in, “top-level” chains are `PREROUTING`, `INPUT`, `NAT`, `OUTPUT`,
+    and `POSTROUTING`. These are powered by Netfilter hooks. Each chain corresponds
+    to a hook. [Table 2-5](#iptables_chains_and_corresponding_netfilter_hooks) shows
+    the chain and hook pairs. There are also user-defined subchains that exist to
+    help organize rules.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 2-5\. `iptables` chains and corresponding Netfilter hooks
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| iptables chain | Netfilter hook |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `PREROUTIN` | `NF_IP_PRE_ROUTING` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `INPUT` | `NF_IP_LOCAL_IN` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `NAT` | `NF_IP_FORWARD` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `OUTPUT` | `NF_IP_LOCAL_OUT` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `POSTROUTING` | `NF_IP_POST_ROUTING` |'
+  prefs: []
+  type: TYPE_TB
+- en: Returning to our diagram of Netfilter hook ordering, we can infer the equivalent
+    diagram of `iptables` chain execution and ordering for a given packet (see [Figure 2-4](#img-iptables-packet-flow)).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![neku 0204](Images/neku_0204.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 2-4\. The possible flows of a packet through `iptables` chains
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Again, like Netfilter, there are only a handful of ways that a packet can traverse
+    these chains (assuming the packet is not rejected or dropped along the way). Let’s
+    use an example with three machines, with IP addresses `10.0.0.1`, `10.0.0.2`,
+    and `10.0.0.3`, respectively. We will show some routing scenarios from the perspective
+    of machine 1 (with IP address `10.0.0.1`). We examine them in [Table 2-6](#table0206).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 2-6\. `iptables` chains executed in various scenarios
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Packet description | Packet source | Packet destination | Tables processed
+    |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| An inbound packet, from another machine. | `10.0.0.2` | `10.0.0.1` | `PREROUTING`,
+    `INPUT` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| An inbound packet, not destined for this machine. | `10.0.0.2` | `10.0.0.3`
+    | `PREROUTING`, `NAT`, `POSTROUTING` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| An outbound packet, originating locally, destined for another machine. |
+    `10.0.0.1` | `10.0.0.2` | `OUTPUT`, `POSTROUTING` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| A packet from a local program, destined for the same machine. | `127.0.0.1`
+    | `127.0.0.1` | `OUTPUT`, `POSTROUTING` (then `PREROUTING`, `INPUT` as the packet
+    re-enters via the loopback interface) |'
+  prefs: []
+  type: TYPE_TB
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'You can experiment with chain execution behavior on your own using `LOG` rules.
+    For example:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: will log TCP packets to port 22 when they are processed by the `OUTPUT` chain,
+    with the log prefix "`ssh-output`“. Be aware that log size can quickly become
+    unwieldy. Log on important hosts with care.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Recall that when a packet triggers a chain, `iptables` executes tables within
+    that chain (specifically, the rules within each table) in the following order:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Raw
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Mangle
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: NAT
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Filter
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Most chains do not contain all tables; however, the relative execution order
+    remains the same. This is a design decision to reduce redundancy. For example,
+    the Raw table exists to manipulate packets “entering” `iptables`, and therefore
+    has only `PREROUTING` and `OUTPUT` chains, in accordance with Netfilter’s packet
+    flow. The tables that contain each chain are laid out in [Table 2-7](#table0207).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 2-7\. Which `iptables` tables (rows) contain which chains (columns)
+  prefs: []
+  type: TYPE_NORMAL
+- en: '|  | Raw | Mangle | NAT | Filter |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- | --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `PREROUTING` | ✓ | ✓ | ✓ |  |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `INPUT` |  | ✓ | ✓ | ✓ |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `FORWARD` |  | ✓ |  | ✓ |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `OUTPUT` | ✓ | ✓ | ✓ | ✓ |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `POSTROUTING` |  | ✓ | ✓ |  |'
+  prefs: []
+  type: TYPE_TB
+- en: 'You can list the chains that correspond to a table yourself, with `iptables
+    -L -t <table>`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'There is a small caveat for the NAT table: DNAT can be performed in `PREROUTING`
+    or `` OUTPUT` ``, and SNAT can be performed in only `INPUT` or `POSTROUTING`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To give an example, suppose we have an inbound packet destined for our host.
+    The order of execution would be:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`PREROUTING`'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Raw
+  prefs:
+  - PREF_IND
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Mangle
+  prefs:
+  - PREF_IND
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: NAT
+  prefs:
+  - PREF_IND
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: '`INPUT`'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Mangle
+  prefs:
+  - PREF_IND
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: NAT
+  prefs:
+  - PREF_IND
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Filter
+  prefs:
+  - PREF_IND
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Now that we’ve learned about Netfilter hooks, tables, and chains, let’s take
+    one last look at the flow of a packet through `iptables`, shown in [Figure 2-5](#img-iptables-flow).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Iptables packet](Images/neku_0205.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 2-5\. The flow of a packet through `iptables` tables and chains. A circle
+    denotes a table/hook combination that exists in `iptables`.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'All `iptables` rules belong to a table and chain, the possible combinations
+    of which are represented as dots in our flow chart. `iptables` evaluates chains
+    (and the rules in them, in order) based on the order of Netfilter hooks that a
+    packet triggers. For the given chain, `iptables` evaluates that chain in each
+    table that it is present in (note that some chain/table combinations do not exist,
+    such as Filter/`POSTROUTING`). If we trace the flow of a packet originating from
+    the local host, we see the following table/chains pairs evaluated, in order:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Raw/`OUTPUT`
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Mangle/`OUTPUT`
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: NAT/`OUTPUT`
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Filter/`OUTPUT`
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Mangle/`POSTROUTING`
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: NAT/`POSTROUTING`
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Subchains
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: The aforementioned chains are the top-level, or entry-point, chains. However,
+    users can define their own subchains and execute them with the JUMP target. `iptables`
+    executes such a chain in the same manner, target by target, until a terminating
+    target matches. This can be useful for logical separation or reusing a series
+    of targets that can be executed in more than one context (i.e., a similar motivation
+    to why we might organize code into a function). Such organization of rules across
+    chains can have a substantial impact on performance. `iptables` is, effectively,
+    running tens or hundreds or thousands of `if` statements against every single
+    packet that goes in or out of your system. That has measurable impact on packet
+    latency, CPU use, and network throughput. A well-organized set of chains reduces
+    this overhead by eliminating effectively redundant checks or actions. However,
+    `iptables`’s performance given a service with many pods is still a problem in
+    Kubernetes, which makes other solutions with less or no `iptables` use, such as
+    IPVS or eBPF, more appealing.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Let’s look at creating new chains in [Example 2-6](#SSH-IPtables).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 2-6\. Sample `iptables` chain for SSH firewalling
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE14]'
+  prefs: []
+  type: TYPE_PRE
+- en: This example creates a new chain, `incoming-ssh`, which is evaluated for any
+    TCP packets inbound on port 22. The chain allows packets from two specific IP
+    addresses, and packets from other addresses are logged and dropped.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Filter chains end in a default action, such as dropping the packet if no prior
+    target matched. Chains will default to `ACCEPT` if no default is specified. `iptables
+    -P <chain> <target>` sets the default.
+  prefs: []
+  type: TYPE_NORMAL
+- en: iptables rules
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'Rules have two parts: a match condition and an action (called a *target*).
+    The match condition describes a packet attribute. If the packet matches, the action
+    will be executed. If the packet does not match, `iptables` will move to check
+    the next rule.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Match conditions check if a given packet meets some criteria, for example, if
+    the packet has a specific source address. The order of operations from tables/chains
+    is important to remember, as prior operations can impact the packet by mutating
+    it, dropping it, or rejecting it. [Table 2-8](#some_common_iptables_match_types)
+    shows some common match types.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 2-8\. Some common `iptables` match types
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Match type | Flag(s) | Description |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Source | `-s`, `--src`, `--source` | Matches packets with the specified source
+    address. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Destination | `-d`, `--dest`, `--destination` | Matches packets with the
+    destination source address. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Protocol | `-p`, `--protocol` | Matches packets with the specified protocol.
+    |'
+  prefs: []
+  type: TYPE_TB
+- en: '| In interface | `-i`, `--in-interface` | Matches packets that entered via
+    the specified interface. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Out interface | `-o`, `--out-interface` | Matches packets that are leaving
+    the specified interface. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| State | `-m state --state <states>` | Matches packets from connections that
+    are in one of the comma-separated states. This uses the Conntrack states (NEW,
+    ESTABLISHED, RELATED, INVALID). |'
+  prefs: []
+  type: TYPE_TB
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Using `-m` or `--match`, `iptables` can use extensions for match criteria. Extensions
+    range from nice-to-haves, such as specifying multiple ports in a single rule (multiport),
+    to more complex features such as eBPF interactions. `man iptables-extensions`
+    contains more information.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'There are two kinds of target actions: terminating and nonterminating. A terminating
+    target will stop `iptables` from checking subsequent targets in the chain, essentially
+    acting as a final decision. A nonterminating target will allow `iptables` to continue
+    checking subsequent targets in the chain. `ACCEPT`, `DROP`, `REJECT`, and `RETURN`
+    are all terminating targets. Note that `ACCEPT` and `RETURN` are terminating only
+    *within their chain*. That is to say, if a packet hits an `ACCEPT` target in a
+    subchain, the parent chain will resume processing and could potentially drop or
+    reject the target. [Example 2-7](#IPTABLEs-REJECT) shows a set of rules that would
+    reject packets to port 80, despite matching an `ACCEPT` at one point. Some command
+    output has been removed for simplicity.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 2-7\. Rule sequence which would reject some previously accepted packets
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE15]'
+  prefs: []
+  type: TYPE_PRE
+- en: $ iptables -L --line-numbers
+  prefs: []
+  type: TYPE_NORMAL
+- en: Chain INPUT (policy ACCEPT)
+  prefs: []
+  type: TYPE_NORMAL
+- en: num  target     prot opt source destination
+  prefs: []
+  type: TYPE_NORMAL
+- en: 1    accept-all  all  --  anywhere             anywhere
+  prefs: []
+  type: TYPE_NORMAL
+- en: 2    REJECT     tcp  --  anywhere             anywhere
+  prefs: []
+  type: TYPE_NORMAL
+- en: tcp dpt:80 reject-with icmp-port-unreachable
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: Chain accept-all (1 references)
+  prefs: []
+  type: TYPE_NORMAL
+- en: num  target     prot opt source destination
+  prefs: []
+  type: TYPE_NORMAL
+- en: 1               all  --  anywhere             anywhere
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE16]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[Table 2-9](#common_iptables_target_types_and_behavior) summarizes common target
+    types and their behavior.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 2-9\. Common `iptables` target types and behavior
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Target type | Applicable tables | Description |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `AUDIT` | All | Records data about accepted, dropped, or rejected packets.
+    |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `ACCEPT` | Filter | Allows the packet to continue unimpeded and without further
+    modification. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `DNAT` | NAT | Modifies the destination address. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `DROPs` | Filter | Discards the packet. To an external observer, it will
+    appear as though the packet was never received. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `JUMP` | All | Executes another chain. Once that chain finishes executing,
+    execution of the parent chain will continue. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `LOG` | All | Logs the packet contents, via the kernel log. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `MARK` | All | Sets a special integer for the packet, used as an identifier
+    by Netfilter. The integer can be used in other `iptables` decisions and is not
+    written to the packet itself. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `MASQUERADE` | NAT | Modifies the source address of the packet, replacing
+    it with the address of a specified network interface. This is similar to SNAT,
+    but does not require the machine’s IP address to be known in advance. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `REJECT` | Filter | Discards the packet and sends a rejection reason. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `RETURN` | All | Stops processing the current chain (or subchain). Note that
+    this is *not* a terminating target, and if there is a parent chain, that chain
+    will continue to be processed. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `SNAT` | NAT | Modifies the source address of the packet, replacing it with
+    a fixed address. See also: `MASQUERADE`. |'
+  prefs: []
+  type: TYPE_TB
+- en: Each target type may have specific options, such as ports or log strings, that
+    apply to the rule. [Table 2-10](#iptables_target_command_examples) shows some
+    example commands and explanations.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 2-10\. `iptables` target command examples
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Command | Explanation |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| iptables -A INPUT -s 10.0.0.1 | Accepts an inbound packet if the source address
+    is `10.0.0.1`. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| iptables -A INPUT -p ICMP | Accepts all inbound ICMP packets. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| iptables -A INPUT -p tcp --dport 443 | Accepts all inbound TCP packets to
+    port 443. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| iptables -A INPUT -p tcp --dport 22 -j DROP | Drops all inbound TCP ports
+    to port 22. |'
+  prefs: []
+  type: TYPE_TB
+- en: A target belongs to both a table and a chain, which control when (if at all)
+    `iptables` executes the aforementioned target for a given packet. Next, we’ll
+    put together what we’ve learned and look at `iptables` commands in practice.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Practical iptables
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'You can show `iptables` chains with `iptables -L`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE17]'
+  prefs: []
+  type: TYPE_PRE
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: There is a distinct but nearly identical program, `ip6tables`, for managing
+    IPv6 rules. `iptables` and `ip6tables` rules are completely separate. For example,
+    dropping all packets to TCP `0.0.0.0:22` with `iptables` will not prevent connections
+    to TCP `[::]:22`, and vice versa for `ip6tables`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: For simplicity, we will refer only to `iptables` and IPv4 addresses in this
+    section.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`--line-numbers` shows numbers for each rule in a chain. This can be helpful
+    when inserting or deleting rules. `-I <chain> <line>` inserts a rule at the specified
+    line number, before the previous rule at that line.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The typical format of a command to interact with `iptables` rules is:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE18]'
+  prefs: []
+  type: TYPE_PRE
+- en: where `-A` is for *append*, `-C` is for *check*, and `-D` is for *delete*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '`iptables` rules aren’t persisted across restarts. `iptables` provides `iptables-save`
+    and `iptables-restore` tools, which can be used manually or with simple automation
+    to capture or reload rules. This is something that most firewall tools paper over
+    by automatically creating their own `iptables` rules every time the system starts.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`iptables` can masquerade connections, making it appear as if the packets came
+    from their own IP address. This is useful to provide a simplified exterior to
+    the outside world. A common use case is to provide a known host for traffic, as
+    a security bastion, or to provide a predictable set of IP addresses to third parties.
+    In Kubernetes, masquerading can make pods use their node’s IP address, despite
+    the fact that pods have unique IP addresses. This is necessary to communicate
+    outside the cluster in many setups, where pods have internal IP addresses that
+    cannot communicate directly with the internet. The `MASQUERADE` target is similar
+    to SNAT; however, it does not require a `--source-address` to be known and specified
+    in advance. Instead, it uses the address of a specified interface. This is slightly
+    less performant than SNAT in cases where the new source address is static, as
+    `iptables` must continuously fetch the address:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE19]'
+  prefs: []
+  type: TYPE_PRE
+- en: '`iptables` can perform connection-level load balancing or more accurately,
+    connection fan-out. This technique relies on DNAT rules and random selection (to
+    prevent every connection from being routed to the first DNAT target):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE20]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'In the previous example, there is a 50% chance of routing to the first backend.
+    Otherwise, the packet proceeds to the next rule, which is guaranteed to route
+    the connection to the second backend. The math gets a little tedious for adding
+    more backends. To have an equal chance of routing to any backend, the nth backend
+    must have a 1/n chance of being routed to. If there were three backends, the probabilities
+    would need to be 0.3 (repeating), 0.5, and 1:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE21]'
+  prefs: []
+  type: TYPE_PRE
+- en: When Kubernetes uses `iptables` load balancing for a service, it creates a chain
+    as shown previously. If you look closely, you can see rounding errors in one of
+    the probability numbers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Using DNAT fan-out for load balancing has several caveats. It has no feedback
+    for the load of a given backend and will always map application-level queries
+    on the same connection to the same backend. Because the DNAT result lasts the
+    lifetime of the connection, if long-lived connections are common, many downstream
+    clients may stick to the same upstream backend if that backend is longer lived
+    than others. To give a Kubernetes example, suppose a gRPC service has only two
+    replicas and then additional replicas scale up. gRPC reuses the same HTTP/2 connection,
+    so existing downstream clients (using the Kubernetes service and not gRPC load
+    balancing) will stay connected to the initial two replicas, skewing the load profile
+    among gRPC backends. Because of this, many developers use a smarter client (such
+    as making use of gRPC’s client-side load balancing), force periodic reconnects
+    at the server and/or client, or use service meshes to externalize the problem.
+    We’ll discuss load balancing in more detail in Chapters [4](ch04.xhtml#kubernetes_networking_introduction)
+    and [5](ch05.xhtml#kubernetes_networking_abstractions).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Although `iptables` is widely used in Linux, it can become slow in the presence
+    of a huge number of rules and offers limited load balancing functionality. Next
+    we’ll look at IPVS, an alternative that is more purpose-built for load balancing.
+  prefs: []
+  type: TYPE_NORMAL
+- en: IPVS
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: IP Virtual Server (IPVS) is a Linux connection (L4) load balancer. [Figure 2-6](#img-ipvs)
+    shows a simple diagram of IPVS’s role in routing packets.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![IPVS](Images/neku_0206.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 2-6\. IPVS
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '`iptables` can do simple L4 load balancing by randomly routing connections,
+    with the randomness shaped by the weights on individual DNAT rules. IPVS supports
+    multiple load balancing modes (in contrast with the `iptables` one), which are
+    outlined in [Table 2-11](#ipvs_modes_supported_in_kubernetes). This allows IPVS
+    to spread load more effectively than `iptables`, depending on IPVS configuration
+    and traffic patterns.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 2-11\. IPVS modes supported in Kubernetes
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Name | Shortcode | Description |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Round-robin | `rr` | Sends subsequent connections to the “next” host in a
+    cycle. This increases the time between subsequent connections sent to a given
+    host, compared to random routing like `iptables` enables. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Least connection | `lc` | Sends connections to the host that currently has
+    the least open connections. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Destination hashing | `dh` | Sends connections deterministically to a specific
+    host, based on the connections’ destination addresses. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Source hashing | `sh` | Sends connections deterministically to a specific
+    host, based on the connections’ source addresses. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Shortest expected delay | `sed` | Sends connections to the host with the
+    lowest connections to weight ratio. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Never queue | `nq` | Sends connections to any host with no existing connections,
+    otherwise uses “shortest expected delay” strategy. |'
+  prefs: []
+  type: TYPE_TB
+- en: 'IPVS supports packet forwarding modes:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: NAT rewrites source and destination addresses.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: DR encapsulates IP datagrams within IP datagrams.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: IP tunneling directly routes packets to the backend server by rewriting the
+    MAC address of the data frame with the MAC address of the selected backend server.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'There are three aspects to look at when it comes to issues with `iptables`
+    as a load balancer:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Number of nodes in the cluster
+  prefs: []
+  type: TYPE_NORMAL
+- en: Even though Kubernetes already supports 5,000 nodes in release v1.6, `kube-proxy`
+    with `iptables` is a bottleneck to scale the cluster to 5,000 nodes. One example
+    is that with a NodePort service in a 5,000-node cluster, if we have 2,000 services
+    and each service has 10 pods, this will cause at least 20,000 `iptables` records
+    on each worker node, which can make the kernel pretty busy.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Time
+  prefs: []
+  type: TYPE_NORMAL
+- en: The time spent to add one rule when there are 5,000 services (40,000 rules)
+    is 11 minutes. For 20,000 services (160,000 rules), it’s 5 hours.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Latency
+  prefs: []
+  type: TYPE_NORMAL
+- en: There is latency to access a service (routing latency); each packet must traverse
+    the `iptables` list until a match is made. There is latency to add/remove rules,
+    inserting and removing from an extensive list is an intensive operation at scale.
+  prefs: []
+  type: TYPE_NORMAL
+- en: IPVS also supports session affinity, which is exposed as an option in services
+    (`Service.spec.sessionAffinity` and `Service.spec.sessionAffinityConfig`). Repeated
+    connections, within the session affinity time window, will route to the same host.
+    This can be useful for scenarios such as minimizing cache misses. It can also
+    make routing in any mode effectively stateful (by indefinitely routing connections
+    from the same address to the same host), but the routing stickiness is less absolute
+    in Kubernetes, where individual pods come and go.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To create a basic load balancer with two equally weighted destinations, run
+    `ipvsadm -A -t <address> -s <mode>`. `-A`, `-E`, and `-D` are used to add, edit,
+    and delete virtual services, respectively. The lowercase counterparts, `-a`, `-e`,
+    and `-d`, are used to add, edit, and delete host backends, respectively:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE22]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You can list the IPVS hosts with `-L`. Each virtual server (a unique IP address
+    and port combination) is shown, with its backends:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE23]'
+  prefs: []
+  type: TYPE_PRE
+- en: '`-L` supports multiple options, such as `--stats`, to show additional connection
+    statistics.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: eBPF
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: eBPF is a programming system that allows special sandboxed programs to run in
+    the kernel without passing back and forth between kernel and user space, like
+    we saw with Netfilter and `iptables`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Before eBPF, there was the Berkeley Packet Filter (BPF). BPF is a technology
+    used in the kernel, among other things, to analyze network traffic. BPF supports
+    filtering packets, which allows a userspace process to supply a filter that specifies
+    which packets it wants to inspect. One of BPF’s use cases is `tcpdump`, shown
+    in [Figure 2-7](#img-epbf). When you specify a filter on `tcpdump`, it compiles
+    it as a BPF program and passes it to BPF. The techniques in BPF have been extended
+    to other processes and kernel operations.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![tcpdump-ebpf](Images/neku_0207.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 2-7\. `tcpdump`
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: An eBPF program has direct access to syscalls. eBPF programs can directly watch
+    and block syscalls, without the usual approach of adding kernel hooks to a userspace
+    program. Because of its performance characteristics, it is well suited for writing
+    networking software.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: You can learn more about eBPF on its [website](http://ebpf.io).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In addition to socket filtering, other supported attach points in the kernel
+    are as follows:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Kprobes
+  prefs: []
+  type: TYPE_NORMAL
+- en: Dynamic kernel tracing of internal kernel components.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Uprobes
+  prefs: []
+  type: TYPE_NORMAL
+- en: User-space tracing.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tracepoints
+  prefs: []
+  type: TYPE_NORMAL
+- en: Kernel static tracing. These are programed into the kernel by developers and
+    are more stable as compared to kprobes, which may change between kernel versions.
+  prefs: []
+  type: TYPE_NORMAL
+- en: perf_events
+  prefs: []
+  type: TYPE_NORMAL
+- en: Timed sampling of data and events.
+  prefs: []
+  type: TYPE_NORMAL
+- en: XDP
+  prefs: []
+  type: TYPE_NORMAL
+- en: Specialized eBPF programs that can go lower than kernel space to access driver
+    space to act directly on packets.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Let’s return to `tcpdump` as an example. [Figure 2-8](#img-epbf-example) shows
+    a simplified rendition of `tcpdump`’s interactions with eBPF.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![ebpf](Images/neku_0208.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 2-8\. eBPF example
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Suppose we run `tcpdump -i any`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The string is compiled by `pcap_compile` into a BPF program. The kernel will
+    then use this BPF program to filter all packets that go through all the network
+    devices we specified, any with the `-I` in our case.
+  prefs: []
+  type: TYPE_NORMAL
+- en: It will make this data available to `tcpdump` via a map. Maps are a data structure
+    consisting of key-value pairs used by the BPF programs to exchange data.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'There are many reasons to use eBPF with Kubernetes:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Performance (hashing table versus `iptables` list)
+  prefs: []
+  type: TYPE_NORMAL
+- en: For every service added to Kubernetes, the list of `iptables` rules that have
+    to be traversed grows exponentially. Because of the lack of incremental updates,
+    the entire list of rules has to be replaced each time a new rule is added. This
+    leads to a total duration of 5 hours to install the 160,000 `iptables` rules representing
+    20,000 Kubernetes services.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tracing
+  prefs: []
+  type: TYPE_NORMAL
+- en: Using BPF, we can gather pod and container-level network statistics. The BPF
+    socket filter is nothing new, but the BPF socket filter per cgroup is. Introduced
+    in Linux 4.10, `cgroup-bpf` allows attaching eBPF programs to cgroups. Once attached,
+    the program is executed for all packets entering or exiting any process in the
+    cgroup.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Auditing `kubectl exec` with eBPF
+  prefs: []
+  type: TYPE_NORMAL
+- en: With eBPF, you can attach a program that will record any commands executed in
+    the `kubectl exec` session and pass those commands to a userspace program that
+    logs those events.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Security
+  prefs: []
+  type: TYPE_NORMAL
+- en: Seccomp
+  prefs: []
+  type: TYPE_NORMAL
+- en: Secured computing that restricts what syscalls are allowed. Seccomp filters
+    can be written in eBPF.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Falco
+  prefs: []
+  type: TYPE_NORMAL
+- en: Open source container-native runtime security that uses eBPF.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The most common use of eBPF in Kubernetes is Cilium, CNI and service implementation.
+    Cilium replaces `kube-proxy`, which writes `iptables` rules to map a service’s
+    IP address to its corresponding pods.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Through eBPF, Cilium can intercept and route all packets directly in the kernel,
+    which is faster and allows for application-level (layer 7) load balancing. We
+    will cover `kube-proxy` in [Chapter 4](ch04.xhtml#kubernetes_networking_introduction).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Network Troubleshooting Tools
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Troubleshooting network-related issues with Linux is a complex topic and could
+    easily fill its own book. In this section, we will introduce some key troubleshooting
+    tools and the basics of their use ([Table 2-12](#cheatsheet_of_common_debugging_cases_and_tools)
+    is provided as a simple cheat sheet of tools and applicable use cases). Think
+    of this section as a jumping-off point for common Kubernetes-related tool uses.
+    Man pages, `--help`, and the internet can guide you further. There is substantial
+    overlap in the tools that we describe, so you may find learning about some tools
+    (or tool features) redundant. Some are better suited to a given task than others
+    (for example, multiple tools will catch TLS errors, but OpenSSL provides the richest
+    debugging information). Exact tool use may come down to preference, familiarity,
+    and availability.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 2-12\. Cheat sheet of common debugging cases and tools
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Case | Tools |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Checking connectivity | `traceroute`, `ping`, `telnet`, `netcat` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Port scanning | `nmap` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Checking DNS records | `dig`, commands mentioned in “Checking Connectivity”
+    |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Checking HTTP/1 | cURL, `telnet`, `netcat` |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Checking HTTPS | OpenSSL, cURL |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Checking listening programs | `netstat` |'
+  prefs: []
+  type: TYPE_TB
+- en: Some networking tools that we describe likely won’t be preinstalled in your
+    distro of choice, but all should be available through your distro’s package manager.
+    We will sometimes use `# Truncated` in command output where we have omitted text
+    to avoid examples becoming repetitive or overly long.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Security Warning
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Before we get into tooling details, we need to talk about security. An attacker
+    can utilize any tool listed here in order to explore and access additional systems.
+    There are many strong opinions on this topic, but we consider it best practice
+    to leave the fewest possible networking tools installed on a given machine.
+  prefs: []
+  type: TYPE_NORMAL
+- en: An attacker may still be able to download tools themselves (e.g., by downloading
+    a binary from the internet) or use the standard package manager (if they have
+    sufficient permission). In most cases, you are simply introducing some additional
+    friction prior to exploring and exploiting. However, in some cases you can reduce
+    an attacker’s capabilities by not preinstalling networking tools.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Linux file permissions include something called the *setuid bit* that is sometimes
+    used by networking tools. If a file has the setuid bit set, executing said file
+    causes the file to be executed *as the user who owns the file*, rather than the
+    current user. You can observe this by looking for an `s` rather than an `x` in
+    the permission readout of a file:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE24]'
+  prefs: []
+  type: TYPE_PRE
+- en: This allows programs to expose limited, privileged capabilities (for example,
+    `passwd` uses this ability to allow a user to update their password, without allowing
+    arbitrary writes to the password file). A number of networking tools (`ping`,
+    `nmap`, etc.) may use the setuid bit on some systems to send raw packets, sniff
+    packets, etc. If an attacker downloads their own copy of a tool and cannot gain
+    root privileges, they will be able to do less with said tool than if it was installed
+    by the system with the setuid bit set.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ping
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '`ping` is a simple program that sends ICMP `ECHO_REQUEST` packets to networked
+    devices. It is a common, simple way to test network connectivity from one host
+    to another.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: ICMP is a layer 4 protocol, like TCP and UDP. Kubernetes services support TCP
+    and UDP, but not ICMP. This means that pings to a Kubernetes service will always
+    fail. Instead, you will need to use `telnet` or a higher-level tool such as cURL
+    to check connectivity to a service. Individual pods may still be reachable by
+    `ping`, depending on your network configuration.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Firewalls and routing software are aware of ICMP packets and can be configured
+    to filter or route specific ICMP packets. It is common, but not guaranteed (or
+    necessarily advisable), to have permissive rules for ICMP packets. Some network
+    administrators, network software, or cloud providers will allow ICMP packets by
+    default.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The basic use of `ping` is simply `ping <address>`. The address can be an IP
+    address or a domain. `ping` will send a packet, wait, and report the status of
+    that request when a response or timeout happens.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'By default, `ping` will send packets forever, and must be manually stopped
+    (e.g., with Ctrl-C). `-c <count>` will make `ping` perform a fixed number before
+    shutting down. On shutdown, `ping` also prints a summary:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE25]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[Table 2-13](#useful_ping_options) shows common `ping` options.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 2-13\. Useful `ping` options
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Option | Description |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| -c <count> | Sends the specified number of packets. Exits after the final
+    packet is received or times out. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| -i <seconds> | Sets the wait interval between sending packets. Defaults to
+    1 second. Extremely low values are not recommended, as `ping` can flood the network.
+    |'
+  prefs: []
+  type: TYPE_TB
+- en: '| -o | Exit after receiving 1 packet. Equivalent to `-c 1`. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| -S <source address> | Uses the specified source address for the packet. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| -W <milliseconds> | Sets the wait interval to receive a packet. If `ping`
+    receives the packet later than the wait time, it will still count toward the final
+    summary. |'
+  prefs: []
+  type: TYPE_TB
+- en: traceroute
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '`traceroute` shows the network route taken from one host to another. This allows
+    users to easily validate and debug the route taken (or where routing fails) from
+    one machine to another.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`traceroute` sends packets with specific IP time-to-live values. Recall from
+    [Chapter 1](ch01.xhtml#networking_introduction) that each host that handles a
+    packet decrements the time-to-live (TTL) value on packets by 1, therefore limiting
+    the number of hosts that a request can be handled by. When a host receives a packet
+    and decrements the TTL to 0, it sends a `TIME_EXCEEDED` packet and discards the
+    original packet. The `TIME_EXCEEDED` response packet contains the source address
+    of the machine where the packet timed out. By starting with a TTL of 1 and raising
+    the TTL by 1 for each packet, `traceroute` is able to get a response from each
+    host along the route to the destination address.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`traceroute` displays hosts line by line, starting with the first external
+    machine. Each line contains the hostname (if available), IP address, and response
+    time:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE26]'
+  prefs: []
+  type: TYPE_PRE
+- en: If `traceroute` receives no response from a given hop before timing out, it
+    prints a ***. Some hosts may refuse to send a `TIME_EXCEEDED` packet, or a firewall
+    along the way may prevent successful delivery.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Table 2-14](#useful_traceroute_options) shows common `traceroute` options.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 2-14\. Useful `traceroute` options
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Option | Syntax | Description |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| First TTL | `-f <TTL>`, `-M <TTL>` | Set the starting IP TTL (default value:
+    1). Setting the TTL to `n` will cause `traceroute` to not report the first `n-1`
+    hosts en route to the destination. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Max TTL | `-m <TTL>` | Set the maximum TTL, i.e., the maximum number of hosts
+    that `traceroute` will attempt to route through. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Protocol | `-P <protocol>` | Send packets of the specified protocol (TCP,
+    UDP, ICMP, and sometimes other options). UDP is default. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Source address | `-s <address>` | Specify the source IP address of outgoing
+    packets. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Wait | `-w <seconds>` | Set the time to wait for a probe response. |'
+  prefs: []
+  type: TYPE_TB
+- en: dig
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '`dig` is a DNS lookup tool. You can use it to make DNS queries from the command
+    line and display the results.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The general form of a `dig` command is `dig [options] <domain>`. By default,
+    `dig` will display the CNAME, A, and AAAA records:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE27]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'To display a particular type of DNS record, run `dig <domain> <type>` (or `dig
+    -t <type> <domain>`). This is overwhelmingly the main use case for `dig`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE28]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[Table 2-15](#useful_dig_options) shows common `dig` options.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 2-15\. Useful `dig` options
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Option | Syntax | Description |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| IPv4 | `-4` | Use IPv4 only. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| IPv6 | `-6` | Use IPv6 only. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Address | `-b <address>[#<port>]` | Specify the address to make a DNS query
+    to. Port can optionally be included, preceded by *#*. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Port | `-p <port>` | Specify the port to query, in case DNS is exposed on
+    a nonstandard port. The default is 53, the DNS standard. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Domain | `-q <domain>` | The domain name to query. The domain name is usually
+    specified as a positional argument. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Record Type | `-t <type>` | The DNS record type to query. The record type
+    can alternatively be specified as a positional argument. |'
+  prefs: []
+  type: TYPE_TB
+- en: telnet
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '`telnet` is both a network protocol and a tool for using said protocol. `telnet`
+    was once used for remote login, in a manner similar to SSH. SSH has become dominant
+    due to having better security, but `telnet` is still extremely useful for debugging
+    servers that use a text-based protocol. For example, with `telnet`, you can connect
+    to an HTTP/1 server and manually make requests against it.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The basic syntax of `telnet` is `telnet <address> <port>`. This establishes
+    a connection and provides an interactive command-line interface. Pressing Enter
+    twice will send a command, which easily allows multiline commands to be written.
+    Press Ctrl-J to exit the session:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE29]'
+  prefs: []
+  type: TYPE_PRE
+- en: To make full use of `telnet`, you will need to understand how the application
+    protocol that you are using works. `telnet` is a classic tool to debug servers
+    running HTTP, HTTPS, POP3, IMAP, and so on.
+  prefs: []
+  type: TYPE_NORMAL
+- en: nmap
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '`nmap` is a port scanner, which allows you to explore and examine services
+    on your network.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The general syntax of `nmap` is `nmap [options] <target>`, where target is
+    a domain, IP address, or IP CIDR. `nmap`’s default options will give a fast and
+    brief summary of open ports on a host:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE30]'
+  prefs: []
+  type: TYPE_PRE
+- en: In the previous example, `nmap` detects three open ports and guesses which service
+    is running on each port.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Because `nmap` can quickly show you which services are accessible from a remote
+    machine, it can be a quick and easy way to spot services that should *not* be
+    exposed. `nmap` is a favorite tool for attackers for this reason.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`nmap` has a dizzying number of options, which change the scan behavior and
+    level of detail provided. As with other commands, we will summarize some key options,
+    but we *highly* recommend reading `nmap`’s help/man pages.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Table 2-16](#useful_nmap_options) shows common `nmap` options.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 2-16\. Useful `nmap` options
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Option | Syntax | Description |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Additional detection | `-A` | Enable OS detection, version detection, and
+    more. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Decrease verbosity | `-d` | Decrease the command verbosity. Using multiple
+    `d`’s (e.g., `-dd`) increases the effect. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Increase verbosity | `-v` | Increase the command verbosity. Using multiple
+    `v`’s (e.g., `-vv`) increases the effect. |'
+  prefs: []
+  type: TYPE_TB
+- en: netstat
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '`netstat` can display a wide range of information about a machine’s network
+    stack and connections:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE31]'
+  prefs: []
+  type: TYPE_PRE
+- en: Invoking `netstat` with no additional arguments will display all *connected*
+    sockets on the machine. In our example, we see three TCP sockets, one UDP socket,
+    and a multitude of UNIX sockets. The output includes the address (IP address and
+    port) on both sides of a connection.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'We can use the `-a` flag to show all connections or `-l` to show only listening
+    connections:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE32]'
+  prefs: []
+  type: TYPE_PRE
+- en: A common use of `netstat` is to check which process is listening on a specific
+    port. To do that, we run `sudo netstat -lp` - `l` for “listening” and `p` for
+    “program.” `sudo` may be necessary for `netstat` to view all program information.
+    The output for `-l` shows which address a service is listening on (e.g., `0.0.0.0`
+    or `127.0.0.1`).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'We can use simple tools like `grep` to get a clear output from `netstat` when
+    we are looking for a specific result:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE33]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[Table 2-17](#useful_netstat_commands) shows common `netstat` options.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 2-17\. Useful `netstat` commands
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Option | Syntax | Description |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Show all sockets | `netstat -a` | Shows all sockets, not only open connections.
+    |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Show statistics | `netstat -s` | Shows networking statistics. By default,
+    `netstat` shows stats from all protocols. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Show listening sockets | `netstat -l` | Shows sockets that are listening.
+    This is an easy way to find running services. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| TCP | `netstat -t` | The `-t` flag shows only TCP data. It can be used with
+    other flags, e.g., `-lt` (show sockets listening with TCP). |'
+  prefs: []
+  type: TYPE_TB
+- en: '| UDP | `netstat -u` | The `-u` flag shows only UDP data. It can be used with
+    other flags, e.g., `-lu` (show sockets listening with UDP). |'
+  prefs: []
+  type: TYPE_TB
+- en: netcat
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '`netcat` is a multipurpose tool for making connections, sending data, or listening
+    on a socket. It can be helpful as a way to “manually” run a server or client to
+    inspect what happens in greater detail. `netcat` is arguably similar to `telnet`
+    in this regard, though `netcat` is capable of many more things.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '`nc` is an alias for `netcat` on most systems.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`netcat` can connect to a server when invoked as `netcat <address> <port>`.
+    `netcat` has an interactive `stdin`, which allows you to manually type data or
+    pipe data to `netcat`. It’s very `telnet`-esque so far:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE34]'
+  prefs: []
+  type: TYPE_PRE
+- en: Openssl
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The OpenSSL technology powers a substantial chunk of the world’s HTTPS connections.
+    Most heavy lifting with OpenSSL is done with language bindings, but it also has
+    a CLI for operational tasks and debugging. `openssl` can do things such as creating
+    keys and certificates, signing certificates, and, most relevant to us, testing
+    TLS/SSL connections. Many other tools, including ones outlined in this chapter,
+    can test TLS/SSL connections. However, `openssl` stands out for its feature-richness
+    and level of detail.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Commands usually take the form `openssl [sub-command] [arguments] [options]`.
+    `openssl` has a vast number of subcommands (for example, `openssl rand` allows
+    you to generate pseudo random data). The `list` subcommand allows you to list
+    capabilities, with some search options (e.g., `openssl list --commands` for commands).
+    To learn more about individual sub commands, you can check `openssl <subcommand>
+    --help` or its man page (`man openssl-<subcommand>` or just `man <subcommand>`).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`openssl s_client -connect` will connect to a server and display detailed information
+    about the server’s certificate. Here is the default invocation:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE35]'
+  prefs: []
+  type: TYPE_PRE
+- en: If you are using a self-signed CA, you can use `-CAfile <path>` to use that
+    CA. This will allow you to establish and verify connections against a self-signed
+    certificate.
+  prefs: []
+  type: TYPE_NORMAL
+- en: cURL
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: cURL is a data transfer tool that supports multiple protocols, notably HTTP
+    and HTTPS.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '`wget` is a similar tool to the command `curl`. Some distros or administrators
+    may install it instead of `curl`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'cURL commands are of the form `curl [options] <URL>`. cURL prints the URL’s
+    contents and sometimes cURL-specific messages to `stdout`. The default behavior
+    is to make an HTTP GET request:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE36]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'By default, cURL does not follow redirects, such as HTTP 301s or protocol upgrades.
+    The `-L` flag (or `--location`) will enable redirect following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE37]'
+  prefs: []
+  type: TYPE_PRE
+- en: Use the `-X` option to perform a specific HTTP verb; e.g., use `curl -X DELETE
+    foo/bar` to make a `DELETE` request.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You can supply data (for a POST, PUT, etc.) in a few ways:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'URL encoded: `-d "key1=value1&key2=value2"`'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'JSON: `-d ''{"key1":"value1", "key2":"value2"}''`'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'As a file in either format: `-d @data.txt`'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'The `-H` option adds an explicit header, although basic headers such as `Content-Type`
+    are added automatically:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`-H "Content-Type: application/x-www-form-urlencoded"`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Here are some examples:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE38]'
+  prefs: []
+  type: TYPE_PRE
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: cURL can be of some help when debugging TLS issues, but more specialized tools
+    such as `openssl` may be more helpful.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'cURL can help diagnose TLS issues. Just like a reputable browser, cURL validates
+    the certificate chain returned by HTTP sites and checks against the host’s CA
+    certs:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE39]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Like many programs, cURL has a verbose flag, `-v`, which will print more information
+    about the request and response. This is extremely valuable when debugging a layer
+    7 protocol such as HTTP:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE40]'
+  prefs: []
+  type: TYPE_PRE
+- en: cURL has many additional features that we have not covered, such as the ability
+    to use timeouts, custom CA certs, custom DNS, and so on.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Conclusion
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: This chapter has provided you with a whirlwind tour of networking in Linux.
+    We focused primarily on concepts that are required to understand Kubernetes’ implementation,
+    cluster setup constraints, and debugging Kubernetes-related networking problems
+    (in workloads on Kubernetes, or Kubernetes itself). This chapter was by no means
+    exhaustive, and you may find it valuable to learn more.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Next, we will start to look at containers in Linux and how containers interact
+    with the network.
+  prefs: []
+  type: TYPE_NORMAL

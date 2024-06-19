@@ -1,0 +1,1052 @@
+- en: Chapter 6\. Linux Networking and BPF
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'From a networking point of view, we use BPF programs for two main use cases:
+    packet capturing and filtering.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This means that a user-space program can attach a filter to any socket and extract
+    information about packets flowing through it and allow/disallow/redirect certain
+    kinds of packets as they are seen at that level.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The goal of this chapter is to explain how BPF programs can interact with the
+    Socket Buffer structure at different stages of the network data path in the Linux
+    kernel network stack. We are identifying, as common use cases two types of programs:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Program types related to *sockets*
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Programs written for the BPF-based classifier for *Traffic Control*
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The Socket Buffer structure, also called SKB or `sk_buff`, is the one in the
+    kernel that is created and used for every packet sent or received. By reading
+    the SKB you can pass or drop packets and populate BPF maps to create statistics
+    and flow metrics about the current traffic.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In addition some BPF programs allow you to manipulate the SKB and, by extension,
+    transform the final packets in order to redirect them or change their fundamental
+    structure. For example, on an IPv6-only system, you might write a program that
+    converts all the received packets from IPv4 to IPv6, which can be accomplished
+    by mangling with the packets’ SKB.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Understanding the differences between the different kinds of programs we can
+    write and how different programs lead to the same goal is the key to understanding
+    BPF and eBPF in networking; in the next section we look at the first two ways
+    to do filtering at socket level: by using classic BPF filters, and by using eBPF
+    programs attached to sockets.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: BPF and Packet Filtering
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: As stated, BPF filters and eBPF programs are the principal use cases for BPF
+    programs in the context of networking; however, originally, BPF programs were
+    synonymous with packet filtering.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Packet filtering is still one of the most important use cases and has been expanded
+    from classic BPF (cBPF) to the modern eBPF in Linux 3.19 with the addition of
+    map-related functions to the filter program type `BPF_PROG_TYPE_SOCKET_FILTER`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Filters can be used mainly in three high-level scenarios:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Live traffic dropping (e.g., allowing only User Datagram Protocol [UDP] traffic
+    and discarding anything else)
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Live observation of a filtered set of packets flowing into a live system
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Retrospective analysis of network traffic captured on a live system, using the
+    *pcap format*, for example
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'The term *pcap* comes from the conjunction of two words: packet and capture.
+    The pcap format is implemented as a domain-specific API for packet capturing in
+    a library called Packet Capture Library (*libpcap*). This format is useful in
+    debugging scenarios when you want to save a set of packets that have been captured
+    on a live system directly to a file to analyze them later using a tool that can
+    read a stream of packets exported in the pcap format.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the following sections we show two different ways to apply the concept of
+    packet filtering with BPF programs. First we show how a common and widespread
+    tool like `tcpdump` acts as a higher-level interface for BPF programs used as
+    filters. Then we write and load our own program using the `BPF_PROG_TYPE_SOCKET_FILTER`
+    BPF program type.
+  prefs: []
+  type: TYPE_NORMAL
+- en: tcpdump and BPF Expressions
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: When talking about live traffic analysis and observation, one of the command-line
+    tools that almost everyone knows about is `tcpdump`. Essentially a frontend for
+    `libpcap`, it allows the user to define high-level filtering expressions. What
+    `tcpdump` does is read packets from a network interface of your choice (or any
+    interface) and then writes the content of the packets it received to stdout or
+    a file. The packet stream can then be filtered using the pcap filter syntax. The
+    pcap filter syntax is a DSL that is used to filter packets using a higher-level
+    set of expressions made by a set of primitives that are generally easier to remember
+    than BPF assembly. It’s out of the scope of this chapter to explain all the primitives
+    and expressions possible in the pcap filter syntax because the entire set can
+    be found in `man 7 pcap-filter`, but we do go through some examples so that you
+    can understand its power.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The scenario is that we are in a Linux box that is exposing a web server on
+    port 8080; this web server is not logging the requests it receives, and we really
+    want to know whether it is receiving any request and how those requests are flowing
+    into it because a customer of the served application is complaining about not
+    being able to get any response while browsing the products page. At this point,
+    we know only that the customer is connecting to one of our products pages using
+    our web application served by that web server, and as almost always happens, we
+    have no idea what could be the cause of that because end users generally don’t
+    try to debug your services for you, and unfortunately we didn’t deploy any logging
+    or error reporting strategy into this system, so we are completely blind while
+    investigating the problem. Fortunately, there’s a tool that can come to our rescue!
+    It is `tcpdump`, which can be told to filter only IPv4 packets flowing in our
+    system that are using the Transmission Control Protocol (TCP) on port 8080\. Therefore,
+    we will be able to analyze the traffic of the web server and understand what are
+    the faulty requests.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Here’s the command to conduct that filtering with `tcpdump`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Let’s take a look at what’s happening in this command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`-n` is there to tell `tcpdump` to not convert addresses to the respective
+    names, we want to see the addresses for source and destination.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`ip and tcp port 8080` is the pcap filter expression that `tcpdump` will use
+    to filter your packets. `ip` means `IPv4`, `and` is a conjunction to express a
+    more complex filter to allow adding more expressions to match, and then we specify
+    that we are interested only in TCP packets coming from or to port 8080 using `tcp
+    port 8080`. In this specific case a better filter would’ve been `tcp dst port
+    8080` because we are interested only in packets having as the destination port
+    8080 and not packets coming from it.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'The output of that will be something like this (without the redundant parts
+    like complete TCP handshakes):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: The situation is a lot clearer now! We have a bunch of requests going well,
+    returning a `200 OK` status code, but there is also one with a `500 Internal Server
+    Error` code on the `/api/products` endpoint. Our customer is right; we have a
+    problem listing the products!
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'At this point, you might ask yourself, what does all this pcap filtering stuff
+    and `tcpdump` have to do with BPF programs if they have their own syntax? Pcap
+    filters on Linux are compiled to BPF programs! And because `tcpdump` uses pcap
+    filters for the filtering, this means that every time you execute `tcpdump` using
+    a filter, you are actually compiling and loading a BPF program to filter your
+    packets. Fortunately, by passing the `-d` flag to `tcpdump`, you can dump the
+    BPF instructions that it will load while using the specified filter:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: The filter is the same as the one used in the previous example, but the output
+    now is a set of BPF assembly instructions because of the `-d` flag.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Here’s the output:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Let’s analyze it:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`ldh [12]`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: (`ld`) Load a (`h`) half-word (`16` bit) from the accumulator at offset 12,
+    which is the Ethertype field, as shown in [Figure 6-1](#ethernet-II-frame-offsets).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`jeq #0x800 jt 2 jf 12`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: (`j`) Jump if (`eq`) equal; check whether the Ethertype value from the previous
+    instruction is equal to `0x800`—which is the identifier for IPv4—and then use
+    the jump destinations that are `2` if true (`jt`) and `12` if false (`jf`), so
+    this will continue to the next instruction if the Internet Protocol is IPv4—otherwise
+    it will jump to the end and return zero.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`ldb [23]`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Load byte into (`ldb`), will load the higher-layer protocol field from the IP
+    frame that can be found at offset `23`—offset `23` comes from the addition of
+    the 14 bytes of the headers in the Ethernet Layer 2 frame (see [Figure 6-1](#ethernet-II-frame-offsets))
+    plus the position the protocol has in the IPv4 header, which is the 9th, so 14
+    + 9 = 23.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`jeq #0x6 jt 4 jf 12`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Again a jump if equal. In this case, we check that the previous extracted protocol
+    is `0` x `6`, which is TCP. If it is, we jump to the next instruction (`4`) or
+    we go to the end (`12`)—if it is not, we drop the packet.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`ldh [20]`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is another load half-word instruction—in this case, it is to load the value
+    of packet offset + fragment offset from the IPv4 header.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`jset #0x1fff jt 12 6`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This `jset` instruction will jump to `12` if any of the data we found in the
+    fragment offset is true—otherwise, go to `6`, which is the next instruction. The
+    offset after the instruction `0x1fff` says to the `jset` instruction to look only
+    at the last 13 bytes of data. (Expanded it becomes `0001 1111 1111 1111`.)
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`ldxb 4*([14]&0xf)`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: (`ld`) Load into x (`x`) what (`b`) is. This instruction will load the value
+    of the IP header length into `x`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`ldh [x + 14]`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Another load half-word instruction that will go get the value at offset (`x`
+    + `14`), IP header length + 14, which is the location of the source port within
+    the packet.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`jeq #0x1f90 jt 11 jf 9`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: If the value at (`x` + `14`) is equal to `0x1f90` (`8080` in decimal), which
+    means that the source port will be `8080`, continue to `11` or go check whether
+    the destination is on port `8080` by continuing to `9` if this is false.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`ldh [x + 16]`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is another load half-word instruction that will go get the value at offset
+    (`x` + `16`), which is the location of destination port in the packet.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`jeq #0x1f90 jt 11 jf 12`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Here’s another jump if equal, this time used to check if the destination is
+    `8080`, go to `11`; if not, go to `12` and discard the packet.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`ret #262144`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: When this instruction is reached, a match is found—thus return the matched snap
+    length. By default this value is 262,144 bytes. It can be tuned using the `-s`
+    parameter in `tcpdump`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Diagram showing the Layer 2 Ethernet frame structure and the respective lengths](assets/lbpf_0601.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 6-1\. Layer 2 Ethernet frame structure
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Here’s the “correct” example because, as we said in the case of our web server,
+    we only need to take into account the packet having 8080 as a destination, not
+    as a source, so the `tcpdump` filter can specify it with the `dst` destination
+    field:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'In this case, the dumped set of instructions is similar to the previous example,
+    but as you can see, it lacks the entire part about matching the packets with a
+    source of port 8080\. In fact, there’s no `ldh [x + 14]` and the relative `jeq
+    #0x1f90 jt 11 jf 9`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: Besides just analyzing the generated assembly from `tcpdump`, as we did, you
+    might want to write your own code to filter network packets. It turns out that
+    the biggest challenge in that case would be to actually debug the execution of
+    the code to make sure it matches our expectations; in this case, in the kernel
+    source tree, there’s a tool in `tools/bpf` called `bpf_dbg.c` that is essentially
+    a debugger that allows you to load a program and a pcap file to test the execution
+    step by step.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '`tcpdump` can also read directly from a `.pcap` file and apply BPF filters
+    to it.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Packet Filtering for Raw Sockets
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The `BPF_PROG_TYPE_SOCKET_FILTER` program type allows you to attach the BPF
+    program to a socket. All of the packets received by it will be passed to the program
+    in the form of an `sk_buff` struct, and then the program can decide whether to
+    discard or allow them. This kind of programs also has the ability to access and
+    work on maps.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Let’s look at an example to see how this kind of BPF program can be used.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The purpose of our example program is to count the number of TCP, UDP, and
+    Internet Control Message Protocol (ICMP) packets flowing in the interface under
+    observation. To do that, we need the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The BPF program that can see the packets flowing
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The code to load the program and attach it to a network interface
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: A script to compile the program and launch the loader
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'At this point, we can write our BPF program in two ways: as C code that is
+    then compiled to an *ELF* file, or directly as a BPF assembly. For this example,
+    we opted to use C code to show a higher-level abstraction and how to use Clang
+    to compile the program. It’s important to note that to make this program, we are
+    using headers and helpers available only in the Linux kernel’s source tree, so
+    the first thing to do is to obtain a copy of it using Git. To avoid differences,
+    you can check out the same commit SHA we’ve used to make this example:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: To contain BPF support, you will need `clang >= 3.4.0` with `llvm >= 3.7.1`.
+    To verify BPF support in your installation, you can use the command `llc -version`
+    and look to see whether it has the BPF target.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Now that you understand socket filtering, we can get our hands on a BPF program
+    of type `socket`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The BPF program
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: The main duty of the BPF program here is to access the packet it receives; check
+    whether its protocol is TCP, UDP, or ICMP, and then increment the counter on the
+    map array on the specific key for the found protocol.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'For this program we are going to take advantage of the loading mechanism that
+    parses *ELF* files using the helpers located in *samples/bpf/bpf_load.c* in the
+    kernel source tree. The load function `load_bpf_file` is able to recognize some
+    specific ELF section headers and can associate them to the respective program
+    types. Here’s how that code looks:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: The first thing that the code does is to create an association between the section
+    header and an internal variable—like for `SEC("socket")`, we will end up with
+    `bool is_socket=true`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Later in the same file, we see a set of `if` instructions that create the association
+    between the header and the actual `prog_type` , so for `is_socket`, we end up
+    with `BPF_PROG_TYPE_SOCKET_FILTER`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: Good, so because we want to write a `BPF_PROG_TYPE_SOCKET_FILTER` program, we
+    need to specify a `SEC("socket")` as an ELF header to our function that will act
+    as an entry point for our BPF program.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As you can see by that list, there are a variety of program types related to
+    sockets and in general network operations. In this chapter we are showing examples
+    with `BPF_PROG_TYPE_SOCKET_FILTER`; however, you can find a definition of all
+    the other program types in [Chapter 2](ch02.html#running_your_first_BPF_programs).
+    Moreover, in [Chapter 7](ch07.html#express_data_path_XDP) we discuss XDP programs
+    with the program type `BPF_PROG_TYPE_XDP`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Because we want to store the count of packets for every protocol we encounter,
+    we need to create a key/value map where the protocol is key and the packets count
+    as value. For that purpose, we can use a `BPF_MAP_TYPE_ARRAY`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: The map is defined using the `bpf_map_def` struct, and it will be named `countmap`
+    for reference in the program.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'At this point, we can write some code to actually count the packets. We know
+    that programs of type `BPF_PROG_TYPE_SOCKET_FILTER` are one of our options because
+    by using such a program, we can see all the packets flowing through an interface.
+    Therefore we attach the program to the right header with `SEC("socket")`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: After the ELF header attachment we can use the `load_byte` function to extract
+    the protocol section from the `sk_buff` struct. Then we use the protocol ID as
+    a key to do a `bpf_map_lookup_elem` operation to extract the current counter value
+    from our `countmap` so that we can increment it or set it to 1 if it is the first
+    packet ever. Now we can update the map with the incremented value using `bpf_map_update_elem`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To compile the program to an *ELF* file, we just use Clang with `-target bpf`.
+    This command creates a `bpf_program.o` file that we will load using the loader:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: Load and attach to a network interface
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: The loader is the program that actually opens our compiled BPF ELF binary `bpf_program.o`
+    and attaches the defined BPF program and its maps to a socket that is created
+    against the interface under observation, in our case `lo`, the loopback interface.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The most important part of the loader is the actual loading of the *ELF* file:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: This will populate the `prog_fd` array by adding one element that is the file
+    descriptor of our loaded program that we can now attach to the socket descriptor
+    of our loopback interface `lo` opened with `open_raw_sock`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The attach is done by setting the option `SO_ATTACH_BPF` to the raw socket opened
+    for the interface.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'At this point our user-space loader is able to look up map elements while the
+    kernel sends them:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  prefs: []
+  type: TYPE_PRE
+- en: To do the lookup, we attach to the array map using a `for` loop and `bpf_map_lookup_elem`
+    so that we can read and print the values for the TCP, UDP, and ICMP packet counters,
+    respectively.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The only thing left is to compile the program!
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Because this program is using *libbpf*, we need to compile it from the kernel
+    source tree we just cloned:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE14]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Now that we have *libbpf*, we can compile the loader using this script:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE15]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'As you can see, the script includes a bunch of headers and the *libbpf* library
+    from the kernel itself, so it must know where to find the kernel source code.
+    To do that, you can replace `$KERNEL_SRCTREE` in it or just write that script
+    into a file and use it:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE16]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'At this point the loader will have created a `loader-bin` file that can be
+    finally started along with the BPF program’s *ELF* file (requires root privileges):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE17]'
+  prefs: []
+  type: TYPE_PRE
+- en: After the program is loaded and started it will do 10 dumps, one every second
+    showing the packet count for each one of the three considered protocols. Because
+    the program is attached to the loopback device `lo`, along with the loader you
+    can run `ping` and see the ICMP counter increasing.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'So run `ping` to generate ICMP traffic to localhost:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE18]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This starts pinging localhost 100 times and outputs something like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE19]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Then, in another terminal, we can finally run our BPF program:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE20]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'It begins dumping out the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE21]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'At this point, you already know a good amount of what is needed to filter packets
+    on Linux using a socket filter eBPF program. Here’s some big news: that’s not
+    the only way! You might want to instrument the packet scheduling subsystem in
+    place by using the kernel instead of on sockets directly. Just read the next section
+    to learn how.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: BPF-Based Traffic Control Classifier
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Traffic Control is the kernel packet scheduling subsystem architecture. It is
+    made of mechanisms and queuing systems that can decide how packets flow and how
+    they are accepted.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Some use cases for Traffic Control include, but are not limited to, the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Prioritize certain kinds of packets
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Drop specific kind of packet
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Bandwidth distribution
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Given that in general Traffic Control is the way to go when you need to redistribute
+    network resources in a system, to get the best out of it, specific Traffic Control
+    configurations should be deployed based on the kind of applications that you want
+    to run. Traffic Control provides a programmable classifier, called `cls_bpf`,
+    to let the hook into different levels of the scheduling operations where they
+    can read and update socket buffer and packet metadata to do things like traffic
+    shaping, tracing, preprocessing, and more.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Support for eBPF in `cls_bpf` was implemented in kernel 4.1, which means that
+    this kind of program has access to eBPF maps, has tail call support, can access
+    IPv4/IPv6 tunnel metadata, and in general use helpers and utilities coming with
+    eBPF.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The tooling used to interact with networking configuration related to Traffic
+    Control is part of the [iproute2](https://oreil.ly/SYGwI) suite, which contains
+    `ip` and `tc`, which are used to manipulate network interfaces and traffic control
+    configuration, respectively.
+  prefs: []
+  type: TYPE_NORMAL
+- en: At this point, learning Traffic Control can be difficult without the proper
+    reference in terms of terminology. The following section can help.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Terminology
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: As mentioned, there are interaction points between Traffic Control and BPF programs,
+    so you need to understand some Traffic Control concepts. If you have already mastered
+    Traffic Control, feel free to skip this terminology section and go straight to
+    the examples.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Queueing disciplines
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: Queuing disciplines (qdisc) define the scheduling objects used to enqueue packets
+    going to an interface by changing the way they are sent; those objects can be
+    classless or classful.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The default qdisc is `pfifo_fast`, which is classless and enqueues packets on
+    three FIFO (first in first out) queues that are dequeued based on their priority;
+    this qdisc is not used for virtual devices like the loopback (`lo`) or Virtual
+    Ethernet devices (`veth`) that use `noqueue` instead. Besides being a good default
+    for its scheduling algorithm, `pfifo_fast` also doesn’t require any configuration
+    to work.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Virtual interfaces can be distinguished from physical interfaces (devices)
+    by asking the */sys* pseudo filesystem:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE22]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'At this point, some confusion is normal. If you’ve never heard about qdiscs,
+    one thing you can do is to use the `ip a` command to show the list of network
+    interfaces configured in the current system:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE23]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This list already tells us something. Can you find the word `qdisc` in it?
+    Let’s analyze the situation:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'We have three network interfaces in this system: `lo`, `enp0s31f6`, and `docker0`.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The `lo` interface is a virtual interface, so it has qdisc `noqueue`.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The `enp0s31f6` is a physical interface. Wait, why is the qdisc here `fq_codel`
+    (fair queue controlled delay)? Wasn’t `pfifo_fast` the default? It turns out that
+    the system we’re testing the commands on is running Systemd, which is setting
+    the default qdisc differently using the kernel parameter `net.core.default_qdisc`.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The `docker0` interface is a bridge interface, so it uses a `virtual` device
+    and has `noqueue` qdisc.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The `noqueue` qdisc doesn’t have classes, a scheduler, or a classifier. What
+    it does is that it tries to send the packets immediately. As stated, `noqueue`
+    is used by default by virtual devices, but it’s also the qdisc that becomes effective
+    to any interface when you delete its current associated qdisc.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`fq_codel` is a classless qdisc that classifies the incoming packets using
+    a stochastic model in order to be able to queue traffic flows in a fair way.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The situation should be clearer now; we used the `ip` command to find information
+    about `qdiscs` but it turns out that in the `iproute2` toolbelt there’s also a
+    tool called `tc` that has a specific subcommand for qdiscs you can use to list
+    them:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE24]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'There’s much more going on here! For `docker0` and `lo` we basically see the
+    same information as with `ip a`, but for `enp0s31f6`, for example, it has the
+    following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: A limit of 10,240 incoming packets that it can handle.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: As mentioned, the stochastic model used by `fq_codel` wants to queue traffic
+    into different flows, and this output contains the information about how many
+    of them we have, which is 1,024.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Now that the key concepts of qdiscs have been introduced, we can take a closer
+    look at classful and classless qdiscs in the next section to understand their
+    differences and which ones are suitable for BPF programs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Classful qdiscs, filters, and classes
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: Classful qdiscs allow the definition of classes for different kinds of traffic
+    in order to apply different rules to them. Having a class for a qdisc means that
+    it can contain further qdiscs. With this kind of hieararchy, then, we can use
+    a filter (classifier) to classify the traffic by determining the next class where
+    the packet should be enqueued.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*Filters* are used to assign packets to a particular class based on their type.
+    Filters are used inside a classful qdiscs to determine in which class the packet
+    should be enqueued, and two or more filters can map to the same class, as shown
+    in [Figure 6-2](#tc-qdisc-filters). Every filter uses a classifier to classify
+    packets based on their information.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![A qdisc containing a set of filters that map to two different classes that
+    have associated qdiscs themselves](assets/lbpf_0602.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 6-2\. Classful qdisc with filters
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: As mentioned earlier, `cls_bpf` is the classifier that we want to use to write
+    BPF programs for Traffic Control—we have a concrete example in the next sections
+    on how to use it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*Classes* are objects that can live only in a classful qdisc; classes are used
+    in Traffic Control to create hierarchies. Complex hierarchies are made possible
+    by the fact that a class can have filters attached to it, which can then be used
+    as an entry point for another class or for a qdisc.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Classless qdiscs
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: A classless qdiscs is a qdisc that can’t have any children because it is not
+    allowed to have any classes associated. This means that is not possible to attach
+    filters to classless qdiscs. Because classless qdiscs can’t have children, we
+    can’t add filters and classifiers to them, so classless qdiscs are not interesting
+    from a BPF point of view but still useful for simple Traffic Control needs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: After building up some knowledge on qdiscs, filters, and classes, we now show
+    you how to write BPF programs for a `cls_bpf` classifier.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Traffic Control Classifier Program Using cls_bpf
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: As we said, Traffic Control is a powerful mechanism that is made even more powerful
+    thanks to classifiers; however, among all the classifiers, there is one that allows
+    you to program the network data path `cls_bpf` classifier. This classifier is
+    special because it can run BPF programs, but what does that mean? It means that
+    `cls_bpf` will allow you to hook your BPF programs directly in the ingress and
+    egress layers, and running BPF programs hooked to those layers means that they
+    will be able to access the `sk_buff` struct for the respective packets.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To understand better this relationship between Traffic Control and BPF programs,
+    see [Figure 6-3](#tc-flow-bpf-cls), which shows how BPF programs are loaded against
+    the `cls_bpf` classifier. You will also notice that such programs are hooked into
+    ingress and egress qdiscs. All the other interactions in context are also described.
+    By taking the network interface as the entry point for network traffic, you will
+    see the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The traffic first goes to the Traffic Control’s ingress hook.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Then the kernel will execute the BFP program loaded into the ingress from userspace
+    for every request coming in.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: After the ingress program is executed, the control is given to the networking
+    stack that informs the user’s application about the networking event.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: After the application gives a response, the control is passed to the Traffic
+    Control’s egress using another BPF program that executes, and upon completion
+    gives back control to the kernel.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: A response is given to the client.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: You can write BPF programs for Traffic Control in C and compile them using LLVM/Clang
+    with the BPF backend.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Diagram showing the interactions between Traffic Control and BPF programs
+    loaded using cls_bpf](assets/lbpf_0603.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 6-3\. Loading of BPF programs using Traffic Control
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Ingress and egress qdiscs allow you to hook Traffic Control into inbound (ingress)
+    and outbound (egress) traffic, respectively.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To make this example work, you need to run it on a kernel that has been compiled
+    with `cls_bpf` directly or as a module. To verify that you have everything you
+    need, you can do the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE25]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Make sure you get at least the following output with either `y` or `m`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE26]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Let’s now see how we write the classifier:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE27]'
+  prefs: []
+  type: TYPE_PRE
+- en: The “main” of our classifier is the `classification` function. This function
+    is annotated with a section header called `classifier` so that `tc` can know that
+    this is the classifier to use.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'At this point, we need to extract some information from the `skb`; the `data`
+    member contains all the data for the current packet and all its protocol details.
+    To let our program know what’s inside of it, we need to cast it to an Ethernet
+    frame (in our case, with the `*eth` variable). To make the static verifier happy,
+    we need to check that the data, summed up with the size of the `eth` pointer,
+    does not exceed the space where `data_end` is. After that, we can go one level
+    inward and get the protocol type from the `h_proto` member in `*eth`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE28]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'After we have the protocol, we need to convert it from the host to check whether
+    it is equal to the IPv4 protocol, the one we are interested in, and if it is,
+    we check whether the inner packet is HTTP using our own `is_http` function. If
+    it is, we print a debug message stating that we found an HTTP packet:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE29]'
+  prefs: []
+  type: TYPE_PRE
+- en: The `is_http` function is similar to our classifier function, but it will start
+    from an `skb` by knowing already the start offset for the IPv4 protocol data.
+    As we did earlier, we need to do a check before accessing the IP protocol data
+    with the `*iph` variable to let the static verifier know our intentions.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'When that’s done, we just check whether the IPv4 header contains a TCP packet
+    so that we can go ahead. If the packet’s protocol is of type `IPPROTO_TCP`, we
+    need to do some more checks again to get the actual TCP header in the `*tcph`
+    variable:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE30]'
+  prefs: []
+  type: TYPE_PRE
+- en: Now that the TCP header is ours, we can go ahead and load the first seven bytes
+    from the `skb` struct at the offset of the TCP payload `poffset`. At this point
+    we can check whether the bytes array is a sequence saying `HTTP`; then we know
+    that the Layer 7 protocol is HTTP, and we can return 1—otherwise, we return zero.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As you can see, our program is simple. It will basically allow everything, and
+    when receiving an HTTP packet, it will let us know with a debugging message.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You can compile the program with Clang, using the `bpf` target, as we did before
+    with the socket filter example. We cannot compile this program for Traffic Control
+    in the same way; this will generate an *ELF* file `classifier.o` that will be
+    loaded by `tc` this time and not by our own custom loader:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE31]'
+  prefs: []
+  type: TYPE_PRE
+- en: Now we can install the program on the interface we want our program to operate
+    on; in our case, it was `eth0`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The first command will replace the default qdisc for the `eth0` device, and
+    the second one will actually load our `cls_bpf` classifier into that `ingress`
+    classful qdisc. This means that our program will handle all traffic going into
+    that interface. If we want to handle outgoing traffic, we would need to use the
+    `egress` qdisc instead:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE32]'
+  prefs: []
+  type: TYPE_PRE
+- en: Our program is loaded now—what we need is to send some HTTP traffic to that
+    interface.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To do that you need any HTTP server on that interface. Then you can `curl` the
+    interface IP.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In case you don’t have one, you can obtain a test HTTP server using Python
+    3 with the `http.server` module. It will open the port 8000 with a directory listing
+    of the current working directory:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE33]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'At this point you can call the server with `curl`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE34]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'After doing that you should see your HTTP response from the HTTP server. You
+    can now get your debugging messages (created with `trace_printk`), confirming
+    that using the dedicated `tc` command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE35]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The output will be something like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE36]'
+  prefs: []
+  type: TYPE_PRE
+- en: Congratulations! You just made your first BPF Traffic Control classifier.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Instead of using a debugging message like we did in this example, you could
+    use a map to communicate to user-space that the interface just received an HTTP
+    packet. We leave this as an exercise for you to do. If you look at `classifier.c`
+    in the previous example, you can get an idea of how to do that by looking at how
+    we used the map `countmap` there.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'At this point, what you might want is to unload the classifier. You can do
+    that by deleting the ingress qdisc that you just attached to the interface:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE37]'
+  prefs: []
+  type: TYPE_PRE
+- en: Notes on act_bpf and how cls_bpf is different
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: You might have noticed that another object exists for BPF programs called `act_bpf`.
+    It turns out that `act_bpf` is an action, not a classifier. This makes it operationally
+    different because actions are objects attached to filters, and because of this
+    it is not able to perform filtering directly, requiring Traffic Control to consider
+    all the packets first. For this property, it is usually preferable to use the
+    `cls_bpf` classifier instead of the `act_bpf` action.
+  prefs: []
+  type: TYPE_NORMAL
+- en: However, because `act_bpf` can be attached to any classifier, there might be
+    cases for which you find it useful to just reuse a classifier you already have
+    and attach a BPF program to it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Differences Between Traffic Control and XDP
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Even though the Traffic Control `cls_bpf` and XDP programs look very similar,
+    they are pretty different. XDP programs are executed earlier in the ingress data
+    path, before entering into the main kernel network stack, so our program does
+    not have access to a socket buffer struct `sk_buff` like with `tc`. XDP programs
+    instead take a different structure called `xdp_buff`, which is an eager representation
+    of the packet without metadata. All this comes with advantages and disadvantages.
+    For example, being executed even before the kernel code, XDP programs can drop
+    packets in an efficient way. Compared to Traffic Control programs, XDP programs
+    can be attached only to traffic in ingress to the system.
+  prefs: []
+  type: TYPE_NORMAL
+- en: At this point, you might be asking yourself when it’s an advantage to use one
+    instead of the other. The answer is that because of their nature of not containing
+    all the kernel-enriched data structures and metadata, XDP programs are better
+    for use cases covering OSI layers up to Layer 4\. But let’s not spoil all the
+    content of the next chapter!
+  prefs: []
+  type: TYPE_NORMAL
+- en: Conclusion
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: It should now be pretty clear to you that BPF programs are useful for getting
+    visibility and control at different levels of the networking data path. You’ve
+    seen how to take advantage of them to filter packets using high-level tools that
+    generate a BPF assembly. Then we loaded a program to a network socket, and in
+    the end we attached our programs to the Traffic Control ingress qdisc to do traffic
+    classification using BPF programs. In this chapter we also briefly discussed XDP,
+    but be prepared, because in [Chapter 7](ch07.html#express_data_path_XDP) we cover
+    the topic in its entirety by expanding on how XDP programs are constructed, what
+    kind of XDP programs there are, and how to write and test them.
+  prefs: []
+  type: TYPE_NORMAL

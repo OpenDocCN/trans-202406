@@ -1,0 +1,1332 @@
+- en: Chapter 9\. Advanced Custom Resources
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'In this chapter we walk you through advanced topics about CRs: versioning,
+    conversion, and admission controllers.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: With multiple versions, CRDs become much more serious and are much less distinguishable
+    from Golang-based API resources. Of course, at the same time the complexity considerably
+    grows, both in development and maintenance but also operationally. We call these
+    features “advanced” because they move CRDs from being a manifest (i.e., purely
+    declarative) into the Golang world (i.e., into a real software development project).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Even if you do not plan to build a custom API server and instead intend to directly
+    switch to CRDs, we highly recommend not skipping [Chapter 8](ch08.html#ch_custom-api-servers).
+    Many of the concepts around advanced CRDs have direct counterparts in the world
+    of custom API servers and are motivated by them. Reading [Chapter 8](ch08.html#ch_custom-api-servers)
+    will make it much easier to understand this chapter as well.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The code for all the examples shown and discussed here is available via the
+    [GitHub repository](http://bit.ly/2RBSjAl).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Custom Resource Versioning
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'In [Chapter 8](ch08.html#ch_custom-api-servers) we saw how resources are available
+    through different API versions. In the example of the custom API server, the pizza
+    resources exist in version `v1alpha1` and `v1beta1` at the same time (see [“Example:
+    A Pizza Restaurant”](ch08.html#aggregation-example)). Inside of the custom API
+    server, each object in a request is first converted from the API endpoint version
+    to an internal version (see [“Internal Types and Conversion”](ch08.html#aggregated-apiserver-development-internal-types)
+    and [Figure 8-5](ch08.html#aggregation-conversions-figure)) and then converted
+    back to an external version for storage and to return a response. The conversion
+    mechanism is implemented by conversion functions, some of them manually written,
+    and some generated (see [“Conversions”](ch08.html#aggregated-apiserver-conversion)).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Versioning APIs is a powerful mechanism to adapt and improve APIs while keeping
+    compatibility for older clients. Versioning plays a central role everywhere in
+    Kubernetes to promote alpha APIs to beta and eventually to general availability
+    (GA). During this process APIs often change structure or are extended.
+  prefs: []
+  type: TYPE_NORMAL
+- en: For a long time, versioning was a feature available only through aggregated
+    API servers as presented in [Chapter 8](ch08.html#ch_custom-api-servers). Any
+    serious API needs versioning eventually, as it is not acceptable to break compatibility
+    with consumers of the API.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Luckily, versioning for CRDs has been added very recently to Kubernetes—as alpha
+    in Kubernetes 1.14 and promoted to beta in 1.15\. Note that conversion requires
+    OpenAPI v3 validation schemas that are *structural* (see [“Validating Custom Resources”](ch04.html#crd-validation)).
+    Structural schema are basically what tools like Kubebuilder produce anyway. We
+    will discuss the technical details in [“Structural Schemas”](#crd-structural-schema).
+  prefs: []
+  type: TYPE_NORMAL
+- en: We’ll show you how versioning works here as it will play a central role in many
+    serious applications of CRs in the near future.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Revising the Pizza Restaurant
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: To learn how CR conversion works, we’ll reimplement the pizza restaurant example
+    from [Chapter 8](ch08.html#ch_custom-api-servers), this time purely with CRDs—that
+    is, without the aggregated API server involved.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'For conversion, we will concentrate on the `Pizza` resource:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This object should have a different representation of the toppings slice in
+    the `v1beta1` version:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: While in `v1alpha1`, repetition of toppings is used to represent an extra cheese
+    pizza, we do this in `v1beta1` by using a quantity field for each topping. The
+    order of toppings does not matter.
+  prefs: []
+  type: TYPE_NORMAL
+- en: We want to implement this translation—converting from `v1alpha1` to `v1beta1`
+    and back. Before we do so, though, let’s define the API as a CRD. Note here that
+    we cannot have an aggregated API server and CRDs of the same GroupVersion in the
+    same cluster. So make sure that the APIServices from [Chapter 8](ch08.html#ch_custom-api-servers)
+    are removed before continuing with the CRDs here.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The CRD defines two versions: `v1alpha1` and `v1beta1`. We set the former as
+    the storage version (see [Figure 9-1](#crd-conversion-resource-versioning)), meaning
+    every object to be stored in `etcd` is first converted to `v1alpha1`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Conversion and storage version](assets/prku_0901.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 9-1\. Conversion and storage version
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: As the CRD is defined currently, we can create an object as `v1alpha1` and retrieve
+    it as `v1beta1`, but both API endpoints return the same object. This is obviously
+    not what we want. But we’ll improve this very soon.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'But before we do that, we’ll set up the CRD in a cluster and create a margherita
+    pizza:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'We register the preceding CRD and then create the margherita object:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'As expected, we get back the same object for both versions:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Kubernetes uses the canonical version order; that is:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`v1alpha1`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Unstable: might go away or change any time and often disabled by default.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`v1beta1`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Towards stable: exists at least in one release in parallel to `v1`; contract:
+    no incompatible API changes.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`v1`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Stable or generally available (GA): will stay for good, and will be compatible.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The GA versions come first in that order, then the betas, and then the alphas,
+    with the major version ordered from high to low and the same for the minor version.
+    Every CRD version not fitting into this pattern comes last, ordered alphabetically.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In our case, the preceding `kubectl get pizza` therefore returns `v1beta1`,
+    although the created object was in version `v1alpha1`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Conversion Webhook Architecture
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Now let’s add the conversion from `v1alpha1` to `v1beta1` and back. CRD conversions
+    are implemented via webhooks in Kubernetes. [Figure 9-2](#crd-conversion-webhook)
+    shows the flow:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The client (e.g., our `kubectl get pizza margherita`) requests a version.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: '`etcd` has stored the object in some version.'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: If the versions do not match, the storage object is sent to the webhook server
+    for conversion. The webhook returns a response with the converted object.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: The converted object is sent back to the client.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: '![Conversion Webhook](assets/prku_0902.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 9-2\. Conversion webhook
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'We have to implement this webhook server. Before doing so, let’s look at the
+    webhook API. The Kubernetes API server sends a `ConversionReview` object in the
+    API group `apiextensions.k8s.io/v1beta1`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: The request field is set in the payload sent to the webhook. The response field
+    is set in the response.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The request looks like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The `DesiredAPIVersion` string has the usual `apiVersion` format we know from
+    `TypeMeta`: *`group/version`*.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The objects field has a number of objects. It is a slice because for one list
+    request for pizzas, the webhook will receive one conversion request, with this
+    slice being all objects for the list request.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The webhook converts and sets the response:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: The result status tells the Kubernetes API server whether the conversion was
+    successful.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'But when in the request pipeline is our conversion webhook actually called?
+    What kind of input object can we expect? To understand this better, take a look
+    at the general request pipeline in [Figure 9-3](#crd-conversion-crd-webhook-calls):
+    all those solid and striped circles are where conversion takes place in the *k8s.io/apiserver*
+    code.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Conversion webhook calls for CRs](assets/prku_0903.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 9-3\. Conversion webhook calls for CRs
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'In contrast to aggregated custom API servers (see [“Internal Types and Conversion”](ch08.html#aggregated-apiserver-development-internal-types)),
+    CRs do not use internal types but convert directly between the external API versions.
+    Hence, only those yellow circles are actually doing conversions in [Figure 9-4](#crd-conversion-crd-pipeline);
+    the solid circles are NOOPs for CRDs. In other words: CRD conversion takes place
+    only from and to `etcd`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Where conversion takes place for CRs](assets/prku_0904.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 9-4\. Where conversion takes place for CRs
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Therefore, we can assume our webhook will be called from those two places in
+    the request pipeline (refer to [Figure 9-3](#crd-conversion-crd-webhook-calls)).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Also note that patch requests do automatic retries on conflict (updates cannot
+    retry, and they respond with errors directly to the caller). Each retry consists
+    of a read and write to `etcd` (the yellow circles in [Figure 9-3](#crd-conversion-crd-webhook-calls))
+    and therefore leads to two calls to the webhook per iteration.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'All the warnings about the criticality of conversion in [“Conversions”](ch08.html#aggregated-apiserver-conversion)
+    apply here as well: conversions must be correct. Bugs quickly lead to data loss
+    and inconsistent behavior of the API.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Before we start implementing the webhook, some final words about what the webhook
+    can do and must avoid:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The order of the objects in request and response must not change.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`ObjectMeta` with the exception of labels and annotation must not be mutated.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Conversion is all or nothing: either all objects are successfully converted
+    or all fail.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Conversion Webhook Implementation
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'With the theory behind us, we are ready to start the implementation of the
+    webhook project. You can find the source at [the repository](http://bit.ly/2IHXKLn),
+    which includes:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: A webhook implementation as an HTTPS web server
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'A number of endpoints:'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '*/convert/v1beta1/pizza* converts a pizza object between `v1alpha1` and `v1beta1`.'
+  prefs:
+  - PREF_IND
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '*/admit/v1beta1/pizza* defaults the `spec.toppings` field to mozzarella, tomato,
+    salami.'
+  prefs:
+  - PREF_IND
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '*/validate/v1beta1/pizza* verifies that each specified topping has a corresponding
+    toppings object.'
+  prefs:
+  - PREF_IND
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The last two endpoints are admission webhooks, which will be discussed in detail
+    in [“Admission Webhooks”](#admission-webhooks). The same webhook binary will serve
+    both admission and conversion.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `v1beta1` in these paths should not be confused with `v1beta1` of our restaurant
+    API group, but it is meant as the `apiextensions.k8s.io` API group version we
+    support as a webhook. Someday `v1` of that webhook API will be supported,^([1](ch09.html#idm46336844085864))
+    at which time we’ll add the corresponding `v1` as another endpoint, in order to
+    support old (as of today) and new Kubernetes clusters. It is possible to specify
+    inside the CRD manifest which versions a webhook supports.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Let’s look into how this conversion webhook actually works. Afterwards we will
+    take a deeper dive into how to deploy the webhook into a real cluster. Note again
+    that webhook conversion is still alpha in 1.14 and must be enabled manually using
+    the `CustomResourceWebhookConversion` feature gate, but it is available as beta
+    in 1.15.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Setting Up the HTTPS Server
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The first step is to start a web server with support for transport layer security,
+    or TLS (i.e., HTTPS). Webhooks in Kubernetes require HTTPS. The conversion webhook
+    even requires certificates that are successfully checked by the Kubernetes API
+    server against the CA bundle provided in the CRD object.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the example project, we make use of the secure serving library that is part
+    of the *k8s.io/apiserver*. It provides all TLS flags and behavior you might be
+    used to from deploying a `kube-apiserver` or an aggregated API server binary.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The *k8s.io/apiserver* secure serving code follows the `options-config` pattern
+    (see [“Options and Config Pattern and Startup Plumbing”](ch08.html#aggregated-apiserver-development-options-config)).
+    It is very easy to embed that code into your own binary:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'In the main function of the binary, this `Options` struct is instantiated and
+    wired to a flag set:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'In place of the three dots, we set up the HTTP multiplexer with our three paths
+    as follows:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: As the pizza validation webhook at the path */validate/v1beta1/pizza* has to
+    know the existing topping objects in the cluster, we instantiate a shared informer
+    factory for the `restaurant.programming-kubernetes.info` API group.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Now we’ll look at the actual conversion webhook implementation behind `conversion.Serve`.
+    It is a normal Golang HTTP handler function, meaning it gets a request and a response
+    writer as arguments.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The request body contains a `ConversionReview` object from the API group `apiextensions.k8s.io/v1beta1`.
+    Hence, we have to first read the body from the request, and then decode the byte
+    slice. We do this by using a deserializer from API Machinery:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: This code makes use of the codec factory `codecs`, which is derived from a scheme.
+    This scheme has to include the types of *apiextensions.k8s.io/v1beta1*. We also
+    add the types of our restaurant API group. The passed `ConversionReview` object
+    will have our pizza type embedded in a `runtime.RawExtension` type—more about
+    that in a second.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'First let’s create our scheme and the codec factory:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'A `runtime.RawExtension` is a wrapper for Kubernetes-like objects embedded
+    in a field of another object. Its structure is actually very simple:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE14]'
+  prefs: []
+  type: TYPE_PRE
+- en: In addition, `runtime.RawExtension` has special JSON and protobuf marshaling
+    two methods. Moreover, there is special logic around the conversion to `runtime.Object`
+    on the fly, when converting to internal types—that is, automatic encoding and
+    decoding.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In this case of CRDs, we don’t have internal types, and therefore that conversion
+    magic does not play a role. Only `RawExtension.Raw` is filled with a JSON byte
+    slice of the pizza object sent to the webhook for conversion. Thus, we will have
+    to decode this byte slice. Note again that one `ConversionReview` potentially
+    carries a number of objects, such that we have to loop over all of them:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE15]'
+  prefs: []
+  type: TYPE_PRE
+- en: The `convert` call does the actual conversion of `in.Object`, with the desired
+    API version as the target version. Note here that we break the loop immediately
+    when the first error occurs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Finally, we set the `Response` field in the `ConversionReview` object and write
+    it back as the response body of the request using API Machinery’s response writer,
+    which again uses our codec factory to create a serializer:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE16]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Now, we have to implement the actual pizza conversion. After all this plumbing
+    above, the conversion algorithm is the easiest part. It just checks that we actually
+    got a pizza object of the known versions and then does the conversion from `v1beta1`
+    to `v1alpha1` and vice versa:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE17]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note that in both directions of the conversion, we just copy `TypeMeta` and
+    `ObjectMeta`, change the API version to the desired one, and then convert the
+    toppings slice, which is actually the only part of the objects which structurally
+    differs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If there are more versions, another two-way conversion is necessary between
+    all of them. Alternatively, of course, we could use a hub version as in aggregated
+    API servers (see [“Internal Types and Conversion”](ch08.html#aggregated-apiserver-development-internal-types)),
+    instead of implementing conversions from and to all supported external versions.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Deploying the Conversion Webhook
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: We now want to deploy the conversion webhook. You can find all the manifests
+    on [GitHub](http://bit.ly/2KEx4xo).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Conversion webhooks for CRDs are launched in the cluster and put behind a service
+    object, and that service object is referenced by the conversion webhook specification
+    in the CRD manifest:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE18]'
+  prefs: []
+  type: TYPE_PRE
+- en: The CA bundle must match the serving certificate used by the webhook. In our
+    example project, we use a [Makefile](http://bit.ly/2FukVac) to generate certificates
+    using OpenSSL and plug them into the manifests using text replacement.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note here that the Kubernetes API server assumes that the webhook supports all
+    specified versions of the CRD. There is also only one such webhook possible per
+    CRD. But as CRDs and conversion webhooks are usually owned by the same team, this
+    should be enough.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Also note that the service port must be 443 in the current *apiextensions.k8s.io/v1beta1*
+    API. The service can map this, however, to any port used by the webhook pods.
+    In our example, we map 443 to 8443, served by the webhook binary.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Seeing Conversion in Action
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Now that we understand how the conversion webhook works and how it is wired
+    into the cluster, let’s see it in action.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'We assume you’ve checked out the example project. In addition, we assume that
+    you have a cluster with webhook conversion enabled (either via feature gate in
+    a 1.14 cluster or through a 1.15+ cluster, which has webhook conversion enabled
+    by default). One way to get such a cluster is via the [kind project](http://bit.ly/2X75lvS),
+    which provides support for Kubernetes 1.14.1 and a local *kind-config.yaml* file
+    to enable the alpha feature gate for webhook conversion ([“What Does Programming
+    Kubernetes Mean?”](ch01.html#programming-kubernetes-meaning) linked a number of
+    other options for development clusters):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE19]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Then we can create a cluster:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE20]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Now we can deploy [our manifests](http://bit.ly/2KEx4xo):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE21]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'These manifests contain the following files:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*ns.yaml*'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Creates the `pizza-crd` namespace.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*pizza-crd.yaml*'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Specifies the pizza resource in the `restaurant.programming-kubernetes.info`
+    API group, with the `v1alpha1` and `v1beta1` versions, and the webhook conversion
+    configuration as shown previously.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*topping-crd.yaml*'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Specifies the toppings CR in the same API group, but only in the `v1alpha1`
+    version.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*sa.yaml*'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Introduces the `webhook` service account.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*rbac.yaml*'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Defines a role to read, list, and watch toppings.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*rbac-bind.yaml*'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Binds the earlier RBAC role to the `webhook` service account.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*service.yaml*'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Defines the `webhook` services, mapping port 443 to 8443 of the webhook pods.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*serving-cert-secret.yaml*'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Contains the serving certificate and private key to be used by the webhook pods.
+    The certificate is also used directly as the CA bundle in the preceding pizza
+    CRD manifest.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*deployment.yaml*'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Launches webhook pods, passing `--tls-cert-file` and `--tls-private-key` the
+    serving certificate secret.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'After this we can create a margherita pizza finally:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE22]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Now, with the conversion webhook in place, we can retrieve the same object
+    in both versions. First explicitly in the `v1alpha1` version:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE23]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Then the same object as `v1beta1` shows the different toppings structure:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE24]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Meanwhile, in the log of the webhook pod we see this conversion call:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE25]'
+  prefs: []
+  type: TYPE_PRE
+- en: Hence, the webhook is doing its job as expected.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Admission Webhooks
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: In [“Use Cases for Custom API Servers”](ch08.html#uc-custom-api-server) we discussed
+    the use cases in which an aggregated API server is a better choice than using
+    CRs. A lot of the reasons given are about having the freedom to implement certain
+    behavior using Golang instead of being restricted to declarative features in CRD
+    manifests.
+  prefs: []
+  type: TYPE_NORMAL
+- en: We have seen in the previous section how Golang is used to build CRD conversion
+    webhooks. A similar mechanism is used to add custom admission to CRDs, again in
+    Golang.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Basically we have the same freedom as with custom admission plug-ins in aggregated
+    API servers (see [“Admission”](ch08.html#aggregated-apiserver-development-admission)):
+    there are mutating and validating admission webhooks, and they are called at the
+    same position as for native resources, as shown in [Figure 9-5](#crd-admission-pipeline).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Admission in the CR request pipeline](assets/prku_0905.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 9-5\. Admission in the CR request pipeline
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: We saw CRD validation based on OpenAPI in [“Validating Custom Resources”](ch04.html#crd-validation).
+    In [Figure 9-5](#crd-admission-pipeline), validation is done in the box labeled
+    “Validation.” The validating admission webhooks are called after that, the mutating
+    admission webhooks before.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The admission webhooks are put nearly at the end of the admission plug-in order,
+    before quota. Admission webhooks are beta in Kubernetes 1.14 and therefore available
+    in most clusters.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: For v1 of the admission webhooks API, it is planned to allow up to two passes
+    through the admission chain. This means that an earlier admission plug-in or webhook
+    can depend on the output of later plug-ins or webhooks, to a certain degree. So,
+    in the future this mechanism will get even more powerful.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Admission Requirements in the Restaurant Example
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'The restaurant example uses admission for multiple things:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`spec.toppings` defaults if it is `nil` or empty to mozzarella, tomato, and
+    salami.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Unknown fields should be dropped from the CR JSON and not persisted in `etcd`.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`spec.toppings` must contain only toppings that have a corresponding topping
+    object.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The first two use cases are mutating; the third use case is purely validating.
+    Therefore, we will use one mutating webhook and one validating webhook to implement
+    those steps.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Work is in progress on [native defaulting via OpenAPI v3 validation schemas](http://bit.ly/2ZFH8JY).
+    OpenAPI has a `default` field, and the API server will apply that in the future.
+    Moreover, dropping unknown fields will become the standard behavior for every
+    resource, done by the Kubernetes API server through a [mechanism called pruning](http://bit.ly/2Xzt2wm).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Pruning is available as beta in Kubernetes 1.15\. Defaulting is planned to be
+    available as beta in 1.16\. When both features are available in the target cluster,
+    the two use cases from the preceding list can be implemented without any webhook
+    at all.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Admission Webhook Architecture
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Admission webhooks are structurally very similar to the conversion webhooks
+    we saw earlier in the chapter.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'They are deployed in the cluster, put behind a service mapping port 443 to
+    some port of the pods, and called using a review object, `AdmissionReview` in
+    the API group `admission.k8s.io/v1beta1`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE26]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The `AdmissionRequest` contains all the information we are used to from the
+    admission attributes (see [“Implementation”](ch08.html#admission-plug-in-implementation)):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE27]'
+  prefs: []
+  type: TYPE_PRE
+- en: The same `AdmissionReview` object is used for both mutating and validating admission
+    webhooks. The only difference is that in the mutating case, the `AdmissionResponse`
+    can have a field `patch` and `patchType`, to be applied inside the Kubernetes
+    API server after the webhook response has been received there. In the validating
+    case, these two fields are kept empty on response.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The most important field for our purposes here is the `Object` field, which—as
+    in the preceding conversion webhook—uses the `runtime.RawExtension` type to store
+    a pizza object.
+  prefs: []
+  type: TYPE_NORMAL
+- en: We also get the old object for update requests and could, say, check for fields
+    that are meant to be read-only but are changed in a request. We don’t do this
+    here in our example. But you will encounter many cases in Kubernetes where such
+    logic is implemented—for example, for most fields of a pod, as you can’t change
+    the command of a pod after it is created.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The patch returned by the mutating webhook must be of type JSON `Patch` (see
+    RFC 6902) in Kubernetes 1.14\. This patch describes how the object should be modified
+    to fulfill the required invariant.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note that it is best practice to validate every mutating webhook change in a
+    validating webhook at the very end, at least if those enforced properties are
+    significant for the behavior. Imagine some other mutating webhook touches the
+    same fields in an object. Then you cannot be sure that the mutating changes will
+    survive until the end of the mutating admission chain.
+  prefs: []
+  type: TYPE_NORMAL
+- en: There is no order currently in mutating webhooks other than alphabetic order.
+    There are ongoing discussions to change this in one way or another in the future.
+  prefs: []
+  type: TYPE_NORMAL
+- en: For validating webhooks the order does not matter, obviously, and the Kubernetes
+    API server even calls validating webhooks in parallel to reduce latency. In contrast,
+    mutating webhooks add latency to every request that passes through them, as they
+    are called sequentially.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Common latencies—of course heavily depending on the environment—are around 100ms.
+    So running many webhooks in sequence leads to considerable latencies that the
+    user will experience when creating or updating objects.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Registering Admission Webhooks
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Admission webhooks are not registered in the CRD manifest. The reason is that
+    they apply not only to CRDs, but to any kind of resource. You can even add custom
+    admission webhooks to standard Kubernetes resources.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Instead there are registration objects: `MutatingWebhookRegistration` and `ValidatingWebhookRegistration`.
+    They differ only in the kind name:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE28]'
+  prefs: []
+  type: TYPE_PRE
+- en: This registers our `pizza-crd` webhook from the beginning of the chapter for
+    mutating admission for our two versions of the resource `pizza`, the API group
+    `restaurant.programming-kubernetes.info`, and the HTTP verbs `CREATE` and `UPDATE`
+    (which includes patches as well).
+  prefs: []
+  type: TYPE_NORMAL
+- en: There are further ways in webhook configurations to restrict the matching resources—for
+    example, a namespace selector (to exclude, e.g., a control plane namespace to
+    avoid bootstrapping issues) and more advanced resource patterns with wildcards
+    and subresources.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Last but not least is a failure mode, which can be either `Fail` or `Ignore`.
+    It specifies what to do if the webhook cannot be reached or fails for other reasons.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Admission webhooks can break clusters if they are deployed in the wrong way.
+    Admission webhook matching core types can make the whole cluster inoperable. Special
+    care must be taken to call admission webhooks for non-CRD resources.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Specifically, it is good practice to exclude the control plane and the webhook
+    resources themselves from the webhook.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Implementing an Admission Webhook
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'With the work we’ve done on the conversion webhook in the beginning of the
+    chapter, it is not hard to add admission capabilities. We also saw that the paths
+    */admit/v1beta1/pizza* and */validate/v1beta1/pizza* are registered in the main
+    function of the `pizza-crd-webhook` binary:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE29]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The first part of the two HTTP handler implementations looks nearly the same
+    as for the conversion webhook:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE30]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'In the case of the validating webhook, we have to wire the informer (used to
+    check that toppings exist in the cluster). We return an internal error as long
+    as the informer is not synced. An informer that is not synced has incomplete data,
+    so the toppings might not be known and the pizza would be rejected although they
+    are valid:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE31]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'As in the webhook conversion case, we have set up the scheme and the codec
+    factory with the admission API group and our restaurant API group:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE32]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'With these two, we decode the embedded pizza object (this time only one, no
+    slice) from the `AdmissionReview`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE33]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Then we can do the actual mutating admission (the defaulting of `spec.toppings`
+    for both API versions):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE34]'
+  prefs: []
+  type: TYPE_PRE
+- en: Alternatively, we could use the conversion algorithms from the conversion webhook
+    and then implement defaulting only for one of the versions. Both approaches are
+    possible, and which one makes more sense depends on the context. Here, the defaulting
+    is simple enough to implement it twice.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The final step is to compute the patch—the difference between the original
+    object (stored in `orig` as JSON) and the new defaulted one:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE35]'
+  prefs: []
+  type: TYPE_PRE
+- en: We use the [JSON-Patch library](http://bit.ly/2IKxwIk) (a fork of [Matt Baird’s](http://bit.ly/2xfBIsN)
+    with [critical fixes](http://bit.ly/2XxKfWP)) to derive the patch from the original
+    object `orig` and the modified object `bs`, both passed as JSON byte slices. Alternatively,
+    we could operate directly on untyped JSON data and create the JSON-Patch manually.
+    Again, it depends on the context. Using a diff library is convenient.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Then, as in the webhook conversion, we conclude by writing the response to
+    the response writer, using the codec factory created previously:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE36]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The validating webhook is very similar, but it uses the toppings lister from
+    the shared informer to check for the existence of the topping objects:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE37]'
+  prefs: []
+  type: TYPE_PRE
+- en: Admission Webhook in Action
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'We deploy the two admission webhooks by creating the two registration objects
+    in the cluster:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE38]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'After this, we can’t create pizzas with unknown toppings anymore:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE39]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Meanwhile, in the webhook log we see:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE40]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'After creating the toppings in the example folder, we can create the margherita
+    pizza again:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE41]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Last but not least, let’s check that defaulting works as expected. We want
+    to create an empty pizza:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE42]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This is supposed to be defaulted to a salami pizza, and it is:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE43]'
+  prefs: []
+  type: TYPE_PRE
+- en: Voilà, a salami pizza with all the toppings that we expect. Enjoy!
+  prefs: []
+  type: TYPE_NORMAL
+- en: Before concluding the chapter, we want to look toward an `apiextensions.k8s.io/v1`
+    API group version (i.e., nonbeta, general availability) of CRDs—namely, the introduction
+    of structural schemas.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Structural Schemas and the Future of CustomResourceDefinitions
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'From Kubernetes 1.15 on, the OpenAPI v3 validation schema (see [“Validating
+    Custom Resources”](ch04.html#crd-validation)) is getting a more central role for
+    CRDs in the sense that it will be mandatory to specify a schema if any of these
+    new features is used:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: CRD conversion (see [Figure 9-2](#crd-conversion-webhook))
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Pruning (see [“Pruning Versus Preserving Unknown Fields”](#crd-pruning))
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Defaulting (see [“Default Values”](#crd-defaulting))
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: OpenAPI Schema [Publishing](http://bit.ly/2RzeA1O)
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Strictly speaking, the definition of a schema is still optional and every existing
+    CRD will keep working, but without a schema your CRD is excluded from any new
+    feature.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In addition, the specified schema must follow certain rules to enforce that
+    the specified types are actually sane in the sense of adhering to the [Kubernetes
+    API conventions](http://bit.ly/2Nfd9Hn). We call these *structural schema*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Structural Schemas
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'A structural schema is an OpenAPI v3 validation schema (see [“Validating Custom
+    Resources”](ch04.html#crd-validation)) that obeys the following rules:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The schema specifies a nonempty type (via `type` in OpenAPI) for the root,
+    for each specified field of an object node (via `properties` or `additionalProperties`
+    in OpenAPI), and for each item in an array node (via `items` in OpenAPI), with
+    the exception of:'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'A node with `x-kubernetes-int-or-string: true`'
+  prefs:
+  - PREF_IND
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'A node with `x-kubernetes-preserve-unknown-fields: true`'
+  prefs:
+  - PREF_IND
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: For each field in an object and each item in an array, which is set within an
+    `allOf`, `anyOf`, `oneOf`, or `not`, the schema also specifies the field/item
+    outside of those logical junctors.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'The schema does not set `description`, `type`, `default`, `additionProperties`,
+    or `nullable` within an `allOf`, `anyOf`, `oneOf`, or `not`, with the exception
+    of the two patterns for `x-kubernetes-int-or-string: true` (see [“IntOrString
+    and RawExtensions”](#intorstring-section)).'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: If `metadata` is specified, then only restrictions on `metadata.name` and `metadata.generateName`
+    are allowed.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'Here is an example that is not structural:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE44]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'It is not a structural schema because of the following violations:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The type at the root is missing (rule 1).
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The type of `foo` is missing (rule 1).
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`bar` inside of `anyOf` is not specified outside (rule 2).'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`bar`’s `type` is within `anyOf` (rule 3).'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The description is set within `anyOf` (rule 3).
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`metadata.finalizer` might not be restricted (rule 4).'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'In contrast, the following, corresponding schema is structural:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE45]'
+  prefs: []
+  type: TYPE_PRE
+- en: Violations of the structural schema rules are reported in the `NonStructural`
+    condition in the CRD.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Verify for yourself that the schema of the `cnat` example in [“Validating Custom
+    Resources”](ch04.html#crd-validation) and the schemas in the [pizza CRD example](http://bit.ly/31MrFcO)
+    are indeed structural.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Pruning Versus Preserving Unknown Fields
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: CRDs traditionally store any (possibly validated) JSON as is in `etcd`. This
+    means that unspecified fields (if there is an OpenAPI v3 validation schema at
+    all) will be persisted. This is in contrast to native Kubernetes resources like
+    a pod. If the user specifies a field `spec.randomField`, this will be accepted
+    by the API server HTTPS endpoint but dropped (we call this *pruning*) before writing
+    that pod to `etcd`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If a structural OpenAPI v3 validation schema is defined (either in the global
+    `spec.validation.openAPIV3Schema` or for each version), we can enable pruning
+    (which drops unspecified fields on creation and on update) by setting `spec.preserveUnknownFields`
+    to `false`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s look at the `cnat` example.^([2](ch09.html#idm46336839329896)) With a
+    Kubernetes 1.15 cluster at hand, we enable pruning:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE46]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Then we try to create an instance with an unknown field:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE47]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'If we retrieve this object with `kubectl get at example-at`, we see that the
+    `someGarbage` value is dropped:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE48]'
+  prefs: []
+  type: TYPE_PRE
+- en: We say that `someGarbage` has been *pruned*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'As of Kubernetes 1.15, pruning is available in *apiextensions/v1beta1*, but
+    it defaults to off; that is, `spec.preserveUnknownFields` defaults to `true`.
+    In *apiextensions/v1*, no new CRD with `spec.preserveUnknownFields: true` will
+    be allowed to be created.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Controlling Pruning
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'With `spec.preserveUnknownField: false` in the CRD, pruning is enabled for
+    all CRs of that type and in all versions. It is possible, though, to opt out of
+    pruning for a JSON subtree via `x-kubernetes-preserve-unknown-fields: true` in
+    the OpenAPI v3 validation schema:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE49]'
+  prefs: []
+  type: TYPE_PRE
+- en: The field `json` can store any JSON value, without anything being pruned.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'It is possible to partially specify the permitted JSON:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE50]'
+  prefs: []
+  type: TYPE_PRE
+- en: With this approach, only object type values are allowed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Pruning is enabled again for each specified property (or `additionalProperties`):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE51]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'With this, the value:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE52]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'will be pruned to:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE53]'
+  prefs: []
+  type: TYPE_PRE
+- en: This means that the *`something`* field in the specified `spec` object is pruned
+    (because “spec” is specified), but everything outside is not. `status` is not
+    specified such that `status.*something*` is not pruned.
+  prefs: []
+  type: TYPE_NORMAL
+- en: IntOrString and RawExtensions
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: There are situations where structural schemas are not expressive enough. One
+    of those is a *polymorphic* field—one that can be of different types. We know
+    `IntOrString` from native Kubernetes API types.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'It is possible to have `IntOrString` in CRDs using the `x-kubernetes-int-or-string:
+    true` directive inside the schema. Similarly, `runtime.RawExtensions` can be declared
+    using the `x-kubernetes-embedded-object: true`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'For example:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE54]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This declares:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: A field called `intorstr` that holds either an integer or a string
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: A field called `embedded` that holds a Kubernetes-like object such as a complete
+    pod specification
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Refer to the [official CRD documentation](http://bit.ly/2Lnmw61) for all the
+    details about these directives.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The last topic we want to talk about that depends on structural schemas is defaulting.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Default Values
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: In native Kubernetes types, it is common to default certain values. Defaulting
+    used to be possible for CRDs only by way of mutating admission webhooks (see [“Admission
+    Webhooks”](#admission-webhooks)). As of Kubernetes 1.15, however, defaulting support
+    is added (see the [design document](http://bit.ly/2ZFH8JY)) to CRDs directly via
+    the OpenAPI v3 schema described in the previous section.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: As of 1.15 this is still an alpha feature, meaning it’s disabled by default
+    behind the feature gate `CustomResourceDefaulting`. But with promotion to beta,
+    probably in 1.16, it will become ubiquitous in CRDs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In order to default certain fields, just specify the default value via the `default`
+    keyword in the OpenAPI v3 schema. This is very useful when you are adding new
+    fields to a type.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Starting with the schema of the `cnat` example from [“Validating Custom Resources”](ch04.html#crd-validation),
+    let’s assume we want to make the container image customizable, but default to
+    a `busybox` image. For that we add the `image` field of string type to the OpenAPI
+    v3 schema and set the default to `busybox`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE55]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'If the user creates an instance without specifying the image, the value is
+    automatically set:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE56]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'On creation, this turns automatically into:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE57]'
+  prefs: []
+  type: TYPE_PRE
+- en: This looks super convenient and significantly improves the user experience of
+    CRDs. What’s more, all old objects persisted in `etcd` will automatically inherit
+    the new field when read from the API server.^([3](ch09.html#idm46336838744152))
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note that persisted objects in `etcd` will not be rewritten (i.e., migrated
+    automatically). In other words, on read the default values are only added on the
+    fly and are only persisted when the object is updated for another reason.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Summary
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Admission and conversion webhooks take CRDs to a completely different level.
+    Before these features, CRs were mostly used for small, not-so-serious use cases,
+    often for configuration and for in-house applications where API compatibility
+    was not that important.
+  prefs: []
+  type: TYPE_NORMAL
+- en: With webhooks CRs look much more like native resources, with a long lifecycle
+    and powerful semantics. We have seen how to implement dependencies between different
+    resources and how to set defaulting of fields.
+  prefs: []
+  type: TYPE_NORMAL
+- en: At this point you probably have a lot of ideas about where these features can
+    be used in existing CRDs. We are curious to see the innovations of the community
+    based on these features in the future.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([1](ch09.html#idm46336844085864-marker)) `apiextensions.k8s.io` and `admissionregistration.k8s.io`
+    are both scheduled to be promoted to v1 in Kubernetes 1.16.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([2](ch09.html#idm46336839329896-marker)) We use the `cnat` example instead
+    of the pizza example due to the simple structure of the former—for example, there’s
+    only one version. Of course, all of this scales to multiple versions (i.e., one
+    schema version).
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([3](ch09.html#idm46336838744152-marker)) For example, via `kubectl get ats
+    -o yaml`.
+  prefs: []
+  type: TYPE_NORMAL

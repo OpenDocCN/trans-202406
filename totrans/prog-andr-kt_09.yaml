@@ -1,0 +1,1348 @@
+- en: Chapter 9\. Channels
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: In the previous chapter, you learned how to create coroutines, cancel them,
+    and deal with exceptions. So you know that if task B requires the result of task
+    A, you can implement them as two suspending functions called sequentially. What
+    if task A produces a stream of values? `async` and suspending functions don’t
+    fit this use case. This is what `Channel`s^([1](ch09.html#idm46669744579616))
+    are meant for—making coroutines communicate. In this chapter you’ll learn in detail
+    what channels are and how to use them.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Using nothing but channels and coroutines, we can design complex asynchronous
+    logic using *communicating sequential processes* (CSP). What is CSP? Kotlin was
+    inspired by several existing programming languages, such as Java, C#, JavaScript,
+    Scala, and Groovy. Notably, Go (the language) inspired coroutines with its “goroutines.”
+  prefs: []
+  type: TYPE_NORMAL
+- en: In computer science, CSP is a concurrent programming language which was first
+    described by Tony Hoare in 1978\. It has evolved ever since, and the term CSP
+    is now essentially used to describe a programming style. If you’re familiar with
+    the Actor model, CSP is quite similar—although there are some differences. If
+    you’ve never heard of CSP, don’t worry—we’ll briefly explain the *idea* behind
+    it with practical examples. For now, you can think of CSP as a programming style.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As usual, we’ll start with a bit of theory, then implement a real-life problem.
+    In the end, we’ll discuss the benefits and trade-offs of CSP, using coroutines.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Channels Overview
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'Going back to our introductory example, imagine that one task asynchronously
+    produces a list of three `Item` instances (the producer), and another task acts
+    on each of those items (the consumer). Since the producer doesn’t return immediately,
+    you could implement it like the following `getItems` suspending function:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'As for the consumer, which consumes each of those items, you could simply implement
+    it like so:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Putting it all together:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: As you would expect, “Do something with ..” is printed three times. However,
+    in this case, we’re most interested in the order of execution. Let’s take a closer
+    look at what’s really happening, as shown in [Figure 9-1](#process_all_at_once_fig).
+  prefs: []
+  type: TYPE_NORMAL
+- en: In [Figure 9-1](#process_all_at_once_fig), item consumption only begins after
+    all items have been produced. Producing items might take quite some time, and
+    waiting for all of them to be produced isn’t acceptable in some situations. Instead,
+    we could act on each asynchronously produced item, as shown in [Figure 9-2](#process_once_after_another_fig).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Execution schema](assets/pawk_0901.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 9-1\. Process all at once.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '![Process one after another](assets/pawk_0902.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 9-2\. Process one after another.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: To achieve this, we can’t implement `getItems` as a suspending function like
+    before. A coroutine should act as a producer of `Item` instances, and send them
+    to the main coroutine. It’s a typical producer-consumer problem.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In [Chapter 5](ch05.html#thread_safety_id), we explained how `BlockingQueue`s
+    can be used to implement *work queues*—or, in this case, a data queue. As a reminder,
+    a `BlockingQueue` has blocking methods `put` and `take` to respectively insert
+    and take an object from the queue. When the queue is used as the only means of
+    communication between two threads (a producer and a consumer), it offers the great
+    benefit of avoiding a shared mutable state. Moreover, if the queue is bounded
+    (has a size limit), a too-fast producer will eventually get blocked in a `put`
+    call if consumers are too slow. This is known as back pressure: a blocked producer
+    gives the consumers the opportunity to catch up, thus releasing the producer.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Using a `BlockingQueue` as a communication primitive between coroutines wouldn’t
+    be a great idea, since a coroutine shouldn’t involve blocking calls. Instead,
+    coroutines can suspend. A `Channel` can be seen just like that: a queue with suspending
+    functions `send` and `receive`, as shown in [Figure 9-3](#channel_illustration_id).
+    A `Channel` also has nonsuspending counterparts: `trySend` and `tryReceive`. These
+    two methods are also nonblocking. `trySend` tries to immediately add an element
+    to the channel, and returns a wrapper class around the result. That wrapper class,
+    `ChannelResult<T>`, also indicates the success or the failure of the operation.
+    `tryReceive` tries to immediately retrieve an element from the channel, and returns
+    a `ChannelResult<T>` instance.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![A channel can send and receive](assets/pawk_0903.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 9-3\. Channel.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Like queues, `Channel`s come in several flavors. We’ll cover each of those `Channel`
+    variants with basic examples.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Rendezvous Channel
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: “Rendezvous” is a French word that means “appointment” or “a date”—it depends
+    on the context (we don’t mean `CoroutineContext` here). A rendezvous channel does
+    not have any buffer at all. An element is transferred from sender to receiver
+    only when `send` and `receive` invocations meet in time (rendezvous), so `send`
+    suspends until another coroutine invokes `receive`, and `receive` suspends until
+    another coroutine invokes `send`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As another way to put it, a rendezvous channel involves a back-and-forth communication
+    between producers (coroutines calling `send`) and consumers (coroutines calling
+    `receive`). There can’t be two consecutive `send`s without a `receive` in the
+    middle.
+  prefs: []
+  type: TYPE_NORMAL
+- en: By default, when you create a channel using `Channel<T>()`, you get a rendezvous
+    channel.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'We can use a rendezvous channel to correctly implement our previous example:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The output of this program is:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: In this example, the main coroutine starts a child coroutine with `launch`,
+    at [![1](assets/1.png)](#callout_1), then reaches [![2](assets/2.png)](#callout_2)
+    and suspends until some coroutine sends an `Item` instance in the channel. Shortly
+    after, the child coroutine sends the first item at [![3](assets/3.png)](#callout_3),
+    then reaches and suspends at the second `send` call at [![4](assets/4.png)](#callout_4)
+    until some coroutine is ready to receive an item. Subsequently, the main coroutine
+    (which is suspended at [![2](assets/2.png)](#callout_2)) is resumed and receives
+    the first item from the channel and prints it. Then the main coroutine reaches
+    [![5](assets/5.png)](#callout_5) and immediately receives the second item since
+    the child coroutine was already suspended in a `send` call. Immediately after,
+    the child coroutine continues its execution (prints “Done sending”).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Iterating over a Channel
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'A `Channel` can be iterated over, using a regular `for` loop. Note that since
+    channels aren’t regular collections,^([2](ch09.html#idm46669744209856)) you can’t
+    use `forEach` or other similar functions from the Kotlin Standard Library. Here,
+    channel iteration is a specific language-level feature that can only be done using
+    the `for`-loop syntax:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Implicitly, `x` is equal to `channel.receive()` at each iteration. Consequently,
+    a coroutine iterating over a channel could do so indefinitely, unless it contains
+    conditional logic to break the loop. Fortunately, there’s a standard mechanism
+    to break the loop: closing the channel. Here is an example:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This program has similar output, with a small difference:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: This time, “Done sending” appears before “Done!” This is because the main coroutine
+    only leaves the `channel` iteration when `channel` is closed. And that happens
+    when the child coroutine is done sending all elements.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Internally, closing a channel sends a special token into the channel to indicate
+    that no other elements will be sent. As items in the channel are consumed *serially*
+    (one after another), all items sent to the rendezvous channel before the close
+    special token are guaranteed to be sent to the receiver.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Beware—trying to call `receive` from an already-closed channel will throw a
+    `ClosedReceiveChannelException`. However, trying to iterate on such a channel
+    doesn’t throw any exception:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The output is: `Done!`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Other flavors of Channel
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'In the previous example, the `Channel` appears to be created using a class
+    constructor. If you look at the source code, you can see that it’s actually a
+    public function named with a capital C, to give the illusion that you’re using
+    a class constructor:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You can see that this `Channel` function has a `capacity` parameter that defaults
+    to `RENDEZVOUS`. For the record, if you step into the `RENDEZVOUS` declaration,
+    you can see that it’s equal to 0\. For each `capacity` value there is a corresponding
+    channel implementation. There are four different flavors of channels: rendezvous,
+    *unlimited*, *conflated*, and *buffered*. Don’t pay too much attention to the
+    concrete implementations (like `RendezvousChannel()`), because those classes are
+    internal and may change in the future. On the other hand, the values `RENDEZVOUS`,
+    `UNLIMITED`, `CONFLATED`, and `BUFFERED` are part of the public API.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: We’ll cover each of those channel types in the next sections.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Unlimited Channel
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: An *unlimited* channel has a buffer that is only limited by the amount of available
+    memory. Senders to this channel never suspend, while receivers only suspend when
+    the channel is empty. Coroutines exchanging data via an *unlimited* channel don’t
+    need to meet in time.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'At this point, you might be thinking that such a channel should have concurrent
+    modification issues when senders and receivers are executed from different threads.
+    After all, coroutines are dispatched on threads, so a channel might very well
+    be used from different threads. Let’s check the `Channel`’s robustness ourselves!
+    In the following example, we send `Int`s from a coroutine dispatched on `Dispatchers.Default`
+    while another coroutine reads the same channel from the main thread, and if the
+    `Channel`s aren’t thread-safe, we will notice:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The output of this program is:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: You can run this sample as much as you want, and it always completes without
+    concurrent issues. That’s because a `Channel` internally uses a lock-free algorithm.^([3](ch09.html#idm46669743772336))
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '`Channel`s are thread-safe. Several threads can concurrently invoke `send`
+    and `receive` methods in a thread-safe way.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Conflated Channel
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'This channel has a buffer of size 1, and only keeps the last sent element.
+    To create a *conflated* channel, you invoke `Channel<T>(Channel.CONFLATED)`. For
+    example:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The output of this program is:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  prefs: []
+  type: TYPE_PRE
+- en: The first sent element is “one.” When “two” is sent, it replaces “one” in the
+    channel. We wait until the coroutine-sending elements complete, using `job.join()`.
+    Then we read the value `two` from the channel.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Buffered Channel
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'A *buffered* channel is a `Channel` with a fixed capacity—an integer greater
+    than 0\. Senders to this channel don’t suspend unless the buffer is full, and
+    receivers from this channel don’t suspend unless the buffer is empty. To create
+    a buffered channel of `Int` with a buffer of size 2, you would invoke `Channel<Int>(2)`.
+    Here is an example of usage:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE14]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The output of this program is:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE15]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'In this example, we’ve defined a `Channel` with a fixed capacity of 2\. A coroutine
+    attempts to send five integers, while another coroutine consumes elements from
+    the channel. The sender coroutine manages to send 0 and 1 in one go, then attempts
+    to send 3\. The `println("Send $i")` is executed for the value 3 but the sender
+    coroutine gets suspended in the `send` call. The same reasoning applies for the
+    consumer coroutine: two elements are received consecutively with an additional
+    print before suspending.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Channel Producers
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Until now, you’ve seen that a `Channel` can be used for both sending *and*
+    receiving elements. Sometimes you might want to be more explicit about how a channel
+    should be used for either sending or receiving. When you’re implementing a `Channel`
+    that is meant to be read only by other coroutines, you can use the `produce` builder:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE16]'
+  prefs: []
+  type: TYPE_PRE
+- en: As you can see, `produce` returns a `ReceiveChannel`—which only has methods
+    relevant to receiving operations (`receive` is among them). An instance of `ReceiveChannel`
+    cannot be used to send elements.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Also, we’ve defined `produceValues()` as an extension function of `CoroutineScope`.
+    Calling `produceValues` will start a new coroutine that sends elements into a
+    channel. There’s a convention in Kotlin: every function that starts coroutines
+    should be defined as an extension function of `CoroutineScope`. If you follow
+    this convention, you can easily distinguish in your code which functions are starting
+    new coroutines from suspending functions.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The main code that makes use of `produceValues` could be:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE17]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Conversely, a `SendChannel` only has methods relevant to sending operations.
+    Actually, looking at the source code, a `Channel` is an interface deriving from
+    both `ReceiveChannel` and `SendChannel`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE18]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Here is how you can use a `SendChannel`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE19]'
+  prefs: []
+  type: TYPE_PRE
+- en: Communicating Sequential Processes
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'Enough of the theory, let’s get started and see how channels can be used to
+    implement a real-life problem. Imagine that your Android application has to display
+    “shapes” in a canvas. Depending on the inputs of the user, your application has
+    to display an arbitrary number of shapes. We’re purposely using generic terms—a
+    shape could be a point of interest on a map, an item in a game, anything that
+    may require some background work like API calls, file reads, database queries,
+    etc. In our example, the main thread, which already handles user input, will simulate
+    requests for new shapes to be rendered. You can already foresee that it’s a producer-consumer
+    problem: the main thread makes requests, while some background task handles them
+    and returns the results to the main thread.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Our implementation should:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Be thread-safe
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Reduce the risk of overwhelming the device memory
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Have no thread contention (we won’t use locks)
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Model and Architecture
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'A `Shape` is made of a `Location` and some useful `ShapeData`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE20]'
+  prefs: []
+  type: TYPE_PRE
+- en: Given a `Location`, we need to fetch the corresponding `ShapeData` to build
+    a `Shape`. So in this example, `Location`s are the input, and `Shape`s the output.
+    For brevity, we’ll use the words “location” for `Location` and “shape” for `Shape`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In our implementation, we’ll distinguish two main components:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: view-model
+  prefs: []
+  type: TYPE_NORMAL
+- en: This holds most of the application logic related to shapes. As the user interacts
+    with the UI, the view gives the view-model a list of locations.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`shapeCollector`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is responsible for fetching shapes given a list of locations.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Figure 9-4](#csp_highlevel_arch) illustrates the bidirectional relationship
+    between the view-model and the shape collector.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![High-level architecture](assets/pawk_0904.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 9-4\. High-level architecture.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'The `ShapeCollector` follows a simple process:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE21]'
+  prefs: []
+  type: TYPE_PRE
+- en: As an additional prerequisite, our `ShapeCollector` should maintain an internal
+    “registry” of locations being processed. Upon receiving a location to process,
+    the `ShapeCollector` shouldn’t attempt to download it if it’s already being processed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: A First Implementation
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'We can start with this first naïve implementation of the `ShapeCollector`,
+    which is far from being complete, but you’ll get the idea:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE22]'
+  prefs: []
+  type: TYPE_PRE
+- en: If we were programming with threads, we would have several threads sharing an
+    instance of `ShapeCollector`, executing `processLocation` concurrently. Using
+    this approach, however, leads to sharing mutable states. In the previous snippet,
+    `locationsBeingProcessed` is one example.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As you learned in [Chapter 5](ch05.html#thread_safety_id), making mistakes using
+    locks is surprisingly easy. Using coroutines, we don’t have to share mutable state.
+    How? Using coroutines and channels, we can *share by communicating* instead of
+    *communicate by sharing*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The key idea is to encapsulate mutable states inside coroutines. In the case
+    of the list of `Location`s being processed, it can be done with:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE23]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](assets/1.png)](#co_channels_CO1-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the preceding example, only the coroutine that started with `launch` can
+    touch the mutable state, which is `locationsBeingProcessed`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](assets/2.png)](#co_channels_CO1-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'However, we now have a problem. How do we provide the `location`s? We have
+    to somehow provide this iterable to the coroutine. So we’ll use a `Channel`, and
+    use it as input of a function we’ll declare. Since we’re launching a coroutine
+    inside a function, we declare this function as an extension function of `CoroutineScope`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE24]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'As this coroutine will be receiving `Location`s from the view-model, we declare
+    the `Channel` as a `ReceiveChannel`. By the way, you’ve seen in the previous section
+    that a `Channel` can be iterated over, just like a list. So now, we can fetch
+    the corresponding `ShapeData` for each `Location` instance received from the channel.
+    As you’ll want to do this in parallel, you might be tempted to write something
+    like so:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE25]'
+  prefs: []
+  type: TYPE_PRE
+- en: Beware, as there’s a catch in this code. You see, for each received location,
+    we start a new coroutine. Potentially, this code might start a lot of coroutines
+    if the `locations` channel debits a lot of items. For this reason, this situation
+    is also called *unlimited* *concurrency*. When we introduced coroutines, we said
+    that they are lightweight. It’s true, but the work they do might very well consume
+    significant resources. In this case, `launch(Dispatchers.IO)` in itself has an
+    insignificant overhead, while fetching the `ShapeData` could require a REST API
+    call on a server with limited bandwidth.
+  prefs: []
+  type: TYPE_NORMAL
+- en: So we’ll have to find a way to limit concurrency—we don’t want to start an unlimited
+    number of coroutines. When facing this situation with threads, a common practice
+    is to use a thread pool coupled with a work queue (see [Chapter 5](ch05.html#thread_safety_id)).
+    Instead of a thread pool, we’ll create a *coroutine pool*, which we’ll name *worker
+    pool*. Each coroutine from this worker pool will perform the actual fetch of `ShapeData`
+    for a given location. To communicate with this worker pool, `collectShapes` should
+    use an additional channel to which it can send locations to the worker pool, as
+    shown in [Figure 9-5](#limit_concurrency_id).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Limit Concurrency](assets/pawk_0905.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 9-5\. Limit concurrency.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: When you use `Channel`s, *be careful not to have unlimited concurrency*. Imagine
+    that you have to instantiate a lot of `Bitmap` instances. The underlying memory
+    buffer which stores pixel data takes a nonnegligible amount of space in memory.
+    When working with a lot of images, allocating a fresh instance of `Bitmap` every
+    time you need to create an image causes significant pressure on the system (which
+    has to allocate memory in RAM while the garbage collector cleans up all the previously
+    created instances that aren’t referenced anymore). A canonical solution to this
+    problem is `Bitmap` pooling, which is only a particular case of the more general
+    pattern of *object pooling*. Instead of creating a fresh instance of `Bitmap`,
+    you can pick one from the pool (and reuse the underlying buffer when possible).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This is how you would modify `collectShapes` to take an additional channel
+    parameter:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE26]'
+  prefs: []
+  type: TYPE_PRE
+- en: Notice how `collectShapes` now sends a location to the `locationsToProcess`
+    channel, only if the location isn’t in the list of locations currently being processed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'As for the worker implementation, it simply reads from the channel we just
+    created—except that from the worker perspective, it’s a `ReceiveChannel`. Using
+    the same pattern:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE27]'
+  prefs: []
+  type: TYPE_PRE
+- en: For now, we are not focusing on how to fetch a `ShapeData`. The most important
+    notion to understand here is the `for` loop. Thanks to the iteration on the `locationsToProcess`
+    channel, each individual `worker` coroutine will receive its own location without
+    interfering with the others. No matter how many workers we’ll start, a location
+    sent from `collectShapes` to the `locationsToProcess` channel will only be received
+    by one worker. You’ll see that each worker will be created with the same channel
+    instance when we wire all those things up. In message-oriented software, this
+    pattern, which implies delivery of a message to multiple destinations, is called
+    *fan-out*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Looking back at the missing implementation inside the `for` loop, this is what
+    we’ll do:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Fetch the `ShapeData` (which from now on we’ll simply refer to as “data”).
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Create a `Shape` from the location and the data.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Send the shape to some channel, which other components in our application will
+    use to get the shapes from `ShapeCollector`. Obviously, we haven’t created such
+    a channel yet.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Notify the `collectShapes` coroutine that the given location has been processed,
+    by sending it back to its sender. Again, such a channel has to be created.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'Do note that this isn’t the only possible implementation. You could imagine
+    other ways and adapt to your needs. After all, this is what this chapter is all
+    about: to give you examples and inspiration for your next developments.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Back on our horse, [Example 9-1](#csp_worker_impl_id) shows the final implementation
+    of the `worker` coroutine.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 9-1\. Worker coroutine
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE28]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Just like the `collectShapes` was adapted earlier to take one channel as an
+    argument, this time we’re adding two more channels: `locationsProcessed` and `shapesOutput`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Inside the `for` loop, we first get a `ShapeData` instance for a location. For
+    the sake of this simple example, [Example 9-2](#csp_getshapedata_impl_id) shows
+    our implementation.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 9-2\. `Getting shape data`
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE29]'
+  prefs: []
+  type: TYPE_PRE
+- en: Since the `getShapeData` method might not return immediately, we implement it
+    as a `suspend` function. Imagining that the downstream code involves a remote
+    API, we use `Dispatchers.IO`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `collectShapes` coroutine has to be adapted again, since it has to accept
+    one more channel—the one from which the workers send back locations they’re done
+    processing. You’re starting to get used to it—it’ll be a `ReceiveChannel` from
+    the `collectShapes` perspective. Now `collectShapes` accepts two `ReceiveChannel`s
+    and one `SendChannel`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s try it:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE30]'
+  prefs: []
+  type: TYPE_PRE
+- en: Now we have a problem. How can you receive elements from multiple `ReceiveChannel`s
+    at the same time? If we add another `for` loop right below the `locations` channel
+    iteration, it wouldn’t work as intended as the first iteration only ends when
+    the `locations` channel is closed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: For that purpose, you can use the `select` expression.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The select Expression
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The `select` expression waits for the result of multiple suspending functions
+    simultaneously, which are specified using *clauses* in the body of this select
+    invocation. The caller is suspended until one of the clauses is either *selected*
+    or *fails*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In our case, it works like so:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE31]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'If the `select` expression could talk, it would say: “Whenever the `locations`
+    channel receives an element, I’ll do action 1\. Or, if the `locationsProcessed`
+    channel receives something, I’ll do action 2\. I can’t do both actions at the
+    same time. By the way, I’m returning `Unit`.”'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The “I can’t do both actions at the same time” is important. You might wonder
+    what would happen if action 1 takes half an hour—or worse, if it never completes.
+    We’ll describe a similar situation in [“Deadlock in CSP”](#deadlock_in_csp_id).
+    However, the implementation that follows is guaranteed *never* to block for a
+    long time in each action.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Since `select` is an expression, it returns a result. The result type is inferred
+    by the return type of the lambdas we provide for each case of the `select`—pretty
+    much like the `when` expression. In this particular example, we don’t want any
+    result, so the return type is `Unit`. As `select` returns after either the `locations`
+    or `locationsProcessed` channel receives an element, it doesn’t iterate over channels
+    like our previous `for` loop. Consequently, we have to wrap it inside a `while(true)`.
+    The complete implementation of `collectShapes` is shown in [Example 9-3](#csp_collectshapes_id).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 9-3\. Collecting shapes
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE32]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](assets/1.png)](#co_channels_CO2-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: When the `locationsProcessed` channel receives a location, we know that this
+    location has been processed by a worker. It should now be removed from the list
+    of locations being processed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](assets/2.png)](#co_channels_CO2-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: When the `locations` channel receives a location, we have to first check whether
+    we’ve already been processing the same location or not. If not, we’ll add the
+    location to the `locationsBeingProcessed` list, and then send it to the `locationsToProcess`
+    channel.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Putting It All Together
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The final architecture of the `ShapeCollector` takes shape, as shown in [Figure 9-6](#csp_final_arch_id).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Final Architecture](assets/pawk_0906.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 9-6\. Final architecture.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Remember that all the channels we used to implement the `collectShapes` and
+    `worker` methods have to be created somewhere. To respect encapsulation, a good
+    place to do that is in a `start` method, as shown in [Example 9-4](#csp_shapecollector_impl_id).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 9-4\. Shape collector
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE33]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This `start` method is responsible for starting the whole shape collection
+    machinery. The two channels that are exclusively used inside the `ShapeCollector`
+    are created: `locationsToProcess` and `locationsProcessed`. We are not explicitly
+    creating `ReceiveChannel` or `SendChannel` instances here. We’re creating them
+    as `Channel` instances because they’ll further be used either as `ReceiveChannel`
+    or `SendChannel`. Then the worker pool is created and started, by calling the
+    `worker` method as many times as `workerCount` was set. It’s achieved using the
+    `repeat` function from the standard library.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Finally, we call `collectShapes` once. Overall, we started `workerCount + 1`
+    coroutines in this `start` method.
+  prefs: []
+  type: TYPE_NORMAL
+- en: You might have noticed that `locationsProcessed` is created with a capacity
+    of 1\. This is intended, and is an important detail. We’ll explain why in the
+    next section.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Fan-Out and Fan-In
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You just saw an example of multiple coroutines receiving from the same channel.
+    Indeed, all `worker` coroutines receive from the same `locationsToProcess` channel.
+    A `Location` instance sent to the `locationsToProcess` channel will be processed
+    by only one worker, without any risk of concurrent issues. This particular interaction
+    between coroutines is known as *fan-out*, as shown in [Figure 9-7](#fan_in_out_id).
+    From the standpoint of the coroutine started with the `collectShapes` function,
+    locations are fanned-out to the worker pool.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Fan-Out and Fan-In](assets/pawk_0907.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 9-7\. Fan-out and fan-in.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Fan-out is achieved by launching several coroutines which all iterate over the
+    same instance of `ReceiveChannel` (see the `worker` implementation in [Example 9-1](#csp_worker_impl_id)).
+    If one of the workers fails, the other ones will continue to receive from the
+    channel—making the system resilient to some extent.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Inversely, when several coroutines send elements to the same `SendChannel` instance,
+    we’re talking about *fan-in*. Again, you’ve got a good example since all workers
+    send `Shape` instances to `shapesOutput`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Performance Test
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Alright! Time to test the performance of our `ShapeCollector`. The following
+    snippet has a `main` function, which calls the functions `consumeShapes` and `sendLocations`.
+    Those functions start a coroutine that, respectively, consumes `Shape` instances
+    from the `ShapeCollector` and sends `Location` instances. Overall, this code is
+    close to what you’d write in a real view-model, as shown in [Example 9-5](#csp_perf_test_id).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 9-5\. Shape collector
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE34]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](assets/1.png)](#co_channels_CO3-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: We set up the channels according to the needs of the `ShapeCollector`—see [Figure 9-4](#csp_highlevel_arch).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](assets/2.png)](#co_channels_CO3-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: We create a `ShapeCollector` with four workers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![3](assets/3.png)](#co_channels_CO3-3)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `consumeShapes` function only increments a counter. That counter is declared
+    globally—which is fine because the coroutine started with `consumeShapes` is the
+    only one to modify `count`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![4](assets/4.png)](#co_channels_CO3-4)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the `sendLocations` functions, we set up a timeout of three seconds. `withTimeoutOrNull`
+    is a suspending function that suspends until the provided time is out. Consequently,
+    the coroutine started with `sendLocations` only prints the received count after
+    three seconds.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you recall the implementation of `getShapeData` in [Example 9-2](#csp_getshapedata_impl_id),
+    we added `delay(10)` to simulate a suspending call of 10 ms long. Running four
+    workers for three seconds, we would ideally receive 3,000 / 10 × 4 = 1,200 shapes,
+    if our implementation had zero overhead. On our test machine, we got 1,170 shapes—that’s
+    an efficiency of 98%.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Playing a little bit with more workers (64), with `delay(5)` in each worker,
+    we got 122,518 shapes in 10 seconds (the ideal number being 128,000)—that’s an
+    efficiency of 96%.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Overall, the throughput of `ShapeCollector` is quite decent, event with a `sendLocations`
+    function that continuously sends `Location` instances without any pause between
+    two sends.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Back Pressure
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'What happens if our workers are too slow? This could very well happen if a
+    remote HTTP call takes time to respond, or a backend server is overwhelmed—we
+    don’t know. To simulate this, we can dramatically increase the delay inside `getShapeData`
+    (see [Example 9-2](#csp_getshapedata_impl_id)). Using `delay(500)`, we got only
+    20 shapes in three seconds, with four workers. The throughput decreased, but this
+    isn’t the interesting part. As always with producer-consumer problems, issues
+    can arise when consumers slow down—as producers might accumulate data and the
+    system may ultimately run out of memory. You can add `println()` logs inside the
+    producer coroutine and run the program again:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE35]'
+  prefs: []
+  type: TYPE_PRE
+- en: Now, “Sending a new location” is printed only about 25 times in the console.
+  prefs: []
+  type: TYPE_NORMAL
+- en: So the producer is being slowed down. How?
+  prefs: []
+  type: TYPE_NORMAL
+- en: Because `locationsOutput.send(location)` is a suspending call. When workers
+    are slow, the `collectShapes` function (see [Example 9-3](#csp_collectshapes_id))
+    of the `ShapeCollector` class quickly becomes suspended at the line `locationsToProcess.send(it)`.
+    Indeed, `locationsToProcess` is a rendezvous channel. Consequently, when the coroutine
+    started with `collectShapes` reaches that line, it’s suspended until a worker
+    is ready to receive the location from `locationsToProcess`. When the previously
+    mentioned coroutine is suspended, it can no longer receive from the `locations`
+    channel—which corresponds to `locationsOutput` in the previous example. This is
+    the reason why the coroutine that started with `sendLocation` is in turn suspended.
+    When workers finally do their job, `collectShapes` can resume, and so does the
+    producer coroutine.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Similarities with the Actor Model
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: In CSP, you create coroutines that encapsulate mutable state. Instead of communicating
+    by sharing their state, they share by communicating (using `Channel`s). The coroutine
+    started with the `collectShapes` function (see [Example 9-3](#csp_collectshapes_id))
+    uses three channels to communicate with other coroutines—one `SendChannel` and
+    two `ReceiveChannel`s, as shown in [Figure 9-8](#process_csp_id).
+  prefs: []
+  type: TYPE_NORMAL
+- en: In CSP parlance, `collectShapes` and its three channels is a *process*. A process
+    is a computational entity that communicates with other actors using asynchronous
+    message passing (channels). It can do only one thing at a time—reading, writing
+    to channels, or processing.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the Actor model, an *actor* is quite similar. One noticeable difference is
+    that an actor only has one channel—called a mailbox. If an actor needs to be responsive
+    and nonblocking, it must delegate its long-running processing to child actors.
+    This similarity is the reason why CSP is sometimes referred to as an Actor model
+    implementation.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Process](assets/pawk_0908.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 9-8\. Process in CSP.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Execution Is Sequential Inside a Process
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: We’ve just seen that a *process* is made of a single coroutine and channels.
+    The very nature of a coroutine is for it to be executed on some thread. So unless
+    this coroutine starts other child coroutines (which run concurrently, and in some
+    cases in parallel), all lines of that coroutine are executed sequentially. That
+    includes receiving from channels, sending objects to other channels, and mutating
+    some private state. Consequently, the actors implemented in this chapter could
+    either receive from a channel or send to another channel, but not do both at the
+    same time. Under load, this kind of actor can be efficient because it doesn’t
+    involve blocking calls, only suspending functions. When a coroutine is suspended,
+    the overall efficiency isn’t necessarily affected, because the thread executing
+    the suspended coroutine can then execute another coroutine which has something
+    to do. This way, threads can be used to their full potential, never contending
+    to some lock.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Final Thoughts
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: This mechanism using CSP style has very little internal overhead. Thanks to
+    `Channel`s and coroutines, our implementation is lock-free. Therefore, there’s
+    *no thread contention*—the `ShapeCollector` is less likely to impact other threads
+    of your application. Similarly, there’s a chance that the `Dispatchers` we use
+    in the `ShapeCollector` might also be used in other features in our application.
+    By leveraging lock-free implementations, a coroutine suspended while receiving
+    from a channel won’t prevent the underlying thread from executing other coroutines.
+    In other words, we can do more with the same resources.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Moreover, this architecture provides built-in back pressure. If some `ShapeData`
+    instances suddenly take more time to fetch, producers of `ShapeLocation` instances
+    will be slowed down so that locations don’t accumulate—which reduces the risk
+    of running out of memory. This back pressure comes for free—you didn’t explicitly
+    write code for such a feature.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The example given in this chapter is generic enough to be taken as is and adapted
+    to fit your needs. In the event that you need to significantly deviate from our
+    example, then we owe you a deeper explanation. For example, why did we set a capacity
+    of 1 for the `locationsProcessed` channel in [Example 9-4](#csp_shapecollector_impl_id)?
+    The answer is admittedly nontrivial. If we had created a regular rendezvous channel,
+    our `ShapeCollector` would have suffered from a *deadlock*—which brings us to
+    the next section.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Deadlock in CSP
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Deadlocks are most commonly encountered when working with threads. When thread
+    A holds lock 1 and attempts to seize lock 2, while thread B holds lock 2 and attempts
+    to seize lock 1, you have a deadlock. The two threads indefinitely wait for each
+    other and neither progresses. Deadlocks can have disastrous consequences when
+    they happen in critical components of an application. An efficient way to avoid
+    such a situation is to ensure that a deadlock cannot happen under any imaginable
+    circumstances. Even when conditions are highly unlikely to be met, you can trust
+    Murphy’s Law to strike some day.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'However, deadlocks can also happen in CSP architecture. We can do a little
+    experiment to illustrate this. Instead of setting a capacity of 1 to the channel
+    `locationsProcessed` in [Example 9-4](#csp_shapecollector_impl_id), let’s use
+    a channel with no buffer (a rendezvous channel) and run the performance test sample
+    in [Example 9-5](#csp_perf_test_id). The result printed in the console is:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE36]'
+  prefs: []
+  type: TYPE_PRE
+- en: For the record, we should have received 20 shapes. So, what’s going on?
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Fair warning: the following explanation goes into every necessary detail, and
+    is quite long. We encourage you to take the time to read it carefully until the
+    end. It’s the ultimate challenge to test your understanding of channels.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: You might also skip it entirely and jump to [“TL;DR”](#tldr).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s have a closer look at the internals of our `ShapeCollector` class and
+    follow each step as though we were a live debugger. Imagine that you’ve just started
+    the performance test sample in [Example 9-5](#csp_perf_test_id), and the first
+    `Location` instance is sent to the `locations` channel. That location goes through
+    the `collectShapes` method with its `select` expression. At that moment, `locationsProcessed`
+    has nothing to provide, so the `select` expression goes through the second case:
+    `locations.onReceive{..}`. If you look at what’s done inside this second case,
+    you can see that a location is sent to the `locationsToProcess` channel—which
+    is a receive channel for each worker. Consequently, the coroutine started by the
+    `collectShapes` method (which we’ll refer to as the `collectShapes` coroutine)
+    is suspended at the `locationsToProcess.send(it)` invocation until a worker handshakes
+    the `locationsToProcess` rendezvous channel. This happens fairly quickly, since
+    at that time all workers are idle.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: When a worker receives the first `Location` instance, the `collectShapes` coroutine
+    is resumed and is able to receive other locations. As in our worker implementation,
+    we’ve added some delay to simulate a background processing, you can consider workers
+    slow compared to other coroutines—which are the `collectShapes` coroutine and
+    the producer coroutine started with the `sendLocations` method in the test sample
+    (which we’ll refer to as the `sendLocations` coroutine). Therefore, another location
+    is received by the `collectShapes` coroutine while the worker that which took
+    the first location is still busy processing it. Similarly, a second worker quickly
+    handles the second location, and a third location is received by the `collectShapes`
+    coroutine, etc.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The execution continues until all four workers are busy, while a fifth location
+    is received by the `collectShapes` coroutine. Following the same logic as before,
+    the `collectShapes` coroutine is suspended until a worker is ready to take the
+    `Location` instance. Unfortunately, all workers are busy. So the `collectShapes`
+    coroutine isn’t able to take incoming locations anymore. Since the `collectShapes`
+    and `sendLocations` coroutines communicate through a rendezvous channel, the `sendLocations`
+    coroutine is in turn suspended until `collectShapes` is ready to take more locations.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Time goes by until a worker makes itself available to receive the fifth location.
+    Eventually, a worker (probably the first worker) is done processing its `Location`
+    instance. Then it sends the result to the `shapesOutput` channel and it tries
+    to send back the processed location to the `collectShapes` coroutine, using the
+    `locationsProcessed` channel. Remember that this is our mechanism to notify the
+    `collectShapes` coroutine when a location has been processed. However, the `collectShapes`
+    coroutine is suspended at the `locationsToProcess.send(it)` invocation. So `collectShapes`
+    can’t receive from the `locationsProcessed` channel. There’s no issue to this
+    situation: this is a *deadlock*,^([4](ch09.html#idm46669741723728)) as shown in
+    [Figure 9-9](#deadlock_in_csp_diagram_id).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Eventually, the first four locations processed by the workers are processed
+    and four `Shape` instances are sent to the `shapesOutput` channel. The delay in
+    each worker is only of 10 ms, so all workers have time to complete before the
+    three-second timeout. Hence the result:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE37]'
+  prefs: []
+  type: TYPE_PRE
+- en: '![Deadlock in CSP](assets/pawk_0909.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 9-9\. Deadlock in CSP.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'If the `locationsProcessed` channel had a capacity of at least 1, the first
+    available worker would have been able to send back its `Location` instance and
+    then receive from the `locationsToProcess` channel—releasing the `collectShapes`
+    coroutine. Subsequently, in the `select` expression of the `collectShapes` coroutine,
+    the `locationsToProcess` channel is *always* checked before the `locations` channel.
+    This ensures that when the `collectShapes` coroutine is eventually suspended at
+    the `locationsToProcess.send(it)` invocation, the buffer of the `locationsProcessed`
+    channel is guaranteed to be empty—so a worker can send a location without being
+    suspended. If you’re curious, try to revert the two cases `locationsProcessed.onReceive
+    {..}` and `locations.onReceive {..}` while having a capacity of 1 for the `locationsProcessed`
+    channel. The result will be: “Received 5 shapes.”'
+  prefs: []
+  type: TYPE_NORMAL
+- en: TL;DR
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Not only is the capacity of 1 for the `locationsProcessed` channel extremely
+    important, the order in which channels are read in the `select` expression of
+    the `collectShapes` coroutine also matters.^([5](ch09.html#idm46669741706464))
+    What should you remember from this? Deadlocks are possible in CSP. Even more important,
+    understanding what caused the deadlock is an excellent exercise to test your understanding
+    of how channels work.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If we look back at the structure of the `ShapeCollector`, we can represent the
+    structure as a cyclic graph, as shown in [Figure 9-10](#cyclic_graph_id).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Cyclic Graph](assets/pawk_0910.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 9-10\. Cyclic graph.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'This new representation emphasizes an important property of the structure:
+    it’s *cyclic*. `Location` instances travel back and forth between the `collectShapes`
+    coroutine and workers.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Cycles in CSP are actually the cause of deadlocks. Without cycles, there’s no
+    possibility of deadlock. Sometimes, however, you’ll have no choice but to have
+    those cycles. In this case, we gave you the key ideas to reason about CSP, so
+    you can find solutions by yourself.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Limitations of Channels
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Up until now, we’ve held off on discussing the limitations of channels, so we’ll
+    describe some of those limitations now. Using notions from this chapter, creating
+    a stream of `Int` values is typically done as shown in [Example 9-6](#flows_channel_produce_id).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 9-6\. Producing numbers
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE38]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'On the receiving side, you can consume those numbers like so:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE39]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Pretty straightforward. Now, what if you need to apply a transformation for
+    each of those numbers? Imagine that your transformation function was:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE40]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You could modify the `numbers` function like so:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE41]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'It works, but it’s not elegant. A much nicer solution would look like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE42]'
+  prefs: []
+  type: TYPE_PRE
+- en: Actually, as of Kotlin 1.4, this code doesn’t compile. In the early days of
+    channels, we had “channel operators” such as `map`. However, those operators have
+    been deprecated in Kotlin 1.3, and removed in Kotlin 1.4.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Why? Channels are communication primitives between coroutines. They are specifically
+    designed to distribute values so that every value is received by only one receiver.
+    It’s not possible to use channels to broadcast values to multiple receivers. The
+    designers of coroutines have created `Flow`s specifically for asynchronous data
+    streams on which we can use transformation operators; we’ll see how in the next
+    chapter.
+  prefs: []
+  type: TYPE_NORMAL
+- en: So, channels are not a convenient solution to implement pipelines of data transformations.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Channels Are Hot
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'Let’s have a look at the source code of the `produce` channel builder. Two
+    lines are interesting, as shown in the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE43]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](assets/1.png)](#co_channels_CO4-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`produce` is an extension function on `CoroutineScope`. Remember the convention?
+    It indicates that this function starts a new coroutine.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](assets/2.png)](#co_channels_CO4-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: We can confirm that with the `coroutine.start()` invocation. Don’t pay too much
+    attention to how this coroutine is started—it’s an internal implementation.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Consequently, when you invoke the `produce` channel builder, a new coroutine
+    is started and immediately starts producing elements and sending them to the returned
+    channel even if no coroutine is consuming those elements.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This is the reason why channels are said to be *hot*: a coroutine is actively
+    running to produce or consume data. If you know RxJava, this is the same concept
+    as hot observables: they emit values independently of individual subscriptions.
+    Consider this simple stream:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE44]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Also, imagine that no other coroutines are consuming this stream. As this function
+    returns a rendezvous channel, the started coroutine will suspend on the first
+    `send`. So you might say: “OK, we’re fine—no background processing is done until
+    we provide a consumer to this stream.” It’s true, but if you forget to consume
+    the stream, the database connection will remain open—notice that we used the `use`
+    function from the standard library, which is the equivalent of the `try`-with-`resources`
+    statement in Java. While it might not be harmful as is, this piece of logic could
+    be part of a retry loop, in which case a significant amount of resources would
+    leak.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: To sum up, channels are intercoroutine communication primitives. They work really
+    well in a CSP-like architecture. However, we don’t have handy operators such as
+    `map` or `filter` to transform them. We can’t broadcast values to multiple receivers.
+    Moreover, their hot nature can cause memory leaks in some situations.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Flows have been created to address those channels’ limitations. We’ll cover
+    flows in the next chapter.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Summary
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Channels are communication primitives that provide a way to transfer streams
+    of values between coroutines.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: While channels are conceptually close to Java’s `BlockingQueue`, the fundamental
+    difference is that `send` and `receive` methods of a channel are suspending functions,
+    not blocking calls.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Using channels and coroutines, you can *share by communicating* instead of the
+    traditional *communicate by sharing*. The goal is to avoid shared mutable-state
+    and thread-safety issues.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: You can implement complex logic using CSP style, leveraging back pressure. This
+    results in potentially excellent performance since the nonblocking nature of suspending
+    functions reduces thread contention to its bare minimum.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Beware that deadlock in CSP is possible, if your architecture has cycles (a
+    coroutine sends objects to another coroutine, while also receiving objects from
+    the same coroutine). You can fix those deadlocks by, for example, tweaking the
+    order in which the `select` expression treats each cases, or by adjusting the
+    capacity of some channels.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Channels should be considered low-level primitives. Deadlocks in CSP are one
+    example of misuse of channels. The next chapter will introduce *flows*—higher-level
+    primitives that exchange streams of data between coroutines. It doesn’t mean that
+    you shouldn’t use channels—there are still situations where channels are necessary
+    (the `ShapeCollector` in this chapter is an example). However, you’ll see that
+    in many situations, flows are a better choice. In any case, it’s important to
+    know about channels because (as you’ll see) flows sometimes use channels under
+    the hood.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: ^([1](ch09.html#idm46669744579616-marker)) We’ll sometimes refer to `Channel`s
+    as channels in the rest of this chapter.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([2](ch09.html#idm46669744209856-marker)) Specifically, `Channel` doesn’t implement
+    `Iterable`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([3](ch09.html#idm46669743772336-marker)) If you want to learn how such an
+    algorithm works, we recommend that you read Section 15.4, “NonBlocking Algorithms,”
+    in *Java Concurrency in Practice*, by Brian Goetz et al. There is also this interesting
+    YouTube video, [Lock-Free Algorithms for Kotlin Coroutines (Part 1)](https://oreil.ly/WDE1F)
+    from Roman Elizarov, lead designer of Kotlin coroutines.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([4](ch09.html#idm46669741723728-marker)) While there’s no lock or mutex involved
+    here, the situation is very similar to a deadlock involving threads. This is why
+    we use the same terminology.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([5](ch09.html#idm46669741706464-marker)) Actually, our implementation, which
+    uses a capacity of 1 for `locationsProcessed`, isn’t the only possible implementation
+    that works without deadlocks. There’s at least one solution that uses `locationsProcessed`
+    as a rendezvous channel. We leave this as an exercise for the reader.
+  prefs: []
+  type: TYPE_NORMAL

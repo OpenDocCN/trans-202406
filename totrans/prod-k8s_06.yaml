@@ -1,0 +1,1189 @@
+- en: Chapter 5\. Pod Networking
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Since the early days of networking, we have concerned ourselves with how to
+    facilitate host-to-host communication. These concerns include uniquely addressing
+    hosts, routing of packets across networks, and propagation of known routes. For
+    more than a decade, software-defined networks (SDNs) have seen rapid growth by
+    solving these concerns in our increasingly dynamic environments. Whether it is
+    in your datacenter with VMware NSX or in the cloud with Amazon VPCs, you are likely
+    a consumer of an SDN.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In Kubernetes, these principles and desires hold. Although our unit moves from
+    hosts to Pods, we need to ensure we have addressability and routability of our
+    workloads. Additionally, given Pods are running as software on our hosts, we will
+    most commonly establish networks that are entirely software-defined.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This chapter will explore the concept of Pod networks. We will start off by
+    addressing some key networking concepts that must be understood and considered
+    before implementing Pod networks. Then we will cover the [Container Networking
+    Interface (CNI)](https://github.com/containernetworking/cni), which enables your
+    choice of network implementation based on your networking requirements. Lastly,
+    we will examine common plug-ins, such as Calico and Cilium, in the ecosystem to
+    make the trade-offs more concrete. In the end, you’ll be more equipped to make
+    decisions around the right networking solution and configuration for your application
+    platform.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Networking is a vast subject in itself. Our intentions are to give you just
+    enough to make informed decisions on your Pod network. If your background is not
+    networking, we highly recommend you go over these concepts with your networking
+    team. Kubernetes does not negate the need to have networking expertise in your
+    organization!
+  prefs: []
+  type: TYPE_NORMAL
+- en: Networking Considerations
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'Before diving into implementation details around Pod networks, we should start
+    with a few key areas of consideration. These areas include:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: IP Address Management (IPAM)
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Routing protocols
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Encapsulation and tunneling
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Workload routability
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: IPv4 and IPv6
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Encrypted workload traffic
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Network policy
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: With an understanding of these areas, you can begin to make determinations around
+    the correct networking solution for your platform.
+  prefs: []
+  type: TYPE_NORMAL
+- en: IP Address Management
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: In order to communicate to and from Pods, we must ensure they are uniquely addressable.
+    In Kubernetes, each Pod receives an IP. These IPs may be internal to the cluster
+    or externally routable. Each Pod having its own address simplifies the networking
+    model, considering we do not have to be concerned with colliding ports on shared
+    IPs. However, this IP-per-Pod model does come with its own challenges.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Pods are best thought of as ephemeral. Specifically, they are prone to being
+    restarted or rescheduled based on the needs of the cluster or system failure.
+    This requires IP allocation to execute quickly and the management of the cluster’s
+    IP pool to be efficient. This management is often referred to as [IPAM](https://oreil.ly/eWJki)
+    and is not unique to Kubernetes. As we dive deeper into container networking approaches,
+    we will explore a variety of ways IPAM is implemented.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: This ephemeral expectation of a workload’s IP causes issues in some legacy workloads,
+    for example, workloads that pin themselves to a specific IP and expect it to remain
+    static. Depending on your implementation of container networking (covered later
+    in this chapter), you may be able to explicitly reserve IPs for specific workloads.
+    However, we recommend against this model unless necessary. There are many capable
+    service discovery or DNS mechanisms that workloads can take advantage of to properly
+    remedy this issue. Review [Chapter 6](ch06.html#chapter6) for examples.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'IPAM is implemented based on your choice of CNI plug-in. There are a few commonalities
+    in these plug-ins that pertain to Pod IPAM. First, when clusters are created,
+    a Pod network’s [Classless Inter-Domain Routing](https://oreil.ly/honRv) (CIDR)
+    can be specified. How it is set varies based on how you bootstrap Kubernetes.
+    In the case of `kubeadm`, a flag can be passed as follows:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'In effect, this sets the `--cluster-cidr` flag on the kube-controller-manager.
+    Kubernetes will then allocate a chunk of this cluster-cidr to every node. By default,
+    each node is allocated `/24`. However, this can be controlled by setting the `--node-cidr-mask-size-ipv4`
+    and/or `--node-cidr-mask-size-ipv6` flags on the kube-controller-manager. A Node
+    object featuring this allocation is as follows:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](assets/1.png)](#co_pod_networking_CO1-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This field exists for compatibility. `podCIDRs` was later introduced as an array
+    to support dual stack (IPv4 and IPv6 CIDRs) on a single node.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](assets/2.png)](#co_pod_networking_CO1-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The IP range assigned to this node is 10.30.0.0 - 10.30.0.255\. This is 254
+    addresses for Pods, out of the 65,534 available in the 10.30.0.0/16 cluster CIDR.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Whether these values are used in IPAM is up to the CNI plug-in. For example,
+    Calico detects and respects this setting, while Cilium offers an option to either
+    manage IP pools independent of Kubernetes (default) or respect these allocations.
+    In most CNI implementations, it is important that your CIDR choice *does not*
+    overlap with the cluster’s host/node network. However, assuming your Pod network
+    will remain internal to the cluster, the CIDR chosen can overlap with network
+    space outside the cluster. [Figure 5-1](#the_ip_spaces_and_ip_allocations_of_the_most_network)
+    demonstrates the relationship of these various IP spaces and examples of allocations.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: How large you should set your cluster’s Pod CIDR is often a product of your
+    networking model. In most deployments, a Pod network is entirely internal to the
+    cluster. As such, the Pod CIDR can be very large to accommodate for future scale.
+    When the Pod CIDR is routable to the larger network, thus consuming address space,
+    you may have to do more careful consideration. Multiplying the number of Pods
+    per node by your eventual node count can give you a rough estimate. The number
+    of Pods per node is configurable on the kubelet, but by default is 110.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![prku 0501](assets/prku_0501.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 5-1\. The IP spaces and IP allocations of the host network, Pod network,
+    and each [host] local CIDR.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Routing Protocols
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Once Pods are addressed, we need to ensure that routes to and from them are
+    understood. This is where routing protocols come in to play. Routing protocols
+    can be thought of as different ways to propagate routes to and from places. Introducing
+    a routing protocol often enables dynamic routing, relative to configuring [static
+    routes](https://oreil.ly/97En2). In Kubernetes, understanding a multitude of routes
+    becomes important when not leveraging encapsulation (covered in the next section),
+    since the network will often be unaware of how to route workload IPs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Border Gateway Protocol (BGP) is one of the most commonly used protocols to
+    distribute workload routes. It is used in projects such as [Calico](https://www.projectcalico.org)
+    and [Kube-Router](https://www.kube-router.io). Not only does BGP enable communication
+    of workload routes in the cluster but its internal routers can also be peered
+    with external routers. Doing so can make external network fabrics aware of how
+    to route to Pod IPs. In implementations such as Calico, a BGP daemon is run as
+    part of the Calico Pod. This Pod runs on every host. As routes to workloads become
+    known, the Calico Pod modifies the kernel routing table to include routes to each
+    potential workload. This provides native routing via the workload IP, which can
+    work especially well when running in the same L2 segment. [Figure 5-2](#the_calico_pod_sharing_routes_via_its_bgp_peer)
+    demonstrates this behavior.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![prku 0502](assets/prku_0502.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 5-2\. The `calico-pod` sharing routes via its BGP peer. The kernel routing
+    table is then programmed accordingly.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Making Pod IPs routable to larger networks may seem appealing at first glance
+    but should be carefully considered. See [“Workload Routability”](#workload_routability)
+    for more details.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In many environments, native routing to workload IPs is not possible. Additionally,
+    routing protocols such as BGP may not be able to integrate with an underlying
+    network; such is the case running in a cloud-provider’s network. For example,
+    let’s consider a CNI deployment where we wish to support native routing and share
+    routes via BGP. In an AWS environment, this can fail for two reasons:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Source/Destination checks are enabled
+  prefs: []
+  type: TYPE_NORMAL
+- en: This ensures that packets hitting the host have the destination (and source
+    IP) of the target host. If it does not match, the packet is dropped. This setting
+    can be disabled.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Packet needs to traverse subnets
+  prefs: []
+  type: TYPE_NORMAL
+- en: If the packet needs to leave the subnet, the destination IP is evaluated by
+    the underlying AWS routers. When the Pod IP is present, it will not be able to
+    route.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In these scenarios, we look to tunneling protocols.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Encapsulation and Tunneling
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Tunneling protocols give you the ability to run your Pod network in a way that
+    is mostly unknown to the underlying network. This is achieved using encapsulation.
+    As the name implies, encapsulation involves putting a packet (the inner packet)
+    inside another packet (the outer packet). The inner packet’s src IP and dst IP
+    fields will reference the workload (Pod) IPs, whereas the outer packet’s src IP
+    and dst IP fields will reference the host/node IPs. When the packet leaves a node,
+    it will appear to the underlying network as any other packet since the workload-specific
+    data is in the payload. There are a variety of tunneling protocols such as VXLAN,
+    Geneve, and GRE. In Kuberntes, VXLAN has become one of the most commonly used
+    methods by networking plug-ins. [Figure 5-3](#vxlan_encapsulation_used_to_move_an_inner_packet)
+    demonstrates an encapsulated packet crossing the wire via VXLAN.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As you can see, VXLAN puts an entire Ethernet frame inside a UDP packet. This
+    essentially gives you a fully virtualized layer-2 network, often referred to as
+    an overlay network. The network beneath the overlay, referred to as the underlay
+    network, does not concern itself with the overlay. This is one of the primary
+    benefits to tunneling protocols.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![prku 0503](assets/prku_0503.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 5-3\. VXLAN encapsulation used to move an inner packet, for workloads,
+    across hosts. The network cares only about the outer packet, so it needs to have
+    zero awareness of workload IPs and their routes.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Often, you choose whether to use a tunneling protocol based on the requirements/capabilities
+    of your environment. Encapsulation has the benefit of working in many scenarios
+    since the overlay is abstracted from the underlay network. However, this approach
+    comes with a few key downsides:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Traffic can be harder to understand and troubleshoot
+  prefs: []
+  type: TYPE_NORMAL
+- en: Packets within packets can create extra complexity when troubleshooting network
+    issues.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Encapsulation/decapsulation will incur processing cost
+  prefs: []
+  type: TYPE_NORMAL
+- en: When a packet goes to leave a host it must be encapsulated, and when it enters
+    a host it must be decapsulated. While likely small, this will add overhead relative
+    to native routing.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Packets will be larger
+  prefs: []
+  type: TYPE_NORMAL
+- en: Due to the embedding of packets, they will be larger when transmitted over the
+    wire. This may require adjustments to the [maximum transmission unit (MTU)](https://oreil.ly/dzYBz)
+    to ensure they fit on the network.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Workload Routability
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: In most clusters, Pod networks are internal to the cluster. This means Pods
+    can directly communicate with each other, but external clients cannot reach Pod
+    IPs directly. Considering Pod IPs are ephemeral, communicating directly with a
+    Pod’s IP is often bad practice. Relying on service discovery or load balancing
+    mechanics that abstract the underlying IP is preferable. A huge benefit to the
+    internal Pod network is that it *does not* occupy precious address space within
+    your organization. Many organizations manage address space to ensure addresses
+    stay unique within the company. Thus, you would certainly get a dirty look when
+    you ask for a `/16` space (65,536 IPs) for each Kubernetes cluster you bootstrap!
+  prefs: []
+  type: TYPE_NORMAL
+- en: When Pods are not directly routable, we have several patterns to facilitate
+    external traffic to Pod IPs. Commonly we will expose an Ingress controller on
+    the host network of a subset of dedicated nodes. Then, once the packet enters
+    the Ingress controller proxy, it can route directly to Pod IPs since it takes
+    part in the Pod network. Some cloud providers even include (external) load balancer
+    integration that wires this all together automatically. We explore a variety of
+    these ingress models, and their trade-offs, in [Chapter 6](ch06.html#chapter6).
+  prefs: []
+  type: TYPE_NORMAL
+- en: At times, requirements necessitate that Pods are routable to the larger network.
+    There are two primary means to accomplish this. The first is to use a networking
+    plug-in that integrates with the underlying network directly. For example, [AWS’s
+    VPC CNI](https://github.com/aws/amazon-vpc-cni-k8s) attaches multiple secondary
+    IPs to each node and allocates them to Pods. This makes each Pod routable just
+    as an EC2 host would be. The primary downside to this model is it will consume
+    IPs in your subnet/VPC. The second option is to propagate routes to Pods via a
+    routing protocol such as BGP, as described in [“Routing Protocols”](#routing_protocols).
+    Some plug-ins using BGP will even enable you to make a subset of your Pod network
+    routable, rather than having to expose the entire IP space.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Avoid making your Pod network externally routable unless absolutely necessary.
+    We often see legacy applications driving the desire for routable Pods. For example,
+    consider a TCP-based workload where a client must be pinned to the same backend.
+    Typically, we recommend updating the application(s) to fit within the container
+    networking paradigm using service discovery and possibly re-architecting the backend
+    to not require client-server affinity (when possible). While exposing the Pod
+    networking may seem like a simple solution, doing so comes at the cost of eating
+    up IP space and potentially making IPAM and route propagation configurations more
+    complex.
+  prefs: []
+  type: TYPE_NORMAL
+- en: IPv4 and IPv6
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The overwhelming majority of clusters today run IPv4 exclusively. However, we
+    are seeing the desire to run IPv6-networked clusters in certain clients such as
+    telcos where addressability of many workloads is critical. Kubernetes does support
+    IPv6 via [dual-stack](https://oreil.ly/sj_jN) as of `1.16`. At the time of this
+    writing, dual-stack is an alpha feature. Dual-stack enables you to configure IPv4
+    and IPv6 address spaces in your clusters.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If your use case requires IPv6, it can easily be enabled but requires a few
+    components to line up:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: While still in alpha, a feature-gate must be enabled on the kube-apiserver and
+    kubelet.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The kube-apiserver, kube-controller-manager, and kube-proxy all require an additional
+    configuration to specify the IPv4 and IPv6 space.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: You must use a CNI plug-in that supports IPv6, such as [Calico](https://projectcalico.org)
+    or [Cilium](https://cilium.io).
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'With the preceding in place, you will see two CIDR allocations on each Node
+    object:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: The CNI plug-in’s IPAM is responsible for determining whether an IPv4, IPv6,
+    or both is assigned to each Pod.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Encrypted Workload Traffic
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Pod-to-Pod traffic is rarely (if ever) encrypted by default. This means that
+    packets sent over the wire without encryption, such as TLS, can be sniffed as
+    plain text. Many network plug-ins support encrypting traffic over the wire. For
+    example, Antrea supports encryption with [IPsec](https://oreil.ly/jqzCQ) when
+    using a GRE tunnel. Calico is able to encrypt traffic by tapping into a node’s
+    [WireGuard](https://www.wireguard.com) installation.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Enabling encryption may seem like a no-brainer. However, there are trade-offs
+    to be considered. We recommend talking with your networking team to understand
+    how host-to-host traffic is handled today. Is data encrypted when it goes between
+    hosts in your datacenter? Additionally, what other encryption mechanisms may be
+    at play? For example, does every service talk over TLS? Do you plan to leverage
+    a service mesh where workload proxies leverage mTLS? If so, is encrypting at the
+    service proxy and CNI layer required? While encryption will increase the depth
+    of defense, it will also add complexity to network management and troubleshooting.
+    Most importantly, needing to encrypt and decrypt packets will impact performance,
+    thus lowering your potential throughput.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Network Policy
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Once the Pod network is wired up, a logical next step is to consider how to
+    set up network policy. Network policy is similar to firewall rules or security
+    groups, where we can define what ingress and egress traffic is allowed. Kubernetes
+    offers a [NetworkPolicy API](https://oreil.ly/1UV_3), as part of the core networking
+    APIs. Any cluster can have policies added to it. However, it is incumbent on the
+    CNI provider to *implement* the policy. This means that a cluster running a CNI
+    provider that does not support NetworkPolicy, such as [flannel](https://github.com/coreos/flannel),
+    will accept NetworkPolicy objects but not act on them. Today, most CNIs have some
+    level of support for NetworkPolicy. Those that do not can often be used alongside
+    plug-ins such as Calico, where the plug-in runs in a mode where it provides only
+    policy enforcement.
+  prefs: []
+  type: TYPE_NORMAL
+- en: NetworkPolicy being available inside of Kubernetes adds yet another layer where
+    firewall-style rules can be managed. For example, many networks provide subnet
+    or host-level rules available via a distributed firewall or security group mechanism.
+    While good, often these existing solutions do not have visibility into the Pod
+    network. This prevents the level of granularity that may be desired in setting
+    up rules for Pod-based workload communication. Another compelling aspect of Kubernetes
+    NetworkPolicy is that, like most objects we deal with in Kubernetes, it is defined
+    declaratively and, we think, far easier to manage relative to most firewall management
+    solutions! For these reasons, we generally recommend considering implementing
+    network policy at the Kubernetes level rather than trying to make existing firewall
+    solutions fit this new paradigm. This does not mean you should throw out your
+    existing host-to-host firewall solution(s). More so, let Kubernetes handle the
+    intra-workload policy.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Should you choose to utilize NetworkPolicy, it is important to note these policies
+    are *Namespace-scoped*. By default, when NetworkPolicy objects are not present,
+    Kubernetes allows all communication to and from workloads. When setting a policy,
+    you can select what workloads the policy applies to. When present, the default
+    behavior inverts and any egress and ingress traffic not allowed by the policy
+    will be blocked. This means that the Kubernetes NetworkPolicy API specifies only
+    what traffic is allowed. Additionally, the policy in a Namespace is additive.
+    Consider the following NetworkPolicy object that configures ingress and egress
+    rules:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](assets/1.png)](#co_pod_networking_CO2-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The empty `podSelector` implies this policy applies to all Pods in this Namespace.
+    Alternatively, you can match against a label.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](assets/2.png)](#co_pod_networking_CO2-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This ingress rule allows traffic from sources with an IP in the range of 10.40.0.0/24,
+    when the protocol is TCP and the port is 80.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![3](assets/3.png)](#co_pod_networking_CO2-3)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This egress rule allows DNS traffic from workloads.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![4](assets/4.png)](#co_pod_networking_CO2-4)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This egress rule limits sending traffic to packets destined for workloads in
+    the `org-2` Namespace with the label `team-b`. Additionally, the protocol must
+    be TCP and the destination port is 80.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Over time, we have seen the NetworkPolicy API be limiting to certain use cases.
+    Some common desires include:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Complex condition evaluation
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Resolution of IPs based on DNS records
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: L7 rules (host, path, etc.)
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Cluster-wide policy, enabling global rules to be put in place, rather than having
+    to replicate them in every Namespace.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: To satisfy these desires, some CNI plug-ins offer their own, more capable, policy
+    APIs. The primary trade-off to using provider-specific APIs is that your rules
+    are no longer portable across plug-ins. We will explore examples of these when
+    we cover Calico and Cilium later in the chapter.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Summary: Networking Considerations'
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'In the previous sections we have covered key networking considerations that
+    will enable you to make an informed decision about your Pod networking strategy.
+    Before diving into CNI and plug-ins, let’s recap some of the key areas of consideration:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: How large should your Pod CIDR be per cluster?
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: What networking constraints does your underlay network put on your future Pod
+    network?
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: If using a Kubernetes managed service or vendor offering, what networking plug-in(s)
+    are supported?
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Are routing protocols such as BGP supported in your infrastructure?
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Could unencapsulated (native) packets be routed through the network?
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Is using a tunnel protocol (encapsulation) desirable or required?
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Do you need to support (externally) routable Pods?
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Is running IPv6 a requirement for your workloads?
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: On what level(s) will you expect to enforce network policy or firewall rules?
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Does your Pod network need to encrypt traffic on the wire?
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: With the answers to these questions fleshed out, you are in a good place to
+    start learning about what enables you to plug in the correct technology to solve
+    these issues, the Container Networking Interface (CNI).
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Container Networking Interface (CNI)
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: All the considerations discussed thus far make it clear that different use cases
+    warrant different container networking solutions. In the early days of Kubernetes,
+    most clusters were running a networking plug-in called [flannel](https://github.com/coreos/flannel).
+    Over time, solutions such as [Calico](https://www.projectcalico.org) and others
+    gained popularity. These new plug-ins brought different approaches to creating
+    and running networks. This drove the creation of a standard for how systems such
+    as Kubernetes could request networking resources for its workloads. This standard
+    is known as the [Container Networking Interface (CNI)](https://github.com/containernetworking/cni).
+    Today, all networking options compatible with Kubernetes conform to this interface.
+    Similar to the Container Storage Interface (CSI) and Container Runtime Interface
+    (CRI), this gives us flexibility in the networking stack of our application platform.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The CNI specification defines a few key operations:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`ADD`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Adds a container to the network and responds with the associated interface(s),
+    IP(s), and more.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`DELETE`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Removes a container from the network and releases all associated resources.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`CHECK`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Verifies a container’s network is set up properly and responds with an error
+    if there are issues.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`VERSION`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Returns the CNI version(s) supported by the plug-in.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This functionality is implemented in a binary that is installed on the host.
+    The kubelet will communicate with the appropriate CNI binary based on the configuration
+    it expects on the host. An example of this configuration file is as follows:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](assets/1.png)](#co_pod_networking_CO3-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The CNI (specification) version this plug-in expects to talk over.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](assets/2.png)](#co_pod_networking_CO3-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The CNI driver (binary) to send networking setup requests to.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![3](assets/3.png)](#co_pod_networking_CO3-3)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The IPAM driver to use, specified when the CNI plug-in does not handle IPAM.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Multiple CNI configurations may exist in the CNI *conf* directory. They are
+    evaluated lexicographically, and the first configuration will be used.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Along with the CNI configuration and CNI binary, most plug-ins run a Pod on
+    each host that handles concerns beyond interface attachment and IPAM. This includes
+    responsibilities such as route propagation and network policy programming.
+  prefs: []
+  type: TYPE_NORMAL
+- en: CNI Installation
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'CNI drivers must be installed on every node taking part in the Pod network.
+    Additionally, the CNI configuration must be established. The installation is typically
+    handled when you deploy a CNI plug-in. For example, when deploying Cilium, a DaemonSet
+    is created, which puts a `cilium` Pod on every node. This Pod features a PostStart
+    command that runs the baked-in script *install-cni.sh*. This script will start
+    by installing two drivers. First it will install the loopback driver to support
+    the `lo` interface. Then it will install the `cilium` driver. The script executes
+    conceptually as follows (the example has been greatly simplified for brevity):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'After installation, the kubelet still needs to know which driver to use. It
+    will look within */etc/cni/net.d/* (configurable via flag) to find a CNI configuration.
+    The same *install-cni.sh* script adds this as follows:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'To demonstrate this order of operations, let’s take a look a newly bootstrapped,
+    single-node cluster. This cluster was bootstrapped using `kubeadm`. Examining
+    all Pods reveals that the `core-dns` Pods are not running:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'After examining the kubelet logs on the host scheduled to run `core-dns`, it
+    becomes clear that the lack of CNI configuration is causing the container runtime
+    to not start the Pod:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: This case of DNS not starting is one of the most common indicators of CNI issues
+    after cluster bootstrapping. Another symptom is nodes reporting `NotReady` status.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The reason Pods such as `kube-apiserver` and `kube-controller-manager` started
+    successfully is due to their use of the host network. Since they leverage the
+    host network and do not rely on the Pod network, they are not susceptible to the
+    same behavior seen by `core-dns`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Cilium can be deployed to the cluster by simply applying a YAML file from the
+    Cilium documentation. In doing so, the aforementioned `cilium` Pod is deployed
+    on every node, and the *cni-install.sh* script is run. Examining the CNI bin and
+    configuration directories, we can see the installed components:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: With this in place, the kubelet and container runtime are functioning as expected.
+    Most importantly, the `core-dns` Pod is up and running! [Figure 5-4](#docker_is_used_to_run_containers_the_kubelet_interacts_with_the_cni_to_attach_network)
+    demonstrates the relationship we’ve covered thus far in this section.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![prku 0504](assets/prku_0504.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 5-4\. Docker is used to run containers. The kubelet interacts with the
+    CNI to attach network interfaces and configure the Pod’s network.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: While this example explored installation via Cilium, most plug-ins follow a
+    similar deployment model. The key justification for plug-in choice is based on
+    the discussion in [“Networking Considerations”](#networking_considerations). With
+    this in mind, we’ll transition to exploring some CNI plug-ins to better understand
+    different approaches.
+  prefs: []
+  type: TYPE_NORMAL
+- en: CNI Plug-ins
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Now we are going to explore a few implementations of CNI. CNI has one of the
+    largest array of options relative to other interfaces such as CRI. As such, we
+    won’t be exhaustive in the plug-ins we cover and encourage you to explore more
+    than what we will. We chose the following plug-ins as a factor of being the most
+    common we see at clients and unique enough to demonstrate the variety of approaches.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: A Pod network is foundational to any Kubernetes cluster. As such, your CNI plug-in
+    will be in the critical path. As time goes on, you may wish to change your CNI
+    plug-in. If this occurs, we recommend rebuilding clusters as opposed to doing
+    in-place migrations. In this approach, you spin up a new cluster featuring the
+    new CNI. Then, depending on your architecture and operational model, migrate workloads
+    to the new cluster. It is possible to do an in-place CNI migration, but it takes
+    on nontrivial risk and should be carefully weighed against our recommendation.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Calico
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Calico is a well-established CNI plug-in in the cloud native ecosystem. [Project
+    Calico](https://www.projectcalico.org) is the open source project that supports
+    this CNI plug-in, and [Tigera](https://www.tigera.io) is the commercial company
+    offering enterprise features and support. Calico makes heavy use of BGP to propagate
+    workload routes between nodes and to offer integration with larger datacenter
+    fabrics. Along with installing a CNI binary, Calico runs a `calico-node` agent
+    on each host. This agent features a BIRD daemon for facilitating BGP peering between
+    nodes and a Felix agent, which takes the known routes and programs them into the
+    kernel route tables. This relationship is demonstrated in [Figure 5-5](#calico_component_relationship_showing_the_bgp_peering_to_communicate).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![prku 0505](assets/prku_0505.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 5-5\. Calico component relationship showing the BGP peering to communicate
+    routes and the programming of iptables and kernel routing tables accordingly.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'For IPAM, Calico initially respects the `cluster-cidr` setting described in
+    [“IP Address Management”](#IPAM). However, its capabilities are far greater than
+    relying on a CIDR allocation per node. Calico creates CRDs called [IPPools](https://oreil.ly/-Nd-Q).
+    This provides a lot of flexibility in IPAM, specifically enabling features such
+    as:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Configuring block size per node
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Specifying what node(s) an IPPool applies to
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Allocating IPPools to Namespaces, rather than nodes
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Configuring routing behavior
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Paired with the ability to have multiple pools per cluster, you have a lot
+    of flexibility in IPAM and network architecture. By default, clusters run a single
+    IPPool, as shown here:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](assets/1.png)](#co_pod_networking_CO4-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The cluster’s Pod network CIDR.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](assets/2.png)](#co_pod_networking_CO4-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The size of each node-level CIDR allocation.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![3](assets/3.png)](#co_pod_networking_CO4-3)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The encapsulation mode.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Calico offers a variety of ways to route packets inside of the cluster. This
+    includes:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Native
+  prefs: []
+  type: TYPE_NORMAL
+- en: No encapsulation of packets.
+  prefs: []
+  type: TYPE_NORMAL
+- en: IP-in-IP
+  prefs: []
+  type: TYPE_NORMAL
+- en: Simple encapsulation. IP packet is placed in the payload of another.
+  prefs: []
+  type: TYPE_NORMAL
+- en: VXLAN
+  prefs: []
+  type: TYPE_NORMAL
+- en: Advanced encapsulation. An entire L2 frame is encapsulated within a UDP packet.
+    Establishes a virtual L2 overlay.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Your choice is often a function of what your network can support. As described
+    in [“Routing Protocols”](#routing_protocols), native routing will likely provide
+    the best performance, smallest packet size, and simplest troubleshooting experience.
+    However, in many environments, especially those involving multiple subnets, this
+    mode is not possible. The encapsulation approaches work in most environments,
+    especially VXLAN. Additionally, the VXLAN mode does not require usage of BGP,
+    which can be a solution to environments where BGP peering is blocked. One unique
+    feature of Calico’s encapsulation approach is that it can be enabled exclusively
+    for traffic that crosses a subnet boundary. This enables near native performance
+    when routing within the subnet while not breaking routing outside the subnet.
+    This can be enabled by setting the IPPool’s `ipipMode` to `CrossSubnet`. [Figure 5-6](#traffic_behavior_when_cross_subnet)
+    demonstrates this behavior.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![prku 0506](assets/prku_0506.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 5-6\. Traffic behavior when CrossSubnet IP-in-IP mode is enabled.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'For deployments of Calico that keep BGP enabled, by default, no additional
+    work is needed thanks to the built-in BGP daemon in the `calico-node` Pod. In
+    more complex architectures, organizations use this BGP functionality as a way
+    to introduce [route reflectors](https://tools.ietf.org/html/rfc4456), sometimes
+    required at large scales when the (default) full-mesh approach becomes limited.
+    Along with route reflectors, peering can be configured to talk to network routers,
+    which in turn can make the overall network aware of routes to Pod IPs. This is
+    all configured using Calico’s BGPPeer CRD, seen here:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](assets/1.png)](#co_pod_networking_CO5-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The IP of the device to (bgp) peer with.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](assets/2.png)](#co_pod_networking_CO5-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The [autonomous system](https://oreil.ly/HiXLN) ID of the cluster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![3](assets/3.png)](#co_pod_networking_CO5-3)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Which cluster nodes should peer with this device. This field is optional. When
+    omitted, the BGPPeer configuration is considered *global*. Not peering global
+    is advisable only when a certain set of nodes should offer a unique routing capability,
+    such as offering routable IPs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In terms of network policy, Calico fully implements the Kubernetes NetworkPolicy
+    API. Calico offers two additional CRDs for increased functionality. These include
+    [(projectcalico.org/v3).NetworkPolicy](https://oreil.ly/oMsCm) and [GlobalNetworkPolicy](https://oreil.ly/3pUOs).
+    These Calico-specific APIs look similar to Kubernetes NetworkPolicy but feature
+    more capable rules and richer expressions for evaluation. Also, policy ordering
+    and application layer policy (requires integration with Istio) are supported.
+    GlobalNetworkPolicy is particularly useful because it applies policy at a cluster-wide
+    level. This makes it easier to achieve models such as micro-segmentation, where
+    all traffic is denied by default and egress/ingress is opened up based on the
+    workload needs. You can apply a GlobalNetworkPolicy that denies all traffic except
+    for critical services such as DNS. Then, at a Namespace level, you can open up
+    access to ingress and egress accordingly. Without GlobalNetworkPolicy, we’d need
+    to add and manage deny-all rules in *every* Namespace.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Historically, Calico has made use of iptables to implement packet routing decisions.
+    For Services, Calico relies on the programming done by kube-proxy to resolve an
+    endpoint for a Service. For network policy, Calico programs iptables to determine
+    whether a packet should be allowed to enter or leave the host. At the time of
+    this writing, Calico has introduced an eBPF dataplane option. We expect, over
+    time, more functionality used by Calico to be moved into this model.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Cilium
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Cilium is a newer CNI plug-in relative to Calico. It’s the first CNI plug-in
+    to utilize the [extended Berkeley Packet Filter (eBPF)](https://ebpf.io). This
+    means that rather than processing packets in userspace it is able to do so without
+    leaving kernel space. Paired with [eXpress Data Path (XDP)](https://oreil.ly/M3m6t),
+    hooks may be established in the NIC driver to make routing decisions. This enables
+    routing decisions to occur immediately when the packet is received.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As a technology, eBPF has demonstrated performance and scale at organizations
+    such as [Facebook](https://oreil.ly/agUXl) and [Netflix](https://oreil.ly/Ubt1Q).
+    With the usage of eBPF, Cilium is able to claim increased features around scalability,
+    observability, and security. This deep integration with BPF means that common
+    CNI concerns such as NetworkPolicy enforcement are no longer handled via iptables
+    in userspace. Instead, extensive use of [eBPF maps](https://oreil.ly/4Rdvf) enable
+    decisions to occur quickly in a way that scales as more and more rules are added.
+    [Figure 5-7](#cilium_interacts_with_ebpf_maps_and_programs_at_the_kernel_level)
+    shows a high-level overview of the stack with Cilium installed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![prku 0507](assets/prku_0507.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 5-7\. Cilium interacts with eBPF maps and programs at the kernel level.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'For IPAM, Cilium follows the model of either delegating IPAM to a cloud provider
+    integration or managing it itself. In the most common scenario of Cilium managing
+    IPAM, it will allocate Pod CIDRs to each node. By default, Cilium will manage
+    these CIDRs independent of Kubernetes Node allocations. The node-level addressing
+    will be exposed in the `CiliumNode` CRD. This will provide greater flexibility
+    in management of IPAM and is preferable. If you wish to stick to the default CIDR
+    allocations done in Kubernetes based on its Pod CIDR, Cilium offer a `kubernetes`
+    IPAM mode. This will rely on the Pod CIDR allocated to each node, which is exposed
+    in the Node object. Following is an example of a `CiliumNode` object. You can
+    expect one of these to exist for each node in the cluster:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](assets/1.png)](#co_pod_networking_CO6-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: IP address of this workload node.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](assets/2.png)](#co_pod_networking_CO6-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'CIDR allocated to this node. The size of this allocation can be controlled
+    in Cilium’s config using `cluster-pool-ipv4-mask-size: "24"`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Similar to Calico, Cilium offers encapsulated and native routing modes. The
+    default mode is encapsulated. Cilium supports using tunneling protocols VXLAN
+    or Geneve. This mode should work with most networks as long as host-to-host routability
+    pre-exists. To run in native mode, Pod routes must be understood at some level.
+    For example, Cilium supports using AWS’s ENI for IPAM. In this model, the Pod
+    IPs are known to the VPC and are inherently routable. To run a native-mode with
+    Cilium-managed IPAM, assuming the cluster runs in the same L2 segment, `auto-direct-node-routes:
+    true` can be added to Cilium’s configuration. Cilium will then program the host’s
+    route tables accordingly. If you span L2 networks, you may need to introduce additional
+    routing protocols such as BGP to distribute routes.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: In terms of network policy, Cilium can enforce the Kubernetes [NetworkPolicy
+    API](https://oreil.ly/_WUKS). As an alternative to this policy, Cilium offers
+    its own [CiliumNetworkPolicy](https://oreil.ly/EpkhJ) and [CiliumClusterwideNetworkPolicy](https://oreil.ly/RtYH5).
+    The key difference between these two is the scope of the policy. CiliumNetworkPolicy
+    is Namespace scoped, while CiliumClusterwideNetworkPolicy is cluster-wide. Both
+    of these have increased functionality beyond the capabilities of Kubernetes NetworkPolicy.
+    Along with supporting label-based layer 3 policy, they support policy based on
+    DNS resolution and application-level (layer 7) requests.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'While most CNI plug-ins don’t involve themselves with Services, Cilium offers
+    a fully featured kube-proxy replacement. This functionality is built into the
+    `cilium-agent` deployed to each node. To deploy in the mode, you’ll want to ensure
+    kube-proxy is absent from your cluster and that the `KubeProxyReplacement` setting
+    is set to `strict` in Cilium. When using this mode, Cilium will configure routes
+    for Services within eBPF maps, making resolution as fast as O(1). This is in contrast
+    to kube-proxy, which implements Services in iptables chains and can cause issues
+    at scale and/or when there is high churn of Services. Additionally, the CLI provided
+    by Cilium offers a good experience when troubleshooting constructs such as Services
+    or network policy. Rather than trying to interpret iptables chains, you can query
+    the system as follows:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  prefs: []
+  type: TYPE_PRE
+- en: Cilium’s use of eBPF programs and maps makes it an extremely compelling and
+    interesting CNI option. By continuing to leverage eBPF programs, more functionality
+    is being introduced that integrates with Cilium—for example, the ability to extract
+    flow data, policy violations, and more. To extract and present this valuable data,
+    [hubble](https://github.com/cilium/hubble) was introduced. It makes use of Cilium’s
+    eBPF programs to provide a UI and CLI for operators.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Lastly, we should mention that the eBPF functionality made available by Cilium
+    can be run alongside many existing CNI providers. This is achieved by running
+    Cilium in its CNI chaining mode. In this mode, an existing plug-in such as AWS’s
+    VPC CNI will handle routing and IPAM. Cilium’s responsibility will exclusively
+    be the functionality offered by its various eBPF programs including network observability,
+    load balancing, and network policy enforcement. This approach can be preferable
+    when you either cannot fully run Cilium in your environment or wish to test out
+    its functionality alongside your current CNI choice.
+  prefs: []
+  type: TYPE_NORMAL
+- en: AWS VPC CNI
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: AWS’s VPC CNI demonstrates a very different approach to what we have covered
+    thus far. Rather than running a Pod network independent of the node network, it
+    fully integrates Pods into the same network. Since a second network is not being
+    introduced, the concerns around distributing routes or tunneling protocols are
+    no longer needed. When a Pod is provided an IP, it becomes part of the network
+    in the same way an EC2 host would. It is subject to the same [route tables](https://oreil.ly/HYHHp)
+    as any other host in the subnet. Amazon refers to this as native VPC networking.
+  prefs: []
+  type: TYPE_NORMAL
+- en: For IPAM, a daemon will attach a second [elastic network interface (ENI)](https://oreil.ly/NBjs3)
+    to the Kubernetes node. It will then maintain a pool of [secondary IPs](https://oreil.ly/vUGdI)
+    that will eventually get attached to Pods. The amount of IPs available to a node
+    depends on the EC2 instance size. These IPs are typically “private” IPs from within
+    the VPC. As mentioned earlier in this chapter, this will consume IP space from
+    your VPC and make the IPAM system more complex than a completely independent Pod
+    network. However, the routing of traffic and troubleshooting has been significantly
+    simplified given we are not introducing a new network! [Figure 5-8](#the_ipam_daemon_is_responsible_for_maintaining_the_eni_and_pool_of)
+    demonstrates the IPAM setup with AWS VPC CNI.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![prku 0508](assets/prku_0508.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 5-8\. The IPAM daemon is responsible for maintaining the ENI and pool
+    of secondary IPs.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The use of ENIs will impact the number of Pods you can run per node. AWS [maintains
+    a list on its GitHub page](https://oreil.ly/jk_XL) that correlates instance type
+    to max Pods.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Multus
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: So far, we have covered specific CNI plug-ins that attach an interface to a
+    Pod, thus making it available on a network. But what if a Pod needs to be attached
+    to more than one network? This is where the Multus CNI plug-in comes in. While
+    not extremely common, there are use cases in the telecommunications industry that
+    require their network function virtualizations (NFVs) to route traffic to a specific,
+    dedicated, network.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Multus can be thought of as a CNI that enables using multiple other CNIs. In
+    this model, Multus becomes the CNI plug-in interacted with by Kubernetes. Multus
+    is configured with a default network that is commonly the network expected to
+    facilitate Pod-to-Pod communication. This could even be one of the plug-ins we’ve
+    talked about in this chapter! Then, Multus supports configuring secondary networks
+    by specifying additional plug-ins that can be used to attach another interface
+    to a Pod. Pods can then be annotated with something like `k8s.v1.cni.cncf.io/networks:
+    sriov-conf` to attach an additional network. [Figure 5-9](#shows_the_traffic_flow_of_a_multi_network_multus_configuration)
+    shows the result of this configuration.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![prku 0509](assets/prku_0509.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 5-9\. The traffic flow of a multinetwork Multus configuration.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Additional Plug-ins
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'The landscape of plug-ins is vast, and we’ve covered only a very small subset.
+    However, the ones covered in this chapter do identify some of the key variances
+    you’ll find in plug-ins. The majority of alternatives take differing approaches
+    to the engine used to facilitate the networking, yet many core principles stay
+    the same. The following list identifies some additional plug-ins and gives a small
+    glimpse into their networking approach:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Antrea](https://antrea.io/docs)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Data plane is facilitated via [Open vSwitch](https://www.openvswitch.org). Offers
+    high-performance routing along with the ability to introspect flow data.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Weave](https://www.weave.works/oss/net)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Overlay network that provides many mechanisms to route traffic—for example,
+    the fast datapath options using OVS modules to keep packet processing in the kernel.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[flannel](https://github.com/coreos/flannel)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Simple layer-3 network for Pods and one of the early CNIs. It supports multiple
+    backends yet is most commonly configured to use VXLAN.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Summary
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The Kubernetes/container networking ecosystem is filled with options. This is
+    good! As we’ve covered throughout this chapter, networking requirements can vary
+    significantly from organization to organization. Choosing a CNI plug-in is likely
+    to be one of the most foundational considerations for your eventual application
+    platform. While exploring the many options may feel overwhelming, we highly recommend
+    you work to better understand the networking requirements of your environment
+    and applications. With a deep understanding of this, the right networking plug-in
+    choice should fall into place!
+  prefs: []
+  type: TYPE_NORMAL

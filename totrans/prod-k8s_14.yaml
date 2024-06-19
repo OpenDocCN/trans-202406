@@ -1,0 +1,840 @@
+- en: Chapter 13\. Autoscaling
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The ability to automatically scale workload capacity is one of the compelling
+    benefits of cloud native systems. If you have applications that encounter significant
+    changes in capacity demands, autoscaling can reduce costs and reduce engineering
+    toil in managing those applications. Autoscaling is the process whereby we increase
+    and decrease the capacity of our workloads without human intervention. This begins
+    with leveraging metrics to provide an indicator for when application capacity
+    should be scaled. It includes tuning settings that respond to those metrics. And
+    it culminates in systems to actually expand and contract the resources available
+    to an application to accommodate the work it must perform.
+  prefs: []
+  type: TYPE_NORMAL
+- en: While autoscaling can provide wonderful benefits, it’s important to recognize
+    when you should *not* employ autoscaling. Autoscaling introduces complexity into
+    your application management. Besides initial setup, you will very likely need
+    to revisit and tune the configuration of your autoscaling mechanisms. Therefore,
+    if an application’s capacity demands do not change markedly, it may be perfectly
+    acceptable to provision for the highest traffic volumes an app will handle. If
+    your application load alters at predictable times, the manual effort to adjust
+    capacity at those times may be trivial enough that investing in autoscaling may
+    not be justified. As with virtually all technology, leverage them only when the
+    long-term benefit outweighs the setup and maintenance of the system.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'We’re going to divide the subject of autoscaling into two broad categories:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Workload autoscaling
+  prefs: []
+  type: TYPE_NORMAL
+- en: The automated management of the capacity for individual workloads
+  prefs: []
+  type: TYPE_NORMAL
+- en: Cluster autoscaling
+  prefs: []
+  type: TYPE_NORMAL
+- en: The automated management of the capacity of the underlying platform that hosts
+    workloads
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'As we examine these approaches, keep in mind the common primary motivations
+    for autoscaling:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Cost management
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is most relevant when you are renting your servers from a public cloud
+    provider or being charged internally for your usage of virtualized infrastructure.
+    Cluster autoscaling allows you to dynamically adjust the number of machines you
+    pay for. In order to achieve this elasticity in your infrastructure you will need
+    to leverage workload autoscaling to manage the capacity of the relevant applications
+    within the cluster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Capacity management
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you have a static set of infrastructure to leverage, autoscaling gives you
+    an opportunity to dynamically manage the allocation of that fixed capacity. For
+    example, an application that provides services to your business’s end users will
+    often have days and times when it is busiest. Workload autoscaling allows an application
+    to dynamically expand its capacity and consume large amounts of a cluster when
+    needed. It also allows it to contract and make room for other workloads. Perhaps
+    you have batch workloads that can take advantage of the unused compute resources
+    during off hours. Cluster autoscaling can remove considerable human toil in managing
+    compute infrastructure capacity since the number of machines used by your clusters
+    is adjusted without human intervention.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Autoscaling is compelling for applications that fluctuate in load and traffic.
+    Without autoscaling, you have two options:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Chronically overprovision your application capacity, incurring additional cost
+    to your business.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Alert your engineers for manual scaling operations, incurring additional toil
+    in your operations.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: In this chapter, we will first explore how to approach autoscaling, and how
+    to design software to leverage these systems. Then we will dive into details of
+    specific systems we can use to autoscale our applications in Kubernetes-based
+    platforms. This will include horizontal and vertical autoscaling, including the
+    metrics we should use to trigger scaling events. We will also look at scaling
+    workloads in proportion to the cluster itself, as well as an example of custom
+    autoscaling you might consider. Finally, in [“Cluster Autoscaling”](#cluster_autoscaling),
+    we will address the scaling of the platform itself so that it can accommodate
+    significant changes in demand from the workloads it hosts.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Types of Scaling
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'In software engineering, scaling generally falls into two categories:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Horizontal scaling
+  prefs: []
+  type: TYPE_NORMAL
+- en: This involves changing the number of identical replicas of a workload. This
+    is either the number of Pods for a particular application or the number of nodes
+    in a cluster that hosts applications. Future references to horizontal scaling
+    will use the terms “out” or “in” when referring to increasing or decreasing the
+    number of Pods or nodes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Vertical scaling
+  prefs: []
+  type: TYPE_NORMAL
+- en: This involves altering the resource capacity of a single instance. For an application,
+    this is changing the resource requests and/or limits for the containers of the
+    application. For nodes of a cluster, this generally involves changing the amount
+    of CPU and memory resources available. Future references to vertical scaling will
+    use the terms “up” or “down” to refer to these changes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In systems that have a need to dynamically scale, i.e., have frequent, significant
+    changes in load, prefer horizontal scaling where possible. Vertical scaling is
+    limited by the largest machine you have available to use. Furthermore, increasing
+    capacity with vertical scaling involves a restart for the application. Even in
+    virtualized environments where dynamic scaling of machines is possible, Pods will
+    need to be restarted as resource requests and limits cannot be dynamically updated
+    at this time. Compare this with horizontal scaling, where existing instances need
+    not restart and capacity is dynamically increased by adding replicas.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Application Architecture
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The topic of autoscaling is particularly important to service-oriented systems.
+    One of the benefits of decomposing applications into distinct components is the
+    ability to scale different parts of an application independently. We were doing
+    this with n-tier architectures well before cloud native emerged. It became commonplace
+    to separate web applications from their relational databases and scale the web
+    app independently. With microservice architecture we can extend this further.
+    For example, an enterprise website may have a service that powers its online store,
+    which is distinct from a service that serves blog posts. When there is a marketing
+    event, the online store can be scaled while the blog service is not affected and
+    may remain unchanged.
+  prefs: []
+  type: TYPE_NORMAL
+- en: With this opportunity to scale different services independently, you are able
+    to more efficiently utilize the infrastructure used by your workloads. However,
+    you introduce the management overhead of scaling many distinct workloads. Automating
+    this scaling process becomes very imporant. At a certain point, it becomes essential.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Autoscaling lends itself well to smaller, more nimble workloads that have tiny
+    image sizes and fast startup times. If the time required to pull a container image
+    onto a given node is short, and if the time it takes for the application to start
+    once the container is created is also short, the workload can respond to scaling
+    events quickly. Capacity can be adjusted much more readily. Applications with
+    image sizes over a gigabyte and startup scripts that run for minutes are far less
+    suited to responding to changes in load. Workloads like this are not good candidates
+    for autoscaling, so keep this in mind when designing and building your apps.
+  prefs: []
+  type: TYPE_NORMAL
+- en: It’s also important to recognize that autoscaling will involve stopping instances
+    of the app. This doesn’t apply when workloads scale out, of course. However, that
+    which scales out, must scale back in. That will involve stopping running instances.
+    And with vertically scaled workloads, restarts are required to update resource
+    allocations. In either case, your application’s ability to gracefully shut down
+    will be important. [Chapter 14](ch14.html#application_considerations_chapter)
+    covers this topic in detail.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Now that we’ve addressed the design concerns to keep in mind, let’s dive into
+    the details of autoscaling workloads in Kubernetes clusters.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Workload Autoscaling
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: This section will focus on autoscaling application workloads. This involves
+    monitoring some metric and adjusting workload capacity without human intervention.
+    While this sounds like a set-it-and-forget-it operation, don’t treat it that way,
+    especially in initial stages. Even after you load test your autoscaling configurations,
+    you need to ensure the behavior you get in production is what you intended. Load
+    tests don’t always mimic production conditions accurately. So once in production,
+    you will want to check in on the application to verify that it is scaling at the
+    right thresholds and your objectives for efficiency and end-user experience are
+    being met. Strongly consider setting alerts so that you get notified of significant
+    scaling events to review and tweak its behavior as needed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Most of this section will address the Horizontal Pod Autoscaler and the Vertical
+    Pod Autoscaler. These are the most common tools used for autoscaling workloads
+    on Kubernetes. We’ll also dig into the metrics your workload uses to trigger scaling
+    events and when you should consider custom application metrics for this purpose.
+    We’ll also look at the Cluster Proportional Autoscaler and the use cases where
+    that makes sense. Lastly, we’ll touch on custom methods beyond these particular
+    tools you might consider.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Horizontal Pod Autoscaler
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The Horizontal Pod Autoscaler (HPA) is the most common tool used for autoscaling
+    workloads in Kubernetes-based platforms. It is natively supported by Kubernetes
+    with the HorizontalPodAutoscaler resource and a controller bundled into the kube-controller-manager.
+    If you are using CPU or memory consumption as a metric for autoscaling your workload,
+    the barrier to entry is low for using the HPA.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In this case, you can use the [Kubernetes Metrics Server](https://oreil.ly/S0vbj)
+    to make the PodMetrics available to the HPA. The Metrics Server collects CPU and
+    memory usage metrics for containers from the kubelets in the cluster and makes
+    them available through the resource metrics API in PodMetrics resources. The Metrics
+    Server leverages the [Kubernetes API aggregation layer](https://oreil.ly/eXDcl).
+    Requests for resources in the API group and version `metrics.k8s.io/v1beta1` will
+    be proxied to the Metrics Server.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Figure 13-1](#horizontal_pod_autoscaling) illustrates how the components carry
+    out this function. The Metrics Server collects resource usage metrics for the
+    containers on the platform. It gets this data from the kubelets running on each
+    node in the cluster and makes that data available to clients that need to access
+    it. The HPA controller queries the Kubernetes API server to retrieve that resource
+    usage data every 15 seconds, by default. The Kubernetes API proxies the requests
+    to the Metrics Server, which serves the requested data. The HPA controller maintains
+    a watch on the HorizontalPodAutoscaler resource type and uses the configuration
+    defined there to determine if the number of replicas for an application is appropriate.
+    [Example 13-1](#an_example_of_deployment_and_horizontalpdodautoscaler_manifests)
+    demonstrates how this determination is made. The app is most commonly defined
+    with a Deployment resource, and, when the HPA controller determines that the replica
+    count needs to be adjusted, it updates the relevant Deployment through the API
+    server. Subsequently, the Deployment controller responds by updating the ReplicaSet,
+    which leads to a change in the number of Pods.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![prku 1301](assets/prku_1301.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 13-1\. Horizontal Pod autoscaling.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The desired state for an HPA is declared in the HorizontalPodAutoscaler resource,
+    as demonstrated in the following example. The `targetCPUUtilizationPercentage`
+    is used to determine replica count for the target workload.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 13-1\. An example of Deployment and HorizontalPodAutoscaler manifests
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](assets/1.png)](#co_autoscaling_CO1-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: A `resources.requests` value must be set for the metric being used.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](assets/2.png)](#co_autoscaling_CO1-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The replicas will never scale in below this value.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![3](assets/3.png)](#co_autoscaling_CO1-3)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The replicas will never scale out beyond this value.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![4](assets/4.png)](#co_autoscaling_CO1-4)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The desired CPU utilization. If the actual utilization goes significantly beyond
+    this value, the replica count will be increased; if significantly below, decreased.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: If you have a use case to use multiple metrics, e.g., CPU *and* memory, to trigger
+    scaling events, you can use the `autoscaling/v2beta2` API. In this case, the HPA
+    controller will calculate the appropriate number of replicas based on each metric
+    individually, and then apply the highest value.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This is the most common and readily used autoscaling method, is widely applicable,
+    and is relatively uncomplicated to implement. However, it’s important to understand
+    the limitations of this method:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Not all workloads can scale horizontally
+  prefs: []
+  type: TYPE_NORMAL
+- en: For applications that cannot share load among distinct instances, horizontal
+    scaling is useless. This is true for some stateful workloads and leader-elected
+    applications. For these use cases you may consider vertical Pod autoscaling.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The cluster size will limit scaling
+  prefs: []
+  type: TYPE_NORMAL
+- en: As an application scales out, it may run out of capacity available in the worker
+    nodes of a cluster. This can be solved by provisioning sufficient capacity ahead
+    of time, using alerts to prompt your platform operators to add capacity manually,
+    or by using cluster autoscaling, which is discussed in another section of this
+    chapter.
+  prefs: []
+  type: TYPE_NORMAL
+- en: CPU and memory may not be the right metric to use for scaling decisions
+  prefs: []
+  type: TYPE_NORMAL
+- en: If your workload exposes a custom metric that better identifies a need to scale,
+    it can be used. We will cover that use case later in this chapter.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Avoid autoscaling your workload based on a metric that does not always change
+    in proportion to the load placed on the application. The most common autoscaling
+    metric is CPU. However, if a particular workload’s CPU doesn’t change significantly
+    with added load, and instead consumes memory in more direct proportion to increased
+    load, do not use CPU. A less obvious example is if a workload consumes added CPU
+    at startup. During normal operation, CPU may be a perfectly useful trigger for
+    autoscaling. However, a startup CPU spike will be interpreted by the HPA as a
+    trigger for a scaling event even though traffic has not induced the spike. There
+    are ways to mitigate this with kube-controller-manager flags such as `--horizontal-pod-autoscaler-cpu-initialization-period`,
+    which will provide a startup grace period, or the `--horizontal-pod-autoscaler-sync-period`,
+    which allows you to increase the time between scaling evaluations. But note that
+    these flags are set on the kube-controller-manager. These will affect all HPAs
+    across the entire cluster, which will impact workloads that do *not* have high
+    startup CPU consumption. You could wind up reducing the responsiveness of the
+    HPA for workloads cluster-wide. If you find your team employing workarounds to
+    make CPU consumption work as a trigger for your autoscaling needs, consider using
+    a more representative custom metric. Perhaps number of HTTP requests received
+    would make a better measuring stick, for example.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'That wraps up the Horizontal Pod Autoscaler. Next, we’ll look at another form
+    of autoscaling available in Kubernetes: vertical Pod autoscaling.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Vertical Pod Autoscaler
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: For reasons covered earlier in [“Types of Scaling”](#types_of_scaling), vertically
+    scaling workloads is a less common requirement. Furthermore, automating vertical
+    scaling is more complex to implement in Kubernetes. While the HPA is included
+    in core Kubernetes, the VPA needs to be implemented by deploying three distinct
+    controller components in addition to the Metrics Server. For these reasons, the
+    [Vertical Pod Autoscaler (VPA)](https://oreil.ly/TxeiY) is less commonly used
+    than the HPA.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The VPA consists of three distinct components:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Recommender
+  prefs: []
+  type: TYPE_NORMAL
+- en: Determines optimum container CPU and/or memory request values based on usage
+    in the PodMetrics resource for the Pod in question.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Admission plug-in
+  prefs: []
+  type: TYPE_NORMAL
+- en: Mutates the resource requests and limits on new Pods when they are created based
+    on the recommender’s recommendation.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Updater
+  prefs: []
+  type: TYPE_NORMAL
+- en: Evicts Pods so that they may have updated values applied by the admission plug-in.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Figure 13-2](#vertical_pod_autoscaling) illustrates the interaction of components
+    with the VPA.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![prku 1302](assets/prku_1302.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 13-2\. Vertical Pod autoscaling.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The desired state for a VPA is declared in the VerticalPodAutoscaler resource
+    as demonstrated in [Example 13-2](#ex_13-2).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 13-2\. A Pod resource and the VerticalPodAutoscaler resource that configures
+    vertical autoscaling
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](assets/1.png)](#co_autoscaling_CO2-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The VPA will maintain the requests:limit ratio when updating values. In this
+    guaranteed QOS example, any change to requests will result in an identical change
+    to the limits.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](assets/2.png)](#co_autoscaling_CO2-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This scaling policy will apply to every container—just one in this example.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![3](assets/3.png)](#co_autoscaling_CO2-3)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Resources requests will not be set below these values.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![4](assets/4.png)](#co_autoscaling_CO2-4)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Resources requests will not be set above these values.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![5](assets/5.png)](#co_autoscaling_CO2-5)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Specifies the resources being autoscaled.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![6](assets/6.png)](#co_autoscaling_CO2-6)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: There are three `updateMode` options. `Recreate` mode will activate autoscaling.
+    `Initial` mode will apply admission control to set resource values when created,
+    but will never evict any Pods. `Off` mode will recommend resource values but never
+    automatically change them.
+  prefs: []
+  type: TYPE_NORMAL
+- en: We very rarely see the VPA in full `Recreate` mode in the field. However, using
+    it in `Off` mode can also be valuable. While comprehensive load testing and profiling
+    of applications is recommended and preferable before they go to production, that’s
+    not always the reality. In corporate environments with deadlines, workloads are
+    often deployed to production before the resource consumption profile is well understood.
+    This commonly leads to overrequested resources as a safety measure, which often
+    results in poor utilization of infrastructure. In these cases, the VPA can be
+    used to recommend values that are then evaluated and manually updated by engineers
+    once production load has been applied. This gives them peace of mind that workloads
+    will not be evicted at peak usage times, which is particularly important if an
+    app does not yet gracefully shut down. But, because the VPA recommends values,
+    it saves some of the toil in reviewing resource usage metrics and determining
+    optimum values. In this use case, it is not an autoscaler, but rather a resource
+    tuning aid.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To get recommendations from a VPA in `Off` mode, run `kubectl describe vpa <vpa
+    name>`. You will get an output similar to [Example 13-3](#ex_13-3) under the `Status`
+    section.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 13-3\. Vertical Pod Autoscaler recommendation
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: It will provide recommendations for each container. Use the `Target` value as
+    a baseline recommendation for the CPU and memory requests.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Autoscaling with Custom Metrics
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: If CPU and memory consumption are not good metrics by which to scale a particular
+    workload, you can leverage custom metrics as an alternative. We can still use
+    tools like the HPA. However, we will change the source of metrics used to trigger
+    the autoscaling. The first step is to expose the appropriate custom metrics from
+    your application. [Chapter 14](ch14.html#application_considerations_chapter) addresses
+    how to go about doing this.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Next, you will need to expose the custom metrics to the autoscaler. This will
+    require a custom metrics server that will be used instead of the Kubernetes Metrics
+    Server that we looked at earlier. Some vendors, such as Datadog, provide systems
+    to do this in Kubernetes. You can also do it with Prometheus, assuming you have
+    a Prometheus server that is scraping and storing the app’s custom metrics, which
+    is covered in [Chapter 10](ch10.html#chapter10). In this case, we can use the
+    [Prometheus Adapter](https://oreil.ly/vDgk3) to serve the custom metrics.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Prometheus Adapter will retrieve the custom metrics from Prometheus’ HTTP
+    API and expose them through the Kubernetes API. Like the Metrics Server, the Prometheus
+    Adapter uses Kubernetes API aggregation to instruct Kubernetes to proxy requests
+    for metrics APIs to the Prometheus Adapter. In fact, in addition to the custom
+    metrics API, the Prometheus Adapter implements the resource metrics API that allows
+    you to entirely replace the Metrics Server functionality with the Prometheus Adapter.
+    Additionally, it implements the external metrics API that offers the opportunity
+    to scale an application based on metrics external to the cluster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: When leveraging custom metrics for horizontal autoscaling, Prometheus scrapes
+    those metrics from your app. The Prometheus Adapter gets those metrics from Prometheus
+    and exposes them through the Kubernetes API server. The HPA queries those metrics
+    and scales your application accordingly, as shown in [Figure 13-3](#horizontal_pod_autoscaling_with_custom_metrics).
+  prefs: []
+  type: TYPE_NORMAL
+- en: While leveraging custom metrics in this way introduces some added complexity,
+    if you are already exposing useful metrics from your workloads and using Prometheus
+    to monitor them, replacing Metrics Server with the Prometheus Adapter is not a
+    huge leap. And the additional autoscaling opportunities it opens up make it well
+    worth considering.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![prku 1303](assets/prku_1303.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 13-3\. Horizontal Pod autoscaling with custom metrics.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Cluster Proportional Autoscaler
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The [Cluster Proportional Autoscaler](https://oreil.ly/2ATBG) (CPA) is a horizontal
+    workload autoscaler that scales replicas based on the number of nodes (or a subset
+    of nodes) in the cluster. So, unlike the HPA, it does not rely on any of the metrics
+    APIs. Therefore, it does not have a dependency on the Metrics Server or Prometheus
+    Adapter. Also, it is not configured with a Kubernetes resource, but rather uses
+    flags to configure target workloads and a ConfigMap for scaling configuration.
+    [Figure 13-4](#cluster_proportional_autoscaling) illustrates the CPA’s much simpler
+    operational model.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![prku 1304](assets/prku_1304.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 13-4\. Cluster proportional autoscaling.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The CPA has a narrower use case. Workloads that need to scale in proportion
+    to the cluster are generally limited to platform services. When considering the
+    CPA, evaluate whether an HPA would provide a better solution, especially if you
+    are already leveraging the HPA with other workloads. If you are already using
+    HPAs, you will have the Metrics Server or Prometheus Adapter already deployed
+    to implement the necessary metrics APIs. So deploying another autoscaler, and
+    the maintenance overhead that goes with it, may not be the best option. Alternatively,
+    in a cluster where HPAs are *not* already in use, and the CPA provides the functionality
+    you need, it becomes more attractive due to its simple operational model.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'There are two scaling methods used by the CPA:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The linear method scales your application in direct proportion to how many nodes
+    or cores are in the cluster.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The ladder method uses a step function to determine the proportion of nodes:replicas
+    and/or cores:replicas.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: We have seen the CPA used with success for services like cluster DNS where clusters
+    are allowed to scale to hundreds of worker nodes. In cases such as this, the traffic
+    and demand for a service at 5 nodes is going to be drastically different than
+    at 300 nodes, so this approach can be quite useful.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Custom Autoscaling
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'On the subject of workload autoscaling, so far we’ve discussed some specific
+    tools available in the community: the HPA, VPA, and CPA along with the Metrics
+    Server and Prometheus Adapter. But autoscaling your workloads is not limited to
+    this tool set. Any automated method you can employ that implements the scaling
+    behavior you require falls into the same category. For example, if you know the
+    days and times when traffic increases for your application, you can implement
+    something as simple as a Kubernetes CronJob that updates the replica count on
+    the relevant Deployment. In fact, if you can leverage a simple, straightforward
+    method such as this, lean toward the simpler solution. A system with fewer moving
+    parts is less likely to produce unexpected results.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This wraps up the approaches to autoscaling workloads. We’ve looked at several
+    ways to approach this using core Kubernetes, community-developed add-on components,
+    and custom solutions. Next, we’re going to look at autoscaling the substrate that
+    hosts these workloads: the Kubernetes cluster itself.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Cluster Autoscaling
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The Kubernetes [Cluster Autoscaler (CA)](https://oreil.ly/Q5Xdp) provides an
+    automated solution for horizontally scaling the worker nodes in your cluster.
+    It provides a solution to one of the limitations of HPAs and can alleviate significant
+    toil around capacity and cost management for your Kubernetes infrastructure.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As platform teams adopt your Kubernetes-based platform, you will need to manage
+    the clusters’ capacity as new tenants are onboarded. This can be a manual, routine
+    review process. It can also be alert-driven, whereby you use alerting rules on
+    usage metrics to notify you of situations where workers need to be added or removed.
+    Or you can fully automate the operation such that you can simply add and remove
+    tenants and let the CA manage the cluster scaling to accommodate.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Furthermore, if you are leveraging workload autoscaling with significant fluctuation
+    in resource consumption, the story for CA becomes even more compelling. As load
+    increases on an HPA-managed workload, its replica count will increase. If you
+    run out of compute resources in your cluster, some of the Pods will not be scheduled
+    and remain in a `Pending` state. CA looks for this exact condition, calculates
+    the number of nodes needed to satisfy the shortage, and adds new nodes to your
+    cluster. The diagram in [Figure 13-5](#cluster_autoscaler_scaling_out_nodes_in_response_to_pod_replicas_scaling_out)
+    shows the cluster scaling out to accommodate a horizontally scaling application.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![prku 1305](assets/prku_1305.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 13-5\. Cluster Autoscaler scaling out nodes in response to Pod replicas
+    scaling out.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: On the other side of the coin, when load reduces and the HPA scales in the Pods
+    for an application, the CA will look for nodes that have been underutilized for
+    an extended period. If the Pods on the underutilized nodes can be rescheduled
+    to other nodes in the cluster, the CA will deprovision the underutilized nodes
+    to scale the cluster in.
+  prefs: []
+  type: TYPE_NORMAL
+- en: One thing to keep in mind when you invoke this dynamic management of worker
+    nodes is that it will inevitably shuffle the distribution of Pods across your
+    nodes. The Kubernetes scheduler will generally spread Pods evenly around your
+    worker nodes when they are first created. However, once a Pod is running, the
+    scheduling decision that determined its home will not be reevaluated unless it
+    is evicted. So when a particular application horizontally scales out and then
+    back in, you may end up with Pods unevenly spread across your worker nodes. In
+    some cases you may end up with many replicas for a Deployment clustered on just
+    a few nodes. If this presents a threat to a workload’s node failure tolerance,
+    you can use the [Kubernetes descheduler](https://github.com/kubernetes-sigs/descheduler)
+    to evict them according to different policies. Once evicted, the Pods will be
+    rescheduled. This will help rebalance their distribution across nodes. We have
+    not found many cases where there was a genuine compelling need to do this, but
+    it is an available option.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As you might imagine, there are infrastructure management concerns to plan for
+    if you are considering cluster autoscaling. Firstly, you will need to use one
+    of the supported cloud providers that are documented in the project repo. Next
+    you will have to give permissions to CA to create and destroy machines for you.
+  prefs: []
+  type: TYPE_NORMAL
+- en: These infrastructure management concerns change somewhat if you use the CA with
+    the [Cluster API](https://github.com/kubernetes-sigs/cluster-api) project. Cluster
+    API uses its own Kubernetes operators to manage cluster infrastructure. In this
+    case, instead of connecting directly with the cloud provider to add and remove
+    worker nodes, CA offloads this operation to Cluster API. The CA simply updates
+    the replicas in a `MachineDeployment` resource, which is reconciled by Cluster
+    API controllers. This removes the need to use a cloud provider that’s compatible
+    with CA (however, you *will* need to check whether there is a Cluster API provider
+    for your cloud provider). The permissions issue is also offloaded to Cluster API
+    components. This is a better model in many ways. However, Cluster API is commonly
+    implemented using management clusters. This introduces external dependencies for
+    cluster autoscaling that should be considered. This topic is covered further in
+    [“Management clusters”](ch02.html#management_clusters).
+  prefs: []
+  type: TYPE_NORMAL
+- en: The scaling behavior of CA is quite configurable. The CA is configured using
+    flags that are documented in the project’s [FAQ on GitHub](https://oreil.ly/DzQ0J).
+    [Example 13-4](#ex_13-4) shows a CA Deployment manifest for AWS and includes examples
+    of how to set some common flags.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 13-4\. CA Deployment manifest targeting an Amazon Web Services autoscaling
+    group
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](assets/1.png)](#co_autoscaling_CO3-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Configures the supported cloud provider; AWS in this case.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](assets/2.png)](#co_autoscaling_CO3-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This flag configures the CA to update an AWS autoscaling group called `worker-auto-scaling-group`.
+    It allows CA to scale the number of machines in this group between 1 and 10.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Cluster autoscaling can be extremely useful. It unlocks one of the compelling
+    benefits offered by cloud native infrastructure. However, it introduces nontrivial
+    complexity. Ensure you load test and understand well how the system will behave
+    before you rely on it to autonomously manage the scaling of business-critical
+    platforms in production. One important consideration is to clearly understand
+    the upper limits that you will be reaching with your cluster. If your platform
+    hosts significant workload capacity and you allow your cluster to scale to hundreds
+    of nodes, understand where it will scale to before components of the platform
+    start to introduce bottlenecks. More discussion around cluster sizing can be found
+    in [Chapter 2](ch02.html#deployment_models).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Another consideration with cluster autoscaling is the speed at which your clusters
+    will scale when the need arises. This is where overprovisioning may help.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Cluster Overprovisioning
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: It’s important to remember that Cluster Autoscaler responds to `Pending` Pods
+    that couldn’t be scheduled due to insufficient compute resources in the cluster.
+    So at the moment the CA takes action to scale out the cluster nodes, your cluster
+    is already full. This means that, if not managed properly, your scaling workloads
+    could suffer from a shortage of capacity for the time it takes for new nodes to
+    become available for scheduling. This is where [cluster-overprovisioner](https://oreil.ly/vXij5)
+    can help.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'First it’s important to understand how long it takes for new nodes to spin
+    up, join the cluster, and become ready to accept workloads. Once this is understood,
+    you can address the best solution for your situation:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Set the target utilization in your HPAs sufficiently low so that your workloads
+    are scaled out well before the application is at full capacity. This could provide
+    the buffer that allows for time to provision nodes. It relieves the need for overprovisioning
+    the cluster, but if you need to account for particularly sharp increases in load,
+    you may need to set that target utilization too low to guard against capacity
+    shortages. This leads to a situation where you have chronically overprovisioned
+    workload capacity to account for rare events.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Another solution is to use cluster overprovisioning. With this method, you put
+    empty nodes on standby to provide the buffer for workloads that are scaling out.
+    This will relieve the need to set target utilization on HPAs artificially low
+    in preparation for high load events.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Cluster overprovisioning works by deploying Pods that do the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Request enough resources to reserve virtually all resources for a node
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Consume no actual resources
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Use a priority class that causes them to be evicted as soon as any other Pod
+    needs it
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: With the resource requests on the overprovisioner Pod set to reserve an entire
+    node, you can then adjust the number of standby nodes with the number of replicas
+    on the overprovisioner Deployment. Overprovisioning for a particular event or
+    marketing campaign can be achieved by simply increasing the number of replicas
+    on the overprovisioner Deployment.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Figure 13-6](#cluster_overprovisioning) illustrates what this looks like.
+    This illustration shows just a single Pod replica, but it can be as many as you
+    need to provide adequate buffer for scaling events.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![prku 1306](assets/prku_1306.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 13-6\. Cluster overprovisioning.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'The node occupied by the overprovisioner Pod is now on standby for whenever
+    it becomes needed by another Pod in the cluster. You can accomplish this by creating
+    a priority class with `value: -1` and then applying this to the overprovisioner
+    Deployment. This will make all other workloads a higher priority by default. Should
+    a Pod from another workload need the resources, the overprovisioner Pod will be
+    immediately evicted, making way for the scaling workload. The overprovisioner
+    Pod will go into a `Pending` state, which will trigger the Cluster Autoscaler
+    to provision a new node to sit on standby, as shown in [Figure 13-7](#scaling_out_with_cluster_overprivisoner).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![prku 1307](assets/prku_1307.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 13-7\. Scaling out with cluster-overprovisioner.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: With Cluster Autoscaler and cluster-overprovisioner, you have effective mechanisms
+    to horizontally scale your Kubernetes clusters, which dovetails very nicely with
+    horizontally scaling workloads. We haven’t covered vertically scaling clusters
+    here because we have not found a use for it that isn’t solved by horizontal scaling.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Summary
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: If you have applications that are subject to significant changes in capacity
+    requirements, lean toward using horizontal scaling, if possible. Develop the apps
+    that you will autoscale to play nicely with being stopped and started frequently
+    and expose custom metrics if CPU or memory are not good metrics to trigger scaling.
+    Test your autoscaling to ensure it behaves as you expect to optimize efficiency
+    and end-user experience. If your workloads will scale beyond the capacity of your
+    cluster, consider autoscaling the cluster itself. And if your scaling events are
+    particularly sharp, consider putting nodes on standby with cluster-overprovisioner.
+  prefs: []
+  type: TYPE_NORMAL

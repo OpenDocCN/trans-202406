@@ -1,0 +1,1837 @@
+- en: Chapter 8\. Transactions
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: MySQL has nontransactional storage engines, like MyISAM, but InnoDB is the default
+    and the presumptive norm. Therefore, practically speaking, every MySQL query executes
+    in a transaction by default, even a single `SELECT` statement.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'This chapter does not apply if you happen to be using another storage engine,
+    like Aria or MyRocks. But more than likely, you’re using InnoDB, in which case:
+    every MySQL query is a transaction.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'From our point of view as engineers, transactions appear conceptual: `BEGIN`,
+    execute queries, and `COMMIT`. Then we trust MySQL (and InnoDB) to uphold the
+    ACID properties: atomicity, consistency, isolation, and durability. When the application
+    workload—queries, indexes, data, and access patterns—is well optimized, transactions
+    are a nonissue with respect to performance. (Most database topics are a nonissue
+    when the workload is well optimized.) But behind the scenes, transactions invoke
+    a whole new world of considerations because upholding ACID properties while maintaining
+    performance is not an easy feat. Fortunately, MySQL shines at executing transactions.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: As with replication lag in the previous chapter, the inner workings of transactions
+    are beyond the scope of this book, but understanding a few basic concepts is pivotal
+    to avoiding common problems that hoist transactions from the lowest levels of
+    MySQL to the tops of engineers’ minds. A little understanding avoids a lot of
+    problems.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This chapter examines MySQL transactions with respect to avoiding common problems.
+    There are five major sections. The first descends into row locking with respect
+    to transaction isolation levels. The second examines how InnoDB manages concurrent
+    data access while guaranteeing ACID properties: MVCC and the undo logs. The third
+    describes the history list length and how it indicates problematic transactions.
+    The fourth enumerates common problems with transactions to avoid. The fifth is
+    a foray into reporting transaction details in MySQL.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Row Locking
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'Reads do not lock rows (except for `SELECT`…`FOR SHARE` and `SELECT`…`FOR UPDATE`),
+    but writes always lock rows. That’s simple and expected, but the tricky question
+    is: which rows must be locked? Of course, the rows being written must be locked.
+    But in a `REPEATABLE READ` transaction, InnoDB can lock significantly more rows
+    than it writes. This section illustrates and explains why. But first, we must
+    shift terminology into the vernacular of InnoDB data locking.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Since tables are indexes (recall [“InnoDB Tables Are Indexes”](ch02.html#tables-are-indexes)),
+    rows are index *records*. InnoDB row locking is discussed in terms of *locking
+    records*, not locking rows, because of index record gaps. A *gap* is a range of
+    values between two index records, as illustrated in [Figure 8-1](#trx-idx-values):
+    a primary key with two records, two pseudo-records (infimum and supremum), and
+    three gaps.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![emsp 0801](assets/emsp_0801.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 8-1\. Index record gaps
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Records are depicted as solid squares with index values inside: 2 and 5 in
+    this example. Pseudo-records are depicted as solid arrows on each end of the index:
+    *infimum* and *supremum*. Every InnoDB B-tree index has these two pseudo-records:
+    infimum represents all index values less than the minimum record (2 in this example);
+    supremum represents all index values greater than the maximum record (5 in this
+    example). Index records don’t begin at 2 or end at 5; technically, they begin
+    and end at the infimum and supremum, and examples in this section reveal the importance
+    of this detail. Gaps are depicted as dashed squares with no index value. If the
+    primary key is a single unsigned four-byte integer, then the three gaps are (in
+    interval notation):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`[0, 2)`'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`(2, 5)`'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`(5, 4294967295]`'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'When discussing row locking, the term *record* is used instead of *row* because
+    records have gaps, but it could be misleading to say that rows have gaps. For
+    example, if the application has two rows with values 2 and 5, that does not entail
+    a gap in the rows comprising values 3 and 4 because maybe these aren’t valid values
+    for the application. But with respect to an index, between record values 2 and
+    5, values 3 and 4 constitute a valid record gap (presuming an integer column).
+    To put it succinctly: the application deals in rows; InnoDB row locking deals
+    in records. Examples in this section demonstrate that gap locks are surprisingly
+    pervasive and arguably more important than individual record locks.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The term *data locks* refers to all types of locks. There are many types of
+    data locks, but [Table 8-1](#lock-types) lists the fundamental InnoDB data locks.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 8-1\. Fundamental InnoDB data locks
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Lock type | Abbreviation | Locks gap | Locks |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| *Record lock* | `REC_NOT_GAP` |  | Locks a single record |'
+  prefs: []
+  type: TYPE_TB
+- en: '| *Gap lock* | `GAP` | ✓ | Locks the gap before (less than) a record |'
+  prefs: []
+  type: TYPE_TB
+- en: '| *Next-key lock* |  | ✓ | Locks a single record and the gap before it |'
+  prefs: []
+  type: TYPE_TB
+- en: '| *Insert intention lock* | `INSERT_INTENTION` |  | Allows `INSERT` into gap
+    |'
+  prefs: []
+  type: TYPE_TB
+- en: The best way to understand the fundamental InnoDB data locks is with real transactions,
+    real locks, and illustrations.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: As of MySQL 8.0.16, data locks are easy to examine using Performance Schema
+    tables `data_locks` and `data_lock_waits`. The following examples use these Performance
+    Schema tables.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In MySQL 5.7 and older, you must first `SET GLOBAL innodb_status_output_locks=ON`,
+    which requires `SUPER` MySQL privileges, then execute `SHOW ENGINE INNODB STATUS`
+    and shift through the output to find the relevant transaction and locks. It’s
+    not easy—even experts strain to carefully parse the output. Since MySQL 5.7 is
+    not the current release, I do not use its output in this section; but since MySQL
+    5.7 is still widely used, refer to my blog post [“MySQL Data Locks: Mapping 8.0
+    to 5.7”](https://oreil.ly/pIAM6) for an illustrated guide to mapping data lock
+    output from MySQL 5.7 to MySQL 8.0.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Let’s reuse the tried and true table `elem` but simplified as shown in [Example 8-1](#trx-elem).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 8-1\. Table `elem` simplified
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: The table `elem` is nearly the same as before, but now the nonunique index `idx_a`
+    only covers column `a`, and there are only two rows, which create two primary
+    key values as shown earlier in [Figure 8-1](#trx-idx-values). Since row locks
+    are really index record locks and there are no indexes on columns `b` and `c`,
+    you can ignore these two columns; they’re shown only for completeness and the
+    nostalgia of simpler chapters, like [Chapter 2](ch02.html#ch02) when row locks
+    were just rows locks.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Since [`autocommit`](https://oreil.ly/86J7d) is enabled by default, the following
+    examples begin with `BEGIN` to start an explicit transaction. Locks are released
+    when a transaction ends; therefore, the transaction is kept active—no `COMMIT`
+    or `ROLLBACK`—to examine the data locks that the SQL statement following `BEGIN`
+    has acquired (or is waiting to acquire). At the end of each example, data locks
+    are printed by querying the table `per​for​m⁠ance_schema.data_locks`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Record and Next-Key Locks
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'An `UPDATE` on table `elem` using the primary key to match rows acquires four
+    data locks in the default transaction isolation level, `REPEATABLE READ`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Before illustrating and explaining these data locks, I will briefly describe
+    what each row means:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The first row is a *table lock*, as indicated by the `lock_type` column. InnoDB
+    is a row-level locking storage engine, but MySQL also requires table locks—refer
+    back to [“Lock time”](ch01.html#Lock-time). There will be a table lock for every
+    table referenced by queries in the transaction. I include table locks for completeness,
+    but ignore them since we’re focusing on record locks.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'The second row is a *record lock* on primary key value 2, as indicated by all
+    the columns. The cryptic column is `lock_mode`: `X` means an exclusive lock (`S`
+    [not shown] means a shared lock), and `REC_NOT_GAP` means a record lock.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The third row is a *next-key lock* on the supremum pseudo-record. In column
+    `lock_mode`, a solitary `X` or `S` means an exclusive or shared next-key lock,
+    respectively. Imagine it as `X,NEXT_KEY`.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The fourth row is a *next-key lock* on primary key value 5. Again, the solitary
+    `X` in column `lock_mode` means an exclusive next-key lock. Imagine it as `X,NEXT_KEY`.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[Figure 8-2](#trx-idx-next-key-locks) illustrates the impact of these data
+    locks.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![emsp 0802](assets/emsp_0802.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 8-2\. Record and next-key locks on primary key, `REPEATABLE READ` transaction
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Locked records are shaded; unlocked records are white. The record lock on primary
+    key value 2 is shaded darkly. This record is locked because its corresponding
+    row matches the table condition: `id BETWEEN 2 AND 5`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The next-key lock on primary key value 5 is shaded medium-dark, and the gap
+    before it is shaded lightly. This record is locked because its corresponding row
+    matches the table condition, too. The gap before this record is locked because
+    it’s a next-key lock. The gap comprises the nonexistent primary key values 3 and
+    4 (to which there are no corresponding rows).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Similarly, the next-key lock on the supremum pseudo-record is shaded medium-dark,
+    and the gap before it is shaded lightly. The gap comprises all primary key values
+    greater than 5. The intriguing question is: why lock the supremum pseudo-record,
+    which *includes* all primary key values greater than 5, when the table condition
+    *excludes* primary key values greater than 5? The answer is equally intriguing,
+    but I must defer it until [“Gap Locks”](#trx-gap-locks).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s confirm that the gaps are locked by trying to insert a row (using another
+    transaction with autocommit enabled):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The first `INSERT` times out trying to acquire an insert intention lock on
+    the gap between values 2 and 5, which is where the new value (3) would be inserted.
+    Although column `lock_data` lists value 5, this record is *not* locked because
+    this not a record or next-key lock: it’s an insert intentions lock, which is a
+    special type of gap lock (for `INSERT`); therefore, it locks the gap before the
+    value 5. More on insert intention locks in [“Insert Intention Locks”](#trx-ii).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The second `INSERT` times out trying to acquire a next-key lock on the supremum
+    pseudo-record because the new value, 6, is greater than the current maximum value,
+    5, so it would be inserted between the maximum record and the supremum pseudo-record.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'These `INSERT` statements prove that [Figure 8-2](#trx-idx-next-key-locks)
+    is not wrong: nearly the entire index is locked except for values less than 2.
+    Why does InnoDB use next-key locks that lock the gaps instead of record locks?
+    Because the transaction isolation level is `REPEATABLE READ`, but that’s only
+    part of the answer. The complete answer is not straightforward, so bear with me
+    for a moment. By locking the gaps before the affected records, next-key locks
+    isolate the entire range of records that the query accesses, which is the *I*
+    in ACID: isolation. That prevents a phenomenon called [*phantom rows*](https://oreil.ly/DYs9L)
+    (or *phantom reads*) when, at a later time, a transaction reads rows that it did
+    not read at an earlier time. The new rows are *phantoms* because, like a ghost,
+    they appear mysteriously. (*Phantom* is the actual term in the ANSI SQL-92 standard.)
+    Phantom rows violate the principle of isolation, which is why certain transaction
+    isolation levels forbid them. Now the truly mysterious part of this explanation:
+    the ANSI SQL-92 standard *allows* phantom rows in `REPEATABLE READ` but InnoDB
+    prevents them with next-key locking. But let’s not go down the proverbial rabbit
+    hole by asking why InnoDB prevents phantom rows in `REPEATABLE READ`. Knowing
+    why doesn’t change the fact, and it’s not uncommon for database servers to implement
+    transaction isolation levels differently than the standard.^([1](ch08.html#idm45829097823024))
+    For completeness, however, know that the ANSI SQL-92 standard forbids phantom
+    rows only in the highest transaction isolate level: `SERIALIZABLE`. InnoDB supports
+    `SERIALIZABLE`, but I don’t cover it in this chapter because it’s not commonly
+    used. `REPEATABLE READ` is the default in MySQL and InnoDB uses next-key locks
+    to prevent phantom rows in `REPEATABLE READ`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Transaction isolation level `READ COMMITTED` disables gap locking, which includes
+    next-key locks. To prove it, change the transaction isolation level to `READ COMMITTED`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '`SET TRANSACTION` applies once to the next transaction. After the next transaction,
+    subsequent transactions use the default transaction isolation level. See [`SET
+    TRANSACTION`](https://oreil.ly/46zcp) for details.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The same `UPDATE` statement in a `READ COMMITTED` transaction acquires records
+    locks only on the matching rows, as illustrated in [Figure 8-3](#trx-idx-records-locks).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![emsp 0803](assets/emsp_0803.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 8-3\. Record locks on primary key, `READ COMMITTED` transaction
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Why not use `READ COMMITTED`? That question relates to an access pattern trait
+    ([“Transaction Isolation”](ch04.html#ap-trx-iso)) that makes it entirely application-specific,
+    even query-specific. In a transaction, `READ COMMITTED` has two important side
+    effects:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The same read statement can return different rows if re-executed.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The same write statement can affect different rows if re-executed.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'These side effects explain why InnoDB does not need to use a consistent snapshot
+    for reads or lock the gaps for writes: `READ COMMITTED` allows the transaction
+    to read or write different records (for committed changes) at different times.
+    ([“MVCC and the Undo Logs”](#mvcc) defines *consistent snapshot*.) Carefully consider
+    these side effects with respect to your application. If you are certain they will
+    not cause a transaction to read, write, or return incorrect data, then `READ COMMITTED`
+    reduces locks and undo logs, which helps improve performance.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Gap Locks
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Gap locks are purely prohibitive: they prevent other transactions from inserting
+    rows into the gap. That’s all they do.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Multiple transactions can lock the same gap because all gaps locks are compatible
+    with other gap locks. But since gap locks prevent *other* transactions from inserting
+    rows into the gap, only one transaction can insert rows into a gap when it’s the
+    only transaction locking the gap. Two or more locks on the same gap prevent all
+    transactions from inserting rows into the gap.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The purpose of a gap lock is narrow: prevent other transactions from inserting
+    rows into the gap. But the creation of a gap lock is wide: any query that accesses
+    the gap. Reading nothing can create a gap lock that blocks inserting rows:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Prima facie, that `SELECT` seems innocuous: a `SELECT` in `REPEATABLE READ`
+    uses a consistent snapshot, and `FOR SHARE` only creates shared locks, so it won’t
+    block other reads. More importantly, the `SELECT` doesn’t match any rows: table
+    `elem` has primary key values 2 and 5, not 3. No rows, no locks—right? Wrong.
+    By accessing the gap with `READ REPEATABLE` and `SELECT`…`FOR SHARE`, you summon
+    a lone gap lock: [Figure 8-4](#trx-idx-s-gap).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![emsp 0804](assets/emsp_0804.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 8-4\. Lone gap lock
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: I call it a *lone* gap lock because it doesn’t accompany a next-key lock or
+    insert intention lock; it stands alone. All gap locks—shared or exclusive—prevent
+    other transactions from inserting rows into the gap. That innocuous `SELECT` statement
+    is actually an insidious `INSERT` blocker. The larger the gap, the larger the
+    block, which the next section illustrates with a secondary index.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The easy creation of gap locks by any access to the gap is part of the answer
+    to the intriguing question in [“Record and Next-Key Locks”](#trx-record-locks):
+    why lock the supremum pseudo-record, which *includes* all primary key values greater
+    than 5, when the table condition *excludes* primary key values greater than 5?
+    First, let me dial the intrigue to maximum. Here’s the original query and its
+    data locks:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Now, here’s the same query but with an `IN` clause instead of a `BETWEEN` clause:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Both transactions are `REPEATABLE READ`, and both queries have the exact same
+    EXPLAIN plan: range access on primary key. But the new query acquires record locks
+    only on the matching rows. What is this magic? [Figure 8-5](#trx-id-in) shows
+    what’s happening for each query.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![emsp 0805](assets/emsp_0805.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 8-5\. Range access for `BETWEEN` versus `IN`, `REPEATABLE READ` transaction
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Row access for `BETWEEN` happens as you might expect: from 2 to 5 and everything
+    between. In simplistic terms, the sequence of row access for `BETWEEN` is:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Read row at index value 2
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'Row matches: record lock'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'Next index value: 5'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Traverse the gap from 2 to 5
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Read row at index value 5
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'Row matches: next-key lock'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'Next index value: supremum'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Traverse the gap from 5 to supremum
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'End of the index: next-key lock'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'But the sequence of row access for `IN` is much simpler:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Read row at index value 2
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'Row matches: record lock'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Read row at index value 5
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'Row matches: record lock'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'Despite having the exact same EXPLAIN plan and matching the same rows, the
+    queries access rows differently. The original query (`BETWEEN`) accesses the gaps;
+    therefore, it uses next-key locks to lock the gaps. The new query (`IN`) does
+    not access the gaps; therefore, it uses record locks. But make no mistake: the
+    `IN` clause does not preclude gap locking. If the new query table condition is
+    `IN (2, 3, 5)`, that accesses the gap between value 2 and 5 and causes a gap lock
+    (not a next-key lock):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You have a lone gap lock: `X,GAP`. But notice: there is no next-key lock on
+    the supremum pseudo-record because `IN (2, 3, 5)` does not access that gap. Mind
+    the gap.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Gap locking is easy to disable by using `READ COMMITTED`. A `READ COMMITTED`
+    transaction doesn’t need gap locks (or next-key locks) because records in the
+    gap are allowed to change, and each query accesses the latest latest changes (committed
+    rows) when it executes. Even the lone gap lock summoned by `SELECT * FROM elem
+    WHERE id = 3 FOR SHARE` is quashed by `READ COMMITTED`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Secondary Indexes
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Secondary indexes introduce potentially wide-ranging consequences with respect
+    to row locking, especially nonunique indexes. Recall that simplified table `elem`
+    ([Example 8-1](#trx-elem)) has a nonunique secondary index on column `a`. With
+    that in mind, let’s see how the following `UPDATE` in a `REPEATABLE READ` transaction
+    locks records on the secondary index and the primary key:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[Figure 8-6](#trx-idx-gap-lock) illustrates those six records locks: four on
+    the secondary index and two on the primary key.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![emsp 0806](assets/emsp_0806.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 8-6\. Next-key locks on secondary index, `REPEATABLE READ` transaction
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'The `UPDATE` only matches two rows, but it locks the entire secondary index,
+    which prevents inserting any values. The locks on the secondary index are similar
+    to those in [Figure 8-2](#trx-idx-next-key-locks). But now there is a next-key
+    lock on the first record in the secondary index record: tuple `(''Ar'', 5)`, where
+    5 is the corresponding primary key value. This next-key lock isolates the range
+    from new duplicate “Ar” values. For example, it prevents inserting the tuple `(''Ar'',
+    1)`, which sorts before `(''Ar'', 5)`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Normally, InnoDB does not lock an entire secondary index. That happens in these
+    examples only because there are only two index records (in both the primary key
+    and the nonunique secondary index). But recall [“Extreme Selectivity”](ch02.html#extreme-selectivity):
+    the lower the selectivity, the larger the gaps. As an extreme example, if a nonunique
+    index has 5 unique values evenly distributed over 100,000 rows, that is 20,000
+    records per row (100,000 rows / 5 cardinality), or 20,000 records per gap.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The lower the index selectivity, the larger the record gaps.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`READ COMMITTED` avoids gap locking, even for nonunique secondary indexes because
+    only matching rows are locked with record locks. But let’s not make it too easy
+    on ourselves; let’s keep examining InnoDB data locks on nonunique secondary indexes
+    for different kinds of data changes.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'At the end of the previous section, changing the `BETWEEN` clause to an `IN`
+    clause averted gap locking, but that does not work with a nonunique index. In
+    fact, InnoDB *adds* a gap lock in this case:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'I removed the original data locks from the output (they’re identical) to highlight
+    the new gap lock on tuple `(''Au'', 2)`. Strictly speaking, this gap lock is redundant
+    with the next-key lock on the same tuple, but it does not result in incorrect
+    locking or data access. Therefore, just let it be and never forget: InnoDB is
+    full of wonders and mysteries. And what would life be without a few of those?'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'It’s important to examine data locks because InnoDB is full of surprises. Although
+    this section is detailed and meticulous, it’s barely below the surface—InnoDB
+    locking is deep, and in the depths hide secrets. For example, what data locks
+    might InnoDB require if “Au” is changed to “Go”? Let’s examine the data locks
+    of that change:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[Figure 8-7](#trx-idx-si-update) visualizes those four data locks.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![emsp 0807](assets/emsp_0807.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 8-7\. Update nonunique secondary index value, `REPEATABLE READ` transaction
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'The “Au” value is gone—changed to “Go”—but InnoDB still holds a next-key lock
+    on the tuple: `(''Au'', 2)`. The new “Go” does not have record lock or next-key
+    lock, only a gap lock before the tuple: `(''Go'', 2)`. So what’s locking the new
+    “Go” record? Is this some kind of `REPEATABLE READ` side effect? Let’s change
+    the transaction isolation level and re-examine the data locks:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: Switching to `READ COMMITTED` disables gap locking as expected, but where is
+    the lock—any lock—on the new “Go” value? “Writes always lock rows,” or at least
+    that’s what I said at the beginning of [“Row Locking”](#row-locking). And yet,
+    InnoDB reports no locks for this write…
+  prefs: []
+  type: TYPE_NORMAL
+- en: What if I told you that InnoDB is so optimized that it can lock without locking?
+    Let’s use the next type of data lock, insert intention, to stare perilously deep
+    into InnoDB locking and resolve this mystery.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Insert Intention Locks
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'An *insert intention lock* is a special type of gap lock that means the transaction
+    will insert a row into the gap when the gap is not locked by other transactions.
+    Only gap locks block insert intention locks. (Remember: *gap locks* include next-key
+    locks because the latter are a combination of record lock and gap lock.) Insert
+    intention locks are compatible with (do not block) other insert intention locks.
+    This is important for `INSERT` performance because it allows multiple transactions
+    to insert different rows into the same gap at the same time. How does InnoDB handle
+    duplicate keys? I return to this question after demonstrating other facets of
+    insert intention locks that make the answer more clear.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Gap locks *prevent* `INSERT`. Insert intention locks *allow* `INSERT`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Insert intention locks are special for three reasons:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Insert intention locks do not lock the gap because, as the term *intention*
+    implies, they represent a *future* action: inserting a row *when* there are no
+    gap locks held by other transactions.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Insert intention locks are created and reported only when they conflict with
+    gap locks held by other transactions; otherwise, insert intention locks are not
+    created or reported by the transaction inserting the row.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: If an insert intention lock is created, it is used once and released immediately
+    once granted; but InnoDB continues to report it until the transaction is complete.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: In a sense, insert intention locks aren’t locks because they don’t block access.
+    They’re more like wait conditions that InnoDB uses to signal when a transaction
+    can proceed with an `INSERT`. Granting the insert intention lock is the signal.
+    But if a transaction doesn’t have to wait because there are no conflict gap locks,
+    then it doesn’t wait, and you won’t see an insert intention lock because none
+    was created.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s see insert intention locks in action. Start by locking the gap between
+    primary key values 2 and 5; then, in a second transaction, try to insert a row
+    with primary key value 3:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  prefs: []
+  type: TYPE_PRE
+- en: '`X,GAP,INSERT_INTENTION` in column `lock_mode` is an insert intention lock.
+    It’s also listed as `X,INSERT_INTENTION` (not shown) when locking and inserting
+    into the gap between the maximum record value and the supremum pseudo-record.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The first transaction locks the gap before primary key value 5. That gap lock
+    blocks the second transaction from inserting into the gap, so it creates an insert
+    intention lock and waits. Once the first transaction commits (or rolls back),
+    the gap is unlocked, the insert intention lock is granted, and the second transaction
+    inserts the row:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE14]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'As noted earlier, InnoDB continues to report an insert intention lock even
+    though, once granted, it is used once and released immediately. Consequently,
+    it looks like the gap is locked, but it’s an illusion—a ploy by InnoDB to lure
+    us in deeper. You can prove that it’s an illusion by inserting another row into
+    the gap at primary key value 4; it does not block. Why does InnoDB continue to
+    report an insert intention lock that’s not really there? Few mortals know, and
+    it matters not. Look past the illusion to see it for what it *was*: in the past,
+    the transaction blocked before inserting a row into the gap.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'For completeness and a segue into deeper aspects of InnoDB locking, especially
+    with respect to insert intention locks, here is what you see when an `INSERT`
+    does not block on gap locks:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE15]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'No record locks at all. That’s how insert intention locks work on the surface,
+    but we came here to stare perilously deep into InnoDB locking, so let’s go deeper
+    by asking the question that led us here: why is there no record (or next-key)
+    lock on the newly inserted row? This is the same mystery from the previous section:
+    no lock on the new “Go” value.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This is the secret: InnoDB has explicit and implicit locks and it only reports
+    explicit locks.^([2](ch08.html#idm45829097678720)) Explicit locks exist as lock
+    structures in memory; therefore, InnoDB can report them. But implicit locks do
+    not exist: there is no lock structure; therefore, InnoDB has nothing to report.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In the previous example, `INSERT INTO elem VALUES (9, ''As'', ''B'', ''C'')`,
+    the index record for the new row exists, but the row is not committed (because
+    the transaction has not committed). If another transaction attempts to lock the
+    row, it detects three conditions:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The row is not committed.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The row belongs to another transaction.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The row is not explicitly locked.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Then magic happens: the requesting transaction—the transaction attempting to
+    lock the record—converts the implicit lock to an explicit lock *on behalf of*
+    the owning transaction—the transaction that created the record. Yes, that means
+    one transaction creates a lock for another transaction—but that’s not the confusing
+    part. Since the requesting transaction creates the lock that it’s trying to acquire,
+    at first glance InnoDB seems to report that the transaction is waiting for a lock
+    that it holds—the transaction is blocked on itself. There’s a way to see through
+    this illusion, but we’ve gone too deep.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: I hope that, as an engineer using MySQL, you never need to descend to this depth
+    of InnoDB locking to achieve remarkable performance with MySQL. But I led us down
+    here for two reasons. First, despite the illusions, the fundamentals of InnoDB
+    row locking with respect to transaction isolation levels are tractable and applicable.
+    You are now fantastically well prepared to handle every common InnoDB row locking
+    issue—and more. Second, InnoDB made me do it because I stared too deeply for too
+    long; and when it all blurred into one, I knew that I had fallen from the precipice
+    and could never return. Don’t ask why it locks the supremum pseudo-record beyond
+    the table condition range. Don’t ask why it has redundant gap locks. Don’t ask
+    why it converts implicit locks. Don’t ask; else the questions never cease. Go
+    on; save yourself.
+  prefs: []
+  type: TYPE_NORMAL
+- en: MVCC and the Undo Logs
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: InnoDB uses multiversion concurrency control (MVCC) and undo logs to accomplish
+    the *A*, *C*, and *I* properties of ACID. (To accomplish the *D*, InnoDB uses
+    a transaction log—see [“Transaction log”](ch06.html#metrics-trx-log).) *Multiversion
+    concurrency control* means that changes to a row create a new version of the row.
+    MVCC is not unique to InnoDB; it’s a common method that many data stores use.
+    When a row is first created, it’s version 1. When it’s first updated, it’s version
+    2. The basis of MVCC is that simple, but it quickly becomes more complex and interesting.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Using the term *undo logs* is an intentional simplification because the full
+    structure of undo logging is complex. The term *undo logs* is sufficiently precise
+    to learn what it does and how it affects performance.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*Undo logs* record how to roll back changes to a previous row version. [Figure 8-8](#trx-mvcc)
+    shows a single row with five versions and five undo logs that allow MySQL to roll
+    back changes to previous row versions.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'That row harkens back to [“InnoDB Tables Are Indexes”](ch02.html#tables-are-indexes)
+    in [Chapter 2](ch02.html#ch02): it’s the row with primary key value 2 in table
+    `elem`, depicted as the primary key leaf node. For brevity, I include only the
+    primary key value (2), the row version (v1 through v5), and column `a` value (“Au”
+    for v5); the other two columns, `b` and `c`, are not shown.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Version 5 (bottom right in [Figure 8-8](#trx-mvcc)) is the current row that
+    all new transactions will read, but let’s begin at the beginning. The row is created
+    as iron (“Fe”): version 1 in the upper left corner. There’s an undo log for version
+    1 because `INSERT` creates the first version of a row. Then column `a` is modified
+    (`UPDATE`) to change iron to titanium (“Ti”): version 2. Upon creating version
+    2, MySQL also creates an undo log that records how to roll back version 2 changes,
+    which restores version 1. (In the next paragraph, I explain why version 1 has
+    a solid outline [and a camera icon] but version 2 has a dashed outline.) Then
+    column `a` is modified to change titanium to silver (“Ag”): version 3. MySQL creates
+    an undo log that records how to roll back version 3 changes, and this undo log
+    is linked to the previous so that MySQL can, if needed, roll back and restore
+    version 2. Two more row updates occur: silver to Californium (“Cf”) for version
+    4, and Californium to gold (“Au”) for version 5.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![emsp 0808](assets/emsp_0808.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 8-8\. One row with five versions and five undo logs
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'There are two sets of undo logs: *insert undo logs* for `INSERT` and *update
+    undo logs* for `UPDATE` and `DELETE`. For simplicity, I refer only to undo logs,
+    which comprises both sets.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Version 1 has a solid outline and camera icon because an active transaction
+    (not shown) holds a consistent snapshot at this point in the history of the database.
+    Let me unpack that sentence. InnoDB supports four [transaction isolation levels](https://oreil.ly/xH5Gs),
+    but only two are commonly used: `REPEATABLE READ` (the default) and `READ COMMITTED`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In a `REPEATABLE READ` transaction, the first read establishes a *consistent
+    snapshot* (or *snapshot* for short): a virtual view of the database (all tables)
+    at the moment when the `SELECT` is executed. The snapshot is held until the end
+    of the transaction and used by all subsequent reads to access rows only at this
+    point in the history of the database. Changes made by other transactions after
+    this point are not figuratively visible within the original transaction. Presuming
+    that other transactions are modifying the database, the snapshot of the original
+    transaction becomes an increasingly old view of the database while the transaction
+    remains active (does not `COMMIT` or `ROLLBACK`). It’s like the original transaction
+    is stuck in the 1980s and the only musicians it listens to are Pat Benatar, Stevie
+    Nicks, and Taylor Dayne: old but still great.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Since version 5 is the current row, new transactions establish a snapshot from
+    its point in database history, which is why it has a solid outline and camera
+    icon. The important question is: why do versions 2, 3, and 4 still exist when
+    there are no transactions holding snapshots at their respective points in database
+    history? They exist to maintain the snapshot for version 1 because MySQL uses
+    undo logs to reconstruct old row versions.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: MySQL uses undo logs to reconstruct old row versions for snapshots.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'It’s easy to reconstruct [Figure 8-8](#trx-mvcc). First, immediately after
+    inserting the row in [Figure 8-8](#trx-mvcc), start a transaction and establish
+    a snapshot on version 1 of the row by executing a `SELECT` statement:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE16]'
+  prefs: []
+  type: TYPE_PRE
+- en: Since there’s no `COMMIT`, that transaction is still active and holding its
+    snapshot on the entire database, which is simply row version 1 in this example.
+    Let’s call this the *original transaction*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Then update the row four times to create version 5:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE17]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[`autocommit`](https://oreil.ly/nG8wa) is enabled by default in MySQL, which
+    is why the first (active) transaction needs an explicit `BEGIN` but the four `UPDATE`
+    statements do not. Now MySQL is in a state represented by [Figure 8-8](#trx-mvcc).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If the original transaction executes `SELECT a FROM elem WHERE id = 2` again,
+    it reads version 5 (that’s not a typo) but (figuratively) sees that that version
+    is newer than the point in database history established by its snapshot. Consequently,
+    MySQL uses the undo logs to roll back the row and reconstruct version 1, which
+    is consistent with the snapshot established by the first `SELECT` statement. When
+    the original transaction commits, and presuming no other active transactions are
+    holding old snapshots, then MySQL can purge all the related undo logs because
+    new transactions always begin with the current row version. When transactions
+    are working well, the whole process is immaterial to performance. But you already
+    know: problematic transactions can negatively affect the performance of the entire
+    process. [“Common Problems”](#trx-problems) looks at how and why; but until then,
+    there are more details to know about MVCC and the undo logs.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: In a `READ COMMITTED` transaction, each read establishes a new snapshot. As
+    a result, each read accesses the latest committed row version, hence `READ COMMITTED`.
+    Since snapshots are used, undo logs are still created, but this is almost never
+    an issue with `READ COMMITTED` because each snapshot is held only for the duration
+    of the read. If a read takes a very long time *and* there’s significant write
+    throughput on the database, you might notice the accrual of redo logs (as an increase
+    in history list length). Otherwise, `READ COMMITTED` is virtually free of undo
+    logging.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Snapshots only affect reads (`SELECT`)—they’re never used for writes. Writes
+    always secretly read current rows, even if the transaction cannot “see” them with
+    `SELECT`. This double vision averts chaos. For example, imagine that another transaction
+    inserts a new row with primary key value 11. If the original transaction tries
+    to insert a row with the same primary key value, MySQL will return a duplicate
+    key value because the primary key value exists even though the transaction cannot
+    see it with `SELECT`. Moreover, snapshots are very consistent: in a transaction,
+    there is no way to advance the snapshot to a newer point in database history.
+    If the application executing the transaction needs a newer snapshot, it must commit
+    the transaction and begin a new one to establish a new snapshot.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Writes generate undo logs that are kept until the end of the transaction—regardless
+    of transaction isolation level. Until now, I have focused on undo logs with respect
+    to reconstructing old row versions for snapshots, but they are also used on `ROLLBACK`
+    to revert changes made by writes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'One last thing to know about MVCC: undo logs are saved in the InnoDB buffer
+    pool. You might recall from [“Page flushing”](ch06.html#metrics-page-flushing)
+    that “*Misc pages* contain miscellaneous internal data not covered in this book.”
+    Misc pages include undo logs (and many more internal data structures). Since undo
+    logs reside in buffer pool pages, they use memory and are periodically flushed
+    to disk.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'There are a few system variables and metrics related to the undo logs; as an
+    engineer using MySQL, you only need to know and monitor one: HLL, first introduced
+    in [“History list length (metric)”](ch06.html#metrics-hll) and explained further
+    in the next section. Otherwise, MVCC and the undo logs work flawlessly as long
+    as the application avoids all [“Common Problems”](#trx-problems). One such problem
+    is abandoned transactions, so let’s avoid that by committing the original transaction:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE18]'
+  prefs: []
+  type: TYPE_PRE
+- en: Goodbye, consistent snapshot. Goodbye, undo logs. Hello, history list length…
+  prefs: []
+  type: TYPE_NORMAL
+- en: History List Length
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: History list length (HLL) gauges the amount of old row versions not purged or
+    flushed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Historically (no pun intended), HLL has been difficult to define because the
+    full structure of undo logging is complex:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE19]'
+  prefs: []
+  type: TYPE_PRE
+- en: That complexity obscures any simple relationship between undo logging and HLL,
+    including the unit of measurement. The simplest functional (although not technically
+    correct) unit of HLL is *changes*. If the HLL value is 10,000, you can read that
+    as 10,000 changes. By understanding [“MVCC and the Undo Logs”](#mvcc), you know
+    that changes are kept (not purged) in memory (not flushed) in order to reconstruct
+    old row versions. Therefore, it’s accurate enough to say that HLL gauges the amount
+    of old row versions not purged or flushed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'HLL greater than 100,000 is a problem—do not ignore it. Even though the true
+    technical nature of HLL is elusive—even for MySQL experts—its usefulness is clear
+    and undeniable: HLL is the harbinger of transaction-related problems. Always monitor
+    HLL (see [“History list length (metric)”](ch06.html#metrics-hll)), alert when
+    it’s too high (greater than 100,000), and fix the problem, which is undoubtedly
+    one of the common problems discussed in the next section.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Although I caution against alerting on thresholds in [“Wild Goose Chase (Thresholds)”](ch06.html#thresholds),
+    HLL is an exception: alerting when HLL is greater than 100,000 is reliable and
+    actionable.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Alert on HLL greater than 100,000.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In theory, HLL has a maximum value, but MySQL performance is sure to crumble
+    long before that value.^([3](ch08.html#idm45829097586336)) For example, just a
+    few weeks ago as I write this, an instance of MySQL in the cloud crashed at HLL
+    200,000, which took a long-running transaction four hours to amass before crashing
+    MySQL and causing a two-hour outage.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Since undo logging is incredibly efficient, there is huge leeway in HLL with
+    respect to the value at which MySQL performance will degrade or—worst case—crash.
+    I have seen MySQL crash at 200,000, but I have also seen it run just fine well
+    beyond 200,000. One thing is certain: if HLL increases unchecked, it *will* cause
+    a problem: either noticeably slow performance, or MySQL will crash.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'I want you to be the first engineer in history to use MySQL and never have
+    a HLL problem. That’s a lofty goal, but I encourage you to shoot for the stars.
+    To that end, I intentionally flooded a MySQL instance with `UPDATE` statements
+    to drive up the HLL—to amass thousands of old row versions. [Table 8-2](#hll-response-time)
+    shows the effect of HLL on query response time for a single row point-select:
+    `SELECT * FROM elem WHERE id=5` in an active `REPEATABLE READ` transaction.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 8-2\. Effect of HLL on query response time
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| HLL | Response time (ms) | Baseline increase (%) |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| 0 | 0.200 ms |  |'
+  prefs: []
+  type: TYPE_TB
+- en: '| 495 | 0.612 ms | 206% |'
+  prefs: []
+  type: TYPE_TB
+- en: '| 1,089 | 1.012 ms | 406% |'
+  prefs: []
+  type: TYPE_TB
+- en: '| 2,079 | 1.841 ms | 821% |'
+  prefs: []
+  type: TYPE_TB
+- en: '| 5,056 | 3.673 ms | 1,737% |'
+  prefs: []
+  type: TYPE_TB
+- en: '| 11,546 | 8.527 ms | 4,164% |'
+  prefs: []
+  type: TYPE_TB
+- en: 'This example does *not* mean that HLL will increase query response time as
+    shown; it only proves that HLL can increase query response time. From [“MVCC and
+    the Undo Logs”](#mvcc) and this section you know why: the `SELECT` in the active
+    `REPEATABLE READ` transaction has a consistent snapshot on row 5 (`id=5`), but
+    the `UPDATE` statements on that row generate new row versions. Each time the `SELECT`
+    is executed, it slogs through the undo logs to reconstruct the original row version
+    for the consistent snapshot, and that slog increases query response time.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Increasing query response time is proof enough, but we’re professionals, so
+    let’s prove it irrefutably. At the end of [“MVCC and the Undo Logs”](#mvcc), I
+    mention that undo logs are stored as pages in the InnoDB buffer pool. As a result,
+    the `SELECT` should access an inordinate number of pages. To prove this, I use
+    [Percona Server](https://oreil.ly/OWUYR) because its enhanced slow query log prints
+    the number of distinct pages accessed when configured with `log_slow_verbosity
+    = innodb`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE20]'
+  prefs: []
+  type: TYPE_PRE
+- en: Normally, the `SELECT` in this example accesses a single page to look up one
+    row by primary key. But when the consistent snapshot for the `SELECT` is old (and
+    HLL is large), InnoDB slogs through hundreds of undo log pages to reconstruct
+    the old row.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'MVCC, undo logs, and HLL are all normal and good trade-offs: a little performance
+    for a lot of concurrency. It’s only when HLL is inordinately large—greater than
+    100,000–that you should take action to fix the cause, which is almost universally
+    one of the following common problems.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Common Problems
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'Transaction problems arise from the queries that constitute the transaction,
+    how quickly the application executes those queries, and how quickly the application
+    commits the transaction. Although a single query with [`autocommit`](https://oreil.ly/oQtD2)
+    enabled is technically a transaction that can cause the following problems (except
+    for [“Abandoned Transactions”](#trx-lost)), the main focus is multistatement transactions
+    that begin with `BEGIN` (or `START TRANSACTION`), execute several queries, and
+    end with `COMMIT` (or `ROLLBACK`). The performance impact of a multistatement
+    transaction can be greater than the sum of its parts—the queries that constitute
+    the transaction—because locks and undo logs are held until the transaction commits
+    (or rolls back). Remember: MySQL is very patient—almost too patient. If the application
+    does not commit a transaction, MySQL will wait even until the consequences of
+    that active transaction ring its death knell.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Fortunately, none of these problems are difficult to detect or fix. HLL is
+    the harbinger of most transaction problems, which is why you should always monitor
+    it: see [“History list length (metric)”](ch06.html#metrics-hll) and [“History
+    List Length”](#hll). To keep the details of each problem uncluttered, I explain
+    how to find and report problematic transactions in [“Reporting”](#trx-reporting).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Large Transactions (Transaction Size)
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'A large transaction modifies an inordinate number of rows. How many rows is
+    *inordinate*? That is relative, but engineers always know when they see it. For
+    example, if you see that a transaction has modified 250,000 rows and you know
+    that there are only 500,000 rows in the whole database, that’s inordinate. (Or
+    at the very least, it’s a suspicious access pattern: see [“Result Set”](ch04.html#ap-result-set).)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Generally, *transaction size* refers to the number of rows modified: the more
+    rows modified, the larger the transaction. For [MySQL Group Replication](https://oreil.ly/wH10S),
+    *transaction size* has a slightly different meaning: see [“Group Replication Limitations”](https://oreil.ly/cJhWF)
+    in the MySQL manual.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: If the transaction is running in the default isolation level, `REPEATABLE READ`,
+    then it’s safe to presume that it has locked a greater number of records than
+    modified rows because of gap locking—as detailed in [“Row Locking”](#row-locking).
+    If the transaction is running in `READ COMMITTED` isolation level, then it’s only
+    acquiring record locks for each modified row. Either way, a large transaction
+    is a large source of lock contention that can severely degrade write throughput
+    and response time.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Don’t forget replication (see [Chapter 7](ch07.html#ch07)): large transactions
+    are a main cause of replication lag (see [“Transaction Throughput”](ch07.html#repl-tps))
+    and decrease the effectiveness of multithreaded replication (see [“Reducing Lag:
+    Multithreaded Replication”](ch07.html#repl-mtr)).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Large transactions can be noticeably slow to commit (or roll back) as previously
+    addressed in [“MVCC and the Undo Logs”](#mvcc), [“Binary Log Events”](ch07.html#repl-binlog-events),
+    and [Figure 6-7](ch06.html#trx-log). It’s quick and easy to modify rows because
+    the data changes happen in memory, but commit is the reckoning when MySQL does
+    significant work to persist and replicate the data changes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Smaller transactions are better. How small? That, too, is relative and complicated
+    to calibrate because, as I just noted, transactions cause a reckoning on commit,
+    which means you have to calibrate several subsystems. (It’s even more complicated
+    when you factor in the cloud, which tends to limit and tweak little details, like
+    IOPS.) Except for bulk operations which require calibrating a batch size (see
+    [“Batch Size”](ch03.html#batch-size)), calibrating transaction size is not commonly
+    needed because, although the problem is common, it’s typically a one-off problem:
+    found, fixed, and doesn’t reoccur (for awhile, at least). [“Reporting”](#trx-reporting)
+    shows you how to find large transactions.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The fix is to find the query (or queries) in the transaction that modify too
+    many rows, and change them to modify fewer rows. But that depends entirely on
+    the query, its purpose in the application, and why it’s modifying too many rows.
+    Whatever the reason, Chapters [1](ch01.html#ch01)–[4](ch04.html#ch04) equip you
+    to understand and fix the query.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Finally, if you closely follow the principle of least data (see [“Principle
+    of Least Data”](ch03.html#principle-of-least-data)), transaction size may never
+    be a problem.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Long-Running Transactions
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'A long-running transaction takes too long to complete (commit or roll back).
+    How long is *too long*? That depends:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Longer than acceptable for the application or users
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Long enough to cause problems (likely contention) with other transactions
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Long enough to cause a history list length alert
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Unless you’re proactively addressing performance, the second and third points
+    are more likely to bring a long-running transaction to your attention.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Presuming that the application isn’t waiting between queries (which is the
+    next problem: [“Stalled Transactions”](#trx-stalled)), long-running transactions
+    have two causes:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The queries that constitute the transaction are too slow.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The application executes too many queries in the transaction.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'You fix the first cause with the techniques from Chapters [1](ch01.html#ch01)–[5](ch05.html#ch05).
+    Remember: undo logs and row locks for all queries in a transaction are held until
+    the transaction commits. On the upside, this means that optimizing slow queries
+    to fix a long-running transaction has collateral benefits: the individual queries
+    are faster *and* the transaction as a whole is faster, which can increase overall
+    transaction throughput. The downside is that a long-running transaction might
+    be quick enough for the application but too long for other transactions. For example,
+    let’s say that a transaction takes one second to execute, which is fine for the
+    application, but during that second it holds row locks needed by another, faster
+    transaction. This creates a tricky problem to debug because the fast transaction
+    might run slowly in production but quickly in isolation when analyzed in the laboratory
+    (on your laptop, for example). The difference, of course, is that the concurrency
+    and contention of transactions in production is largely or completely absent in
+    the lab. In this case, you must debug data lock contention, which is not easy
+    for several reasons, the least of which is that data locks are fleeting. See the
+    note following [Table 8-1](#lock-types), and talk with your DBA or a MySQL expert.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: You fix the second cause by modifying the application to execute fewer queries
+    in the transaction. This occurs when the application attempts a bulk operation
+    or programmatically generates queries inside a transaction without limiting the
+    number of queries. Either way, the fix is to reduce or limit the number of queries
+    in the transaction. Even if the transaction isn’t long-running, this is a best
+    practice to ensure that it won’t accidentally become long-running. For example,
+    maybe when the application is new it only inserts 5 rows per transaction; but
+    years later, when the application has millions of users, it’s inserting 500 rows
+    per transaction because a limit wasn’t built in from the beginning.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[“Reporting”](#trx-reporting) shows you how to find long-running transactions.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Stalled Transactions
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'A stalled transaction is waiting too long after `BEGIN`, between queries, or
+    before `COMMIT`. Stalled transactions are likely to be long-running transactions,
+    but the causes are different: time waiting between queries (stalled) rather than
+    time waiting for queries (long-running).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'In practice, a stalled transaction appears as a long-running transaction because
+    the end result is the same: slow transaction response time. Analyzing the transaction
+    is required to determine if the response time is due to stalls or slow queries.
+    Absent that analysis, engineers (and MySQL experts) often refer to any slow transaction
+    as long-running.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Granted, there’s always some wait time between queries (at least due to network
+    latency required to send queries and receive result sets), but as in the previous
+    two problems, you’ll know a stalled transaction when you see it. To put it figuratively:
+    the whole is much greater than the sum of its parts. To put it technically: the
+    transaction response time from `BEGIN` to `COMMIT` is much greater than the sum
+    of the query response times.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Since stalled transactions are waiting *between* queries (including after `BEGIN`
+    and before `COMMIT`), MySQL is not culpable: the waits are caused by the application,
+    and the reasons are limitless. A common reason is doing time-consuming application
+    logic while a transaction is active, instead of before or after the transaction.
+    But sometimes this can’t be avoided; consider the following example:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE21]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The solution in this case depends on the application logic. I’d begin by asking
+    the most fundamental question: do these queries need to be a transaction? Can
+    the row change after reading and before updating? If the row changes, does that
+    break the logic? If nothing else, can the `READ COMMITTED` isolation level be
+    used to disable gap locking? Engineers are clever and find ways to fix cases like
+    this; the first step is finding them, which is covered in [“Reporting”](#trx-reporting).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Abandoned Transactions
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'An abandoned transaction is an active transaction without an active client
+    connection. There are two main causes of abandoned transactions:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Application connection leaks
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Half-closed connections
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'An application bug can leak database connections (like leaking memory or threads):
+    the code-level connection object goes out of scope, so it’s no longer used, but
+    it’s still referenced by other code, so it’s neither closed nor freed (probably
+    resulting in a small memory leak, too). Apart from application-level profiling,
+    debugging, or leak detection to verify this bug directly, you can verify it indirectly
+    if restarting the application fixes (closes) the abandoned transactions. In MySQL,
+    you can see what are likely to be abandoned transactions (as shown in [“Reporting”](#trx-reporting)),
+    but you cannot verify this bug in MySQL because MySQL doesn’t know that the connection
+    has been abandoned.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Half-closed connections do not happen under normal circumstances because MySQL
+    rolls back a transaction when the client connection closes for any reason detectable
+    by MySQL or the operating system. But problems outside MySQL and the operating
+    system can cause the client side of the connection to close without closing the
+    MySQL side—that’s why it’s called a *half-closed* connection. MySQL is especially
+    prone to half-closed connections because its network protocol is almost entirely
+    command and response: the client sends commands, and MySQL sends a response. (If
+    you’re curious, clients send a query to MySQL with a [`COM_QUERY`](https://oreil.ly/I4RjE)
+    packet.) Between command and response, the client and MySQL observe total silence—not
+    a single byte is transmitted. As peaceful as that sounds, it means that half-closed
+    connections go unnoticed until [`wait_timeout`](https://oreil.ly/zP2bf) seconds
+    have passed, which defaults to 28,800 (8 hours).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Whether an application bug causing connection leaks or a half-closed connection
+    mistaken for meditative network silence, the end result is the same if either
+    occurs while a transaction is active (not committed): the transaction stays active.
+    Any consistent snapshot or data locks stay active, too, because MySQL doesn’t
+    know that the transaction has been abandoned.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Truth be told, MySQL likes the silence; as do I. But we’re paid to work, so
+    let’s examine how to find and report all four transaction problems.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Reporting
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'The [MySQL Performance Schema](https://oreil.ly/fgU04) makes detailed transaction
+    reporting possible; but at the time of this writing, there are no tools that make
+    it easy. I wish I could tell you to use existing open source tools, but there
+    are none. The following SQL statements are the state of the art. When new art
+    is developed, I’ll let you know at [MySQL Transaction Reporting](https://hackmysql.com/trx).
+    Until then, let’s get the job done the old-fashioned way: *copy-paste*.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Active Transactions: Latest'
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'The SQL statement in [Example 8-2](#trx-report-latest) reports the latest query
+    for all transactions active longer than 1 second. This report answers the question:
+    which transactions are long-running and what are they doing right now?'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 8-2\. Report latest query for transactions active longer than 1 second
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE22]'
+  prefs: []
+  type: TYPE_PRE
+- en: To increase the time, change the 1 before `\G`. Performance Schema timers use
+    picoseconds, so `1000000000000 * 1` is one second.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The output of [Example 8-2](#trx-report-latest) resembles the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE23]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The following is a bit more information about the fields (columns) of [Example 8-2](#trx-report-latest):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`trx_runtime`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: How long the transaction has been running (active) in seconds with millisecond
+    precision. (I forgot about this transaction, which is why it’s been active for
+    almost six hours in the example.)
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`thread_id`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The thread ID of the client connection that is executing the transaction. This
+    is used in [“Active Transaction: History”](#trx-stmt-history). Performance Schema
+    events use thread IDs and event IDs to link data to client connections and events,
+    respectively. Thread IDs are different than process IDs common to other parts
+    of MySQL.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`trx_event_id`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The transaction event ID. This is used in [“Active Transaction: History”](#trx-stmt-history).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`isolation_level`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Transaction isolation level: `READ REPEATABLE` or `READ COMMITTED`. (The other
+    isolation levels, `SERIALIZABLE` and `READ UNCOMMITTED`, are rarely used; if you
+    see them, it might be an application bug.) Recall [“Row Locking”](#row-locking):
+    the transaction isolation level affects row locking and whether or not `SELECT`
+    uses a consistent snapshot.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`autocommit`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: If `YES`, then `autocommit` is enabled and it’s a single-statement transaction.
+    If `NO`, then the transaction was started with `BEGIN` (or `START TRANSACTION`)
+    and it’s most likely a multistatement transaction.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`db`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Current database of `query`. The current database means `USE db`. The query
+    can access other databases with database-qualified table names, such as `db.table`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`query`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The latest query either executed by or executing in the transaction. If `exec_state
+    = running`, then `query` is currently executing in the transaction. If `exec_state
+    = done`, then `query` is the last query that the transaction executed. In both
+    cases the transaction is active (not committed), but in the latter case it’s idle
+    with respect to executing a query.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`rows_examined`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Total number of rows examined by `query`. This does not include past queries
+    executed in the transaction.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`rows_examined`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Total number of rows modified by `query`. This does not include past queries
+    executed in the transaction.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`rows_sent`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Total number of rows sent (result set) by `query`. This does not include past
+    queries executed in the transaction.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`exec_state`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: If `done`, then the transaction is idle with respect to executing a query, and
+    `query` was the last query that it executed. If `running`, then transaction is
+    currently executing `query`. In both cases, the transaction is active (not committed).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`exec_time`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Execution time of `query` in seconds (with millisecond precision).
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Performance Schema tables `events_transactions_current` and `events_statements_current`
+    contain more fields, but this report selects only the essential fields.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This report is a true workhorse because it can reveal all four [“Common Problems”](#trx-problems):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Large transactions
+  prefs: []
+  type: TYPE_NORMAL
+- en: Look at `rows_affected` (row modified) and `rows_sent` to see the transaction
+    size (in terms of rows). Experiment with adding a condition like `trx.rows_affected
+    > 1000`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Long-running transactions
+  prefs: []
+  type: TYPE_NORMAL
+- en: Adjust the `1` at the end of condition `trx.timer_wait > 1000000000000 * 1`
+    to filter for longer-running queries.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Stalled transactions
+  prefs: []
+  type: TYPE_NORMAL
+- en: If `exec_state = done` and stays that way for a while, the transaction is stalled.
+    Since this report only lists the latest query of active transactions, the query
+    should change quickly—`exec_state = done` should be fleeting.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Abandoned transactions
+  prefs: []
+  type: TYPE_NORMAL
+- en: If `exec_state = done` remains for a long time, it’s possible the transaction
+    is abandoned because it stops being reported after commit.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The output of this report should be volatile because active transactions should
+    be fleeting. If it reports a transaction long enough for you to see it multiple
+    times, then the transaction is probably exhibiting one of the [“Common Problems”](#trx-problems).
+    In this case, use its `thread_id` and `statement_event_id` (as in [“Active Transaction:
+    History”](#trx-stmt-history)) to report its history—past queries—which helps reveal
+    why the transaction is a problem.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Active Transactions: Summary'
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'The SQL statement in [Example 8-3](#trx-report-summary) reports the summary
+    of queries executed for all transactions active longer than 1 second. This report
+    answers the question: which transactions are long-running and how much work have
+    they been doing?'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 8-3\. Report transaction summary
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE24]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'To increase the time, change the 1 before `\G`. The fields are the same as
+    in [“Active Transactions: Latest”](#trx-stmt-latest) but this report aggregates
+    past queries for each transaction. A stalled transaction (not currently executing
+    a query) might have done a lot of work in the past, which this report reveals.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: When a query finishes executing, it’s logged in table `performance_schema.events_statements_history`
+    but also remains in table `performance_schema.events_statements_current`. Therefore,
+    the report only includes completed queries and should not be joined to the latter
+    table unless active queries are filtered out.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This report is better to find large transactions—[“Large Transactions (Transaction
+    Size)”](#trx-size)—since it includes past queries.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Active Transaction: History'
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'The SQL statement in [Example 8-4](#trx-report-history) reports the history
+    of queries executed for a single transaction. This report answers the question:
+    how much work did each query transaction do? You must replace the zeros with `thread_id`
+    and `trx_event_id` values from the output of [Example 8-2](#trx-report-latest).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 8-4\. Report transaction history
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE25]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Replace the zeros with values from the output of [Example 8-2](#trx-report-latest):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Replace the zero in `stm.thread_id = 0` with `thread_id`.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Replace the zero in `stm.nesting_event_id = 0` with `trx_event_id`.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'The output of [Example 8-4](#trx-report-history) looks like:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE26]'
+  prefs: []
+  type: TYPE_PRE
+- en: Apart from the `BEGIN` that started the transactions, this transaction executed
+    two queries, then `COMMIT`. The `SELECT` was the first query, and the `UPDATE`
+    was the second query. It’s not a riveting example, but it demonstrates the query
+    execution history of a transaction, plus basic query metrics. History is invaluable
+    when debugging problematic transactions because you can see which queries are
+    slow (`exec_time`) or large (in terms of rows), as well as the point at which
+    the application stalls (when you know that the transaction will execute more queries).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Committed Transactions: Summary'
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The previous three reports are for active transactions, but committed transactions
+    are also revealing. The SQL statement in [Example 8-5](#trx-report-committed)
+    reports basic metrics for committed (completed) transactions. It’s like a slow
+    query log for transactions.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 8-5\. Report basic metrics for committed transactions
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE27]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The fields of [Example 8-5](#trx-report-committed) are:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`trx_time`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Total transaction time, in milliseconds with microsecond precision.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`query_time`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Total query execution time, in milliseconds with microsecond precision.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`idle_time`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Transaction time minus query time, in milliseconds with microsecond precision.
+    Idle time indicates how much the application stalled while executing the queries
+    in the transaction.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`query_count`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Number of queries executed in the transaction.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`rows_*`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Total number of rows examined, affected, and sent (respectively) by all queries
+    executed in the transaction.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The output of [Example 8-5](#trx-report-committed) looks like the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE28]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'For this example, I executed the same transaction twice: first manually, then
+    copy-pasted. The manual execution took 5.6 seconds (5647.892) and was mostly idle
+    time due to typing. But a transaction programmatically executed should be mostly
+    query execution time, as shown in the second row: 403 microseconds of execution
+    time, and only 182 microseconds of idle time.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Summary
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'This chapter examined MySQL transactions with respect to avoiding common problems.
+    The major takeaway points are:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Transaction isolation levels affect row locking (data locks).
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'The fundamental InnoDB data locks are: *record lock* (locks a single index
+    record), *next-key lock* (locks a single index record plus the record gap before
+    it), *gap lock* (locks the range [gap] between two records), and *insert intention
+    lock* (allows `INSERT` into a gap; more like a wait condition than a lock).'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The default transaction isolation level, `REPEATABLE READ`, uses gap locking
+    to isolate the range of rows accessed.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The `READ COMMITTED` transaction isolation level disables gap locking.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: InnoDB uses *consistent snapshots* in `REPEATABLE READ` transactions to make
+    reads (`SELECT`) return the same rows despite changes to those rows by other transactions.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Consistent snapshots require InnoDB to save row changes in undo logs to reconstruct
+    old row versions.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: History list length (HLL) gauges the amount of old row versions not purged or
+    flushed.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'HLL is a harbinger of doom: always monitor and alert on HLL greater than 100,000.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Data locks and undo logs are released when a transaction ends, with `COMMIT`
+    or `ROLLBACK`.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Four common problems beset transactions: large transactions (modify too many
+    rows), long-running transactions (slow response time from `BEGIN` to `COMMIT`),
+    stalled transactions (superfluous waits between queries), and abandoned transactions
+    (client connection vanished during active transaction).'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The MySQL Performance Schema makes detailed transaction reporting possible.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Transaction performance is as important as query performance.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The next chapter enumerates common MySQL challenges and how to mitigate them.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Practice: Alert on History List Length'
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'The goal of this practice is to alert on history list length (HLL) greater
+    than 100,000. (Recall [“History List Length”](#hll).) This depends on your systems
+    for monitoring (collecting metrics) and alerting, but fundamentally it’s no different
+    than alerting on other metrics. Therefore, the needed work is twofold:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Collect and report the HLL value.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Create an alert on HLL greater than 100,000.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'All MySQL monitors should be able to collect and report HLL. If your current
+    monitoring cannot, seriously consider a better monitor because HLL is a fundamental
+    metric. Read the documentation for your monitor to learn how to make it collect
+    and report HLL. HLL can change quickly, but there’s leeway before MySQL is at
+    risk due to high HLL. Therefore, you can report HLL slowly: every minute.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Once your monitor is collecting and reporting HLL, set an alert on HLL greater
+    than 100,000 for 20 minutes. But recall [“Wild Goose Chase (Thresholds)”](ch06.html#thresholds):
+    you might need to adjust the 20 minute threshold, but note that HLL greater than
+    100,000 for longer than 20 minutes is quite abnormal.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In case you need to query the HLL value manually:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE29]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Historically, HLL was parsed from the output of `SHOW ENGINE INNODB STATUS`:
+    look for “History list length” under section header “TRANSACTIONS” in MySQL.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: I hope that you’re never alerted for HLL, but having the alert is a best practice,
+    and it has saved many applications from an outage. An HLL alert is a friend.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Practice: Examine Row Locks'
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The goal of this practice is to examine row locks for real queries from your
+    application and, if possible, understand why the query acquires each lock. *If
+    possible* is a necessary disclaimer given that InnoDB row locking can be inscrutable.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Use a development or staging instance of MySQL; do not use production. Also,
+    use MySQL 8.0.16 or newer because it has the best data lock reporting using the
+    Performance Schema table `data_locks`, as shown in [“Row Locking”](#row-locking).
+    If you can only use MySQL 5.7, then you’ll need to examine data locks using `SHOW
+    ENGINE INNODB STATUS`: refer to [MySQL Data Locks](https://oreil.ly/f9uqy) for
+    an illustrated guide to mapping data lock output from MySQL 5.7 to MySQL 8.0.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Use real table definitions and as much real data (rows) as possible. If possible,
+    dump data from production and load into your development or staging MySQL instances.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If there are particular queries or transactions that you’re curious about, begin
+    by examining their data locks. Otherwise, begin with slow queries—recall [“Query
+    profile”](ch01.html#query-profile).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Since locks are released when a transaction completes, you need to use explicit
+    transactions, as shown in [“Row Locking”](#row-locking):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE30]'
+  prefs: []
+  type: TYPE_PRE
+- en: Replace `elem` with your table name, and remember to `COMMIT` or `ROLLBACK`
+    to release the locks.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To change the transaction isolation level for the next (and only the next) transaction,
+    execute `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` before `BEGIN`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is expert-level practice, so any effort and understanding is an achievement.
+    Congratulations.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '^([1](ch08.html#idm45829097823024-marker)) To go down the rabbit hole, follow
+    [“A Critique of ANSI SQL Isolation Levels”](https://oreil.ly/WF6NT): a classic
+    read on the subject of ANSI SQL-92 isolation levels.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([2](ch08.html#idm45829097678720-marker)) Thank you to Jakub Łopuszański for
+    revealing and teaching me this secret.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([3](ch08.html#idm45829097586336-marker)) In *storage/innobase/trx/trx0purge.cc*
+    of the MySQL 8.0 source code, a debug block logs a warning when HLL is greater
+    than 2,000,000.
+  prefs: []
+  type: TYPE_NORMAL

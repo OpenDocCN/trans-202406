@@ -1,0 +1,689 @@
+- en: Chapter 8\. Linux Kernel Security, Capabilities, and Seccomp
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: BPF is a powerful way to extend the kernel without compromising stability, safety,
+    and speed. For this reason, kernel developers thought that it would’ve been good
+    to use its versatility to improve process isolation in Seccomp by implementing
+    Seccomp filters backed by BPF programs, also known as Seccomp BPF. In this chapter
+    we examine what Seccomp is and how it is used. Then you learn how to write Seccomp
+    filters using BPF programs. After that you explore the built-in BPF hooks that
+    the kernel has for Linux security modules.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Linux Security Modules (LSM) is a framework providing a set of functions that
+    can be used to implement different security models in a standardized way. An LSM
+    can be used in the kernel source tree directly, like Apparmor, SELinux, and Tomoyo.
+  prefs: []
+  type: TYPE_NORMAL
+- en: We begin by discussing Linux capabilities.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Capabilities
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The deal with Linux capabilities is that you need to provide your unprivileged
+    process with permission to do a specific task, but you don’t want to give `suid`
+    privileges to the binary or otherwise make the process privileged, so you reduce
+    the attack surface by just giving the process the specific capability to accomplish
+    the specific tasks. For example, if your application needs to open a privileged
+    port, like 80, instead of starting the process as root, you can just give it the
+    `CAP_NET_BIND_SERVICE` capability.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Consider the following Go program called *main.go*:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: This program serves an HTTPserver on port 80, a privileged port.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'What we normally would do is to run that program straight after compiling it
+    with the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'However, because we are not giving root privileges, that code will output an
+    error when binding the port:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '`capsh` (capability shell wrapper) is a tool that will start a shell with a
+    specific set of capabilities.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In this case, as stated, instead of giving full root permissions, we can just
+    allow the binding of privileged ports by allowing the `cap_net_bind_service` capability
+    along with all the others the program already has. To do that, we can wrap our
+    program run with `capsh`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Let’s break down that command a bit:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`capsh`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: We use `capsh` as wrapper.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`--caps=''cap_net_bind_service+eip cap_setpcap,cap_setuid,cap_setgid+ep''`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Because we need to change the user (we don’t want to run as root), we need
+    to specify `cap_net_bind_service` and the capabilities to actually do the user
+    ID change from `root` to `nobody`, namely, `cap_setuid` and `cap_setgid`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`--keep=1`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: We want to keep the set capabilities when the switch from root is done.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`--user="nobody"`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The end user running our program will be `nobody`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`--addamb=cap_net_bind_service`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: We set ambient capabilities because those are cleared after switching from root.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`-- -c "./capabilities"`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: After everything, we just run our program.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Ambient capabilities are a specific kind of capability that is inherited by
+    the children programs when the current program executes them using `execve()`.
+    Only those capabilities that are permitted in the ambient and are inheritable
+    can be ambient capabilities.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'At this point, you are probably asking yourself what is that `+eip` after the
+    capability in the `--caps` option. Those flags are used to determine whether:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The capability needs to be activated (p).
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The capability is usable (e).
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The capability can be inherited by child processes (i).
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Because we want to use our `cap_net_bind_service`, we need to make it `e`; then
+    in our command, we started a shell. That then started the `capabilities` binary,
+    and we needed to make it `i`. Finally, we want the capability to be activated
+    (it was not because we changed the UID), using `p`. That ends up being `cap_net_bind_service+eip`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You can verify that with `ss`; we’re going to cut the output to make it fit
+    in this page, but it will show the bound port and the user ID that are different
+    than `0`, in this case `65534`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: We used `capsh` for this example, but you can write the wrapper by using *libcap*;
+    for more info, see `man 3 libcap`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: When writing programs, it’s fairly common that the developer doesn’t really
+    know in advance all the capabilities needed by a program at runtime; moreover,
+    with newer releases, those capabilities might change.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To better understand the capabilities used by our program, we can use the `capable`
+    tool from BCC that sets up a kprobe on the kernel function `cap_capable`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'We can accomplish the same using `bpftrace` with a one-liner kprobe on the
+    `cap_capable` kernel function:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'That will output something like the following, if our program `capabilities`
+    is started after the kprobe:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The fifth column is the capability required by the process, and because this
+    output also includes nonaudit events, we see all the nonaudit checks and finally
+    the required capability with the audit flag (the last in the previous output)
+    set to 1\. The capability we are interested in is `CAP_NET_BIND_SERVICE`, which
+    is defined as a constant in the kernel source code at `include/uapi/linux/capability.h`
+    and has ID `10`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Capabilities are often used in container runtimes, like runC or Docker, to
+    make containers unprivileged and allow only the capabilities needed to run the
+    majority of applications. When an application needs particular capabilities, in
+    Docker that can be done with `--cap-add`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: This command will give the `CAP_NET_ADMIN` capability to that container, allowing
+    it to set up a netlink to add the `dummy0` interface.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The next section shows how to achieve capabilities such as filtering but by
+    using another technique that will let us programmatically implement our own filters.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Seccomp
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Seccomp stands for Secure Computing, and it is a security layer implemented
+    in the Linux kernel that allows developers to filter specific syscalls. Although
+    Seccomp is comparable to capabilities, its ability to control specific system
+    calls makes it a lot more flexible when compared to capabilities.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Seccomp and capabilites do not exclude each other; they are often used together
+    to bring benefits from both the worlds. For example, you might want to give the
+    `CAP_NET_ADMIN` capability to a process but not allow it to accept connections
+    on a socket by blocking the `accept` and `accept4` syscalls.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The way Seccomp filters is based on BPF filters using the `SECCOMP_MODE_FILTER`
+    mode, and syscalls filtering is done in the same way it is for packets.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Seccomp filters are loaded using `prctl` via the `PR_SET_SECCOMP` operation;
+    those filters are expressed in the form of a BPF program that is executed on each
+    Seccomp *packet* expressed using the `seccomp_data` struct. That struct contains
+    the reference architecture, the CPU instruction pointer at the time of the syscall,
+    and a maximum of six system call arguments expressed as `uint64`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Here’s how the `seccomp_data` struct looks from the kernel’s source at `linux/seccomp.h`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: As you can see by reading the struct, we can filter based on the syscall, based
+    on its arguments, or based on a combination of them.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'After receiving each Seccomp packet, the filter has the duty of doing the processing
+    to make a final decision to tell the kernel what to do next. The final decision
+    is expressed via one of the return values (status codes) it can give, as described
+    here:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`SECCOMP_RET_KILL_PROCESS`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: It will kill the whole process immediately after filtering the syscall, which
+    as a consequence, is not executed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`SECCOMP_RET_KILL_THREAD`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: It will kill the current thread immediately after filtering the syscall, which
+    as a consequence, is not executed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`SECCOMP_RET_KILL`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is an alias to `SECCOMP_RET_KILL_THREAD` left for compatibility.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`SECCOMP_RET_TRAP`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The syscall is disallowed, and the `SIGSYS` (Bad System Call) signal is sent
+    to the task calling it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`SECCOMP_RET_ERRNO`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The syscall is not executed, and the `SECCOMP_RET_DATA` part of the filter’s
+    return value is passed to user-space as the `errno` value. Depending on what was
+    the cause of the error, a different `errno` is returned. You can find the list
+    of error numbers in the following section.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`SECCOMP_RET_TRACE`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is used to notify a `ptrace` tracer using `PTRACE_O_TRACESECCOMP` to intercept
+    when the syscall is called to observe and control the execution of the syscall.
+    In case there’s no tracer attached, an error is returned, `errno` is set to `-ENOSYS`,
+    and the syscall is not executed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`SECCOMP_RET_LOG`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The syscall is allowed and logged.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`SECCOMP_RET_ALLOW`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The syscall is just allowed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '`ptrace` is a system call used to implement tracing mechanisms on a process,
+    called the *tracee*, with the effect of being able to observe and control the
+    process’s execution. The tracer program can effectively affect the execution and
+    change the memory registers of the tracee. In the context of Seccomp, `ptrace`
+    is used when triggered by the `SECCOMP_RET_TRACE` status code; therefore, the
+    tracer can prevent the syscall from executing and implement its own logic.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Seccomp Errors
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: From time to time, while working with Seccomp you will encounter different errors
+    given by the return value of type `SECCOMP_RET_ERRNO`. To notify that an error
+    happened, the `seccomp` syscall will return `-1` instead of `0`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The possible errors are as follows:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`EACCESS`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The caller is not allowed to do the syscall—usually this happens because it
+    didn’t have `CAP_SYS_ADMIN` privileges or did not set `no_new_privs` with `prctl`,
+    which we explain later in this chapter.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`EFAULT`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The passed arguments (`args` in the `seccomp_data` struct) did not have a valid
+    address.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`EINVAL`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'It can have four meanings:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The requested operation is not known or supported by this kernel within its
+    current configuration.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The specified flags are not valid for the requested operation.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Operation includes `BPF_ABS`, but there are problems with the specified offset
+    that might exceed the size of the `seccomp_data` structure.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The number of instructions passed to the filter exceeds the maximum number of
+    instructions.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`ENOMEM`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: There’s not enough memory to execute the program.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`EOPNOTSUPP`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The operation specified that with `SECCOMP_GET_ACTION_AVAIL`, the action was
+    available, but in reality the kernel has no support for the return action in the
+    arguments.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`ESRCH`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: There was a problem during the synchronization of another thread.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`ENOSYS`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: There’s no tracer attached to the `SECCOMP_RET_TRACE` action.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '`prctl` is a syscall that allows a user-space program to control (set and get)
+    specific aspects of a process, such as endian-ness, thread names, secure computing
+    (Seccomp) mode, privileges, Perf events, and so on.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Seccomp might sound to you like it is a sandboxing mechanism, but that’s not
+    true. Seccomp is a utility that lets its users develop a sandboxing mechanism.
+    Now here’s how to write programs to write the custom interactions using a filter
+    called directly by a Seccomp syscall.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Seccomp BPF Filter Example
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'In this example we show how to put together the two actions described earlier:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Write the Seccomp BPF program to be used as a filter with different return codes
+    based on the decisions it makes.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Load the filter using `prctl`.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'First the example needs some headers from the standard library and the Linux
+    kernel:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Before trying to execute this example, we need to make sure that our kernel
+    has been compiled with `CONFIG_SECCOMP` and `CONFIG_SECCOMP_FILTER` set to `y`.
+    In a live machine, that can be checked with the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The rest of the code is the `install_filter` function, made up of two parts.
+    The first part contains our the list of BPF filtering instructions:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  prefs: []
+  type: TYPE_PRE
+- en: The instructions are set up using the `BPF_STMT` and `BPF_JUMP` macros defined
+    in `linux/filter.h`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s walk through the instructions:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`BPF_STMT(BPF_LD + BPF_W + BPF_ABS (offsetof(struct seccomp_data, arch)))`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This loads and accumulates with `BPF_LD` in the form of the word `BPF_W`, and
+    the packet data is contained at the fixed `BPF_ABS` offset.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, arch, 0, 3)`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This checks with `BPF_JEQ` whether the architecture value in the accumulator
+    constant `BPF_K` is equal to `arch`. If so, it will jump with offset zero to the
+    next instruction; otherwise, it will jump with offset three to give an error,
+    in this case because the arch did not match.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`BPF_STMT(BPF_LD + BPF_W + BPF_ABS (offsetof(struct seccomp_data, nr)))`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This loads and accumulates with `BPF_LD` in the form of the word `BPF_W`, which
+    is the syscall number data contained at the fixed `BPF_ABS` offset.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, nr, 0, 1)`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This compares the value from the syscall number to the one in the `nr` variable.
+    If they are equal, it will go to the next instruction and disallow the syscall;
+    otherwise, it will allow the syscall with `SECCOMP_RET_ALLOW`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ERRNO | (error &` `SECCOMP_RET_DATA))`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This terminates the program with `BPF_RET` and gives as a result an error, `SECCOMP_RET_ERRNO`,
+    with the specified error number from the `err` variable.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW)`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This terminates the program with `BPF_RET` and allows the syscall execution
+    using `SECCOMP_RET_ALLOW`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If you need further assistance in understanding that assembly, you will probably
+    find useful some pseudocode that does the same thing:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE14]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'After defining the filter code in the `socket_filter` struct, we need to define
+    a `sock_fprog` containing the filter code and the calculated length of the filter
+    itself. This data structure is needed as an argument for declaring the process
+    operation later:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE15]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Now we have only one thing left to do in the `install_filter` function: load
+    the program itself! To do that, we use `prctl` using `PR_SET_SECCOMP` as an option
+    because we want to enter secure computing mode. Then we instruct the mode to load
+    a filter with `SECCOMP_MODE_FILTER` that is contained in our `prog` variable of
+    type `sock_fprog`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE16]'
+  prefs: []
+  type: TYPE_PRE
+- en: Finally, we can take advantage of our `install_filter` function, but before
+    using it, we need to use `prctl` to set `PR_SET_NO_NEW_PRIVS` on the current execution
+    to avoid the situation in which child processes can have wider privileges than
+    the parent. This lets us make the following `prctl` calls in the `install_filter`
+    function without root privileges.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'We can now call the `install_filter` function. We will block all the `write`
+    syscalls relative to the `X86-64` architecture and will just give permission denied
+    to all the attempts. After the filter installation we just continue the execution
+    by using the first argument:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE17]'
+  prefs: []
+  type: TYPE_PRE
+- en: Let’s try it now!
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To compile our program, we can use either `clang` or `gcc`; either way, it’s
+    just a matter of compiling the `main.c` file with no special options:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE18]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'We said that we blocked all the writes in our program. To test it then, we
+    need a program that does writes; the `ls` program seems like a good candidate,
+    and here is how it behaves normally:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE19]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Cool! Here’s what our wrapper program usage looks like; we just pass the program
+    we want to test as first argument:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE20]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'After it’s executed, that program gives completely empty output, leaving no
+    output. However, we can use `strace` to see what’s happening:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE21]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The result had been stripped of a lot of noise, and the relevant part of that
+    shows that writes are being blocked with an `EPERM` error, which is the same one
+    we set up. This means the program is silent because it can’t access that syscall
+    now:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE22]'
+  prefs: []
+  type: TYPE_PRE
+- en: You now have an understanding of how Seccomp BPF operates and a good sense of
+    what you can do with it. But wouldn’t it be good if there were a way to achieve
+    the same using eBPF instead of cBPF to harness its power?
+  prefs: []
+  type: TYPE_NORMAL
+- en: When thinking about eBPF programs, most people think that you just write them
+    and load them with root privileges. Although that statement is generally true,
+    the kernel implements a set of mechanisms to protect eBPF objects at various levels;
+    those mechanisms are called BPF LSM *hooks*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: BPF LSM Hooks
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: To provide architecture-independent control over system events, LSM implements
+    the concept of hooks. Technically, a hook call is similar to a syscall; however,
+    being system independent and integrated with the LSM framework makes hooks interesting
+    because the layer of abstraction this provides can be convenient and can help
+    avoid the kind of troubles that can occur when working with syscalls on different
+    architectures.
+  prefs: []
+  type: TYPE_NORMAL
+- en: At the time of writing, the kernel has seven hooks related to BPF programs,
+    and SELinux is the only in-tree LSM implementing them.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You can see this in the kernel source tree in this file: `include/linux/security.h`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE23]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Each one of those hooks will be invoked at different stages of the execution:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`security_bpf`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Does an initial check on the executed BPF syscalls
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`security_bpf_map`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Does a check when the kernel returns a file descriptor for a map
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`security_bpf_prog`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Does a check when the kernel returns a file descriptor for an eBPF program
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`security_bpf_map_alloc`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Does the initialization of the security field inside BPF maps
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`security_bpf_map_free`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Does the cleanup of the security field inside BPF maps
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`security_bpf_prog_alloc`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Does the initialization of the security field inside BPF programs
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`security_bpf_prog_free`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Does the cleanup of the security field inside BPF programs
+  prefs: []
+  type: TYPE_NORMAL
+- en: Now that we’ve seen them, it becomes clear that the idea behind the LSM BPF
+    hooks is that they can provide a per-object protection for eBPF objects in order
+    to ensure that only those with the appropriate privileges can do operations on
+    maps and programs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Conclusion
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Security is not something that you can implement in a universal way for everything
+    you want to protect. It is important to be able to secure systems at different
+    layers and in different ways, and, believe it or not, the best way to secure a
+    system is to stack different layers with different perspectives so that a compromised
+    layer does not lead to the ability to access the entire system. The kernel developers
+    did a great job in providing us with a set of different layers and interaction
+    points that we can use; our hope is that we gave you a good understanding of what
+    the layers are and how to use BPF programs to interact with them.
+  prefs: []
+  type: TYPE_NORMAL

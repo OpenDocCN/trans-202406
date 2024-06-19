@@ -1,0 +1,503 @@
+- en: Chapter 13\. Linkerd CNI Versus Init Containers
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: In [Chapter 2](ch02.html#LUAR_intro_to_linkerd), we mentioned the init container
+    a couple of times without ever talking about it in detail. The init container
+    is one of the two mechanisms Linkerd provides for handling mesh networking in
+    Kubernetes, with the other being the Linkerd CNI plugin. To understand what these
+    do and why you’d choose one over the other, you need to understand what happens
+    when a meshed Pod starts running.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As it happens, that’s a much bigger, thornier issue than you might expect. We’ll
+    start by looking at vanilla Kubernetes, *without* Linkerd.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Kubernetes sans Linkerd
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'At its core, Kubernetes has a straightforward goal: manage user workloads so
+    that developers can concentrate on Pods and Services without needing to worry
+    too much about the underlying hardware. This is one of those things that’s easy
+    to describe, and fairly easy to use, but *extremely* complex to implement. Kubernetes
+    relies on several different open source technologies to get it all done. Remember
+    that we’re talking about Kubernetes *without* Linkerd at this point—this is essentially
+    your standard Kubernetes functionality.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Nodes, Pods, and More
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'The first area that Kubernetes has to manage is orchestrating the actual execution
+    of workloads within a cluster. It relies extensively on OS-level isolation mechanisms
+    for this task. Here are some key points to keep in mind:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Clusters comprise one or more *Nodes*, which are physical or virtual machines
+    running Kubernetes itself. We’ll discuss Linux Nodes here.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Since Nodes are entirely distinct from one another, everything on one Node is
+    isolated from others.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Pods consist of one or more *containers*, and they’re isolated within the same
+    Node using Linux [`cgroup`s](https://oreil.ly/K1z3T) and `namespace`s.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Containers within the same Pod are allowed to communicate using *loopback* networking.
+    Containers in different Pods need to use non-loopback addresses because Pods are
+    isolated from each other. Pod-to-Pod communication is the same whether the Pods
+    are on the same Node or not.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'An important point is that Linux itself operates at the Node level: Pods and
+    containers don’t have to run separate instances of the OS. This is the reason
+    that isolation between them is so critical.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'This layered approach, shown in [Figure 13-1](#clusters-nodes-etc-diagram),
+    lets Kubernetes orchestrate the distribution of workloads within the cluster,
+    while keeping an eye on resource availability and usage: workload containers map
+    to Pods, Pods are scheduled onto Nodes, and all Nodes connect to a single flat
+    network.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![luar 1301](assets/luar_1301.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 13-1\. Clusters, Nodes, Pods, and containers
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: (What about Deployments, ReplicaSets, DaemonSets, and such? They’re all about
+    hinting to Kubernetes where the Pods they create should be scheduled; the actual
+    scheduling mechanism underneath is the same.)
+  prefs: []
+  type: TYPE_NORMAL
+- en: Networking in Kubernetes
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The other major area that Kubernetes manages is the network, starting with the
+    fundamental tenet that every Pod must see a flat and transparent network. Every
+    Pod should be able to communicate with all others, on any Node. This means that
+    every Pod must have its own IP address (the *Pod IP*).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Containers or Pods?
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The requirement is actually that *any two containers* must be able to talk to
+    each other, but IP addresses are allocated at the Pod level—multiple containers
+    within one Pod share the same IP address.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'While it’s possible to have a workload use Pod IPs directly to communicate
+    with other workloads, it’s not a good idea due to the dynamic nature of Pod IPs:
+    they change as Pods cycle. It’s a better idea to use Kubernetes Services in most
+    cases.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Services are rather complex, as we discussed briefly in [Chapter 5](ch05.html#LUAR_ingress_and_linkerd):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Creating a Service triggers the allocation of a DNS entry, so workloads can
+    refer to the Service by name.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Creating a Service also triggers allocation of a unique IP address for the Service,
+    distinct from any other IP address in the cluster. We call this the Service IP.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The Service includes a *selector*, which defines which Pods will be associated
+    with the Service.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Lastly, the Service gathers the Pod IP addresses of all its matching Pods and
+    maintains them as its endpoints.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: This is all shown in [Figure 13-2](#k8s-service-diagram-1)—which, sadly, is
+    still a *simplified* view of Services.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![luar 1302](assets/luar_1302.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 13-2\. Kubernetes Services and addressing
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'When a workload attempts to connect to a Service, Kubernetes will, by default,
+    select one of the Service’s endpoints and route the connection there. This allows
+    Kubernetes to perform basic load balancing of connections, as shown in [Figure 13-3](#k8s-routing-diagram):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Connections within Pods happen over localhost so that they stay within the Pod.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Connections to other workloads hosted on the same Node stay internal to the
+    Node.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Connections to workloads hosted on other Nodes are the only ones that transit
+    the network.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '![luar 1303](assets/luar_1303.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 13-3\. Kubernetes basic network routing
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: To make this all work, Kubernetes relies on the networking mechanisms built
+    into the core of the Linux kernel.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Role of the Packet Filter
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The Linux kernel has long included a powerful *packet filter* mechanism to inspect
+    network packets and make decisions about what to do with each one. Possible actions
+    the packet filter system can take include letting the packet continue as is, modifying
+    the packet, rerouting the packet, or even discarding it entirely.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Kubernetes takes extensive advantage of the packet filter to handle the complexities
+    of routing traffic among an ever-changing set of Pods within a cluster. For instance,
+    the filter can intercept a packet sent to a Service and rewrite it to go to a
+    specific Pod IP instead. It can also distinguish between a Pod IP on the same
+    Node as the sender and one on a different Node, and manage routing appropriately.
+    If we zoom in a bit on [Figure 13-3](#k8s-routing-diagram), we get the more detailed
+    view in [Figure 13-4](#k8s-routing-pf-diagram).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![luar 1304](assets/luar_1304.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 13-4\. Kubernetes and the packet filter
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Let’s follow the dotted-line connection shown in [Figure 13-4](#k8s-routing-pf-diagram),
+    from Pod B-1 all the way to Pod C-2:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The application container in Pod B-1 makes a connection to the Service IP address
+    for Service C.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The packet filter sees a connection from a local container to the Service IP,
+    so it redirects that connection to the Pod IP of either Pod C-1 or Pod C-2\. By
+    default, the choice is random for each new connection (though the exact configuration
+    of the cluster’s networking layer can change this).
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: In this case, the Pod IP is on a different Node, so the network hardware gets
+    involved to communicate over the network to the second Node.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: On the second Node, the packet filter sees the connection coming over the network
+    to a Pod IP address, so it hands the connection directly to the Pod, choosing
+    a container based on the port number.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: For the dashed-line connection shown between Pod B-1 and Pod A-1, the process
+    is the same, except that the network hardware has no role to play since the connection
+    is entirely contained within one Node. In all cases, the containers see a simple,
+    flat network, with all containers living in the same IP address range—which, of
+    course, requires Kubernetes to continuously update the packet filter rules as
+    Pods are created and removed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Alphabet Soup: iptables, nftables, and eBPF'
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: There have been several implementations of the packet filter over time, and
+    you may hear people use the name of a specific implementation when talking about
+    this topic. The most common as of this writing is `iptables`, but a newer `nftables`
+    implementation is becoming more popular.
+  prefs: []
+  type: TYPE_NORMAL
+- en: You might also find this whole bit reminding you of the filtering technology
+    known as eBPF, which makes a lot of sense since eBPF is particularly good at this
+    kind of packet wizardry. However, many implementations predate eBPF and don’t
+    rely on it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Container Networking Interface
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Since networking configuration is a rather low-level aspect of Kubernetes, the
+    details tend to depend on which Kubernetes implementation is in use. The Container
+    Network Interface (CNI) is a standard designed to offer a consistent interface
+    for managing dynamic network configurations; for example, the CNI provides mechanisms
+    for allocating and releasing IP addresses within specific ranges, which Kubernetes
+    uses in turn to manage the IP addresses associated with Services and Pods.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The CNI doesn’t directly provide mechanisms for managing packet filtering functionality,
+    but it does allow for *CNI plugins*. Service meshes—including Linkerd—can use
+    these plugins to implement the packet filtering configuration they need to function.
+  prefs: []
+  type: TYPE_NORMAL
+- en: CNI Versus CNI
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: There are many implementations of the CNI, and a given Kubernetes solution often
+    allows a choice between several different CNI implementations (for example, k3d
+    uses [Flannel](https://oreil.ly/GIVvg) by default as its networking layer, but
+    it can be easily switched to [Calico](https://oreil.ly/YSSts)).
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Kubernetes Pod Startup Process
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'When all is said and done, here’s what Kubernetes needs to do to start a Pod:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Locate a Node to host the new Pod.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Run any CNI plugins defined by the Node within the new Pod’s context. The process
+    fails if any plugin doesn’t work.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Execute any init containers defined for the new Pod, in the order they’re defined.
+    Again, the startup process fails if any don’t work.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Launch all the containers defined by the Pod.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: During the initiation of the Pod’s containers, it’s important to note that the
+    containers will start in the order outlined by the Pod’s `spec`. However, Kubernetes
+    will *not* wait for one container to start before moving on to the next, unless
+    a container has a `postStartHook` defined. In that case, Kubernetes will start
+    that container, run the `postStartHook` to completion, and only then proceed to
+    start the next container. We’ll talk more about this in [“Container ordering”](#container_ordering_ch13).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Kubernetes and Linkerd
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'Any service mesh introduces complexities into startup, and Linkerd is no exception.
+    The first concern is that Linkerd has to inject its proxy into application Pods,
+    and the proxy has to intercept network traffic going into and out of the Pod.
+    Injection is managed using a mutating admission controller. Interception is more
+    complex, and Linkerd has two ways to manage it: you can use either an init container
+    or a CNI plugin.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Init Container Approach
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The most straightforward way for Linkerd to configure networking is via an init
+    container, as shown in [Figure 13-5](#init-container-diagram). Kubernetes ensures
+    all init containers are run to completion, in the order they’re mentioned in the
+    Pod’s `spec`, before any other containers start. This makes the init container
+    an ideal way to configure the packet filter.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![luar 1305](assets/luar_1305.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 13-5\. Startup with the init container
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The downside here is that the init container requires the `NET_ADMIN` capability
+    to perform the required configuration. In many Kubernetes runtimes, this capability
+    simply isn’t available, and you’ll need to resort to the Linkerd CNI plugin.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Also, the OS used in some Kubernetes clusters may not support the older `iptables`
+    binary used by default in Linkerd (this typically comes into play with the Red
+    Hat family). In these instances, you’ll need to set `proxyInit.iptablesMode=nft`
+    to instruct Linkerd to use `iptables-nft` instead. (This isn’t the default setting
+    because `iptables-nft` isn’t universally supported yet.)
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Linkerd CNI Plugin Method
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: In contrast, the Linkerd CNI plugin simply requires that you install the plugin
+    prior to installing Linkerd itself. It doesn’t need any special capabilities,
+    and the CNI plugin will operate every time a Pod starts, configuring the packet
+    filter as required, as shown in [Figure 13-6](#cni-startup-diagram).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![luar 1306](assets/luar_1306.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 13-6\. Startup with the CNI plugin
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The main complication here is that the CNI was originally designed for the people
+    setting up the cluster in the first place, rather than people using it after it’s
+    been created. As a result, the CNI assumes that the ordering of CNI plugins is
+    handled completely outside the Kubernetes environment. This has turned out to
+    be less than ideal, so most CNI plugins these days (including the Linkerd CNI
+    plugin) are written to try to do the right thing no matter what the cluster operators
+    did.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the case of the Linkerd CNI plugin, when it’s enabled Linkerd installs a
+    DaemonSet designed to arrange for the Linkerd CNI plugin to always run last. This
+    allows other plugins the chance to configure what they need before Linkerd jumps
+    in to enable the Linkerd proxy to intercept traffic.
+  prefs: []
+  type: TYPE_NORMAL
+- en: When using the CNI plugin, Linkerd will still inject an init container. If you’re
+    using a version of Linkerd prior to `stable-2.13.0`, this will be a no-op init
+    container that, as the name suggests, essentially doesn’t do much. From `stable-2.13.0`
+    onward, the init container will verify that the packet filter is correctly configured.
+    If it’s not, the container will fail, prompting Kubernetes to restart the Pod.
+    This helps to avoid a startup race condition (more on this in the next section).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Races and Ordering
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: As you can see, the startup process in Kubernetes can be complex—which means
+    that there are several different ways things can fail.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Container ordering
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'As mentioned previously, containers are launched in the order they appear in
+    the Pod’s `spec`, but Kubernetes doesn’t wait for a given container to start before
+    launching the next one (except for init containers). This can cause trouble during
+    Linkerd’s startup: what if the application container begins running and tries
+    to use the network before the Linkerd proxy container is functioning?'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Starting with Linkerd 2.12, there’s a `postStartHook` on the Linkerd proxy container
+    to deal with this. When a container has a `postStartHook`, Kubernetes starts the
+    container, then runs the `postStartHook` to completion before starting the next
+    container. This gives containers a straightforward way to ensure ordering.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Linkerd proxy’s `postStartHook` won’t complete until the proxy is actually
+    running, which forces Kubernetes to wait until the proxy is functional before
+    starting the application container. If necessary, this functionality can be disabled
+    by setting the annotation `config.linkerd.io/proxy-await=disabled`. However, we
+    recommend leaving it enabled unless there’s a compelling reason to do otherwise!
+  prefs: []
+  type: TYPE_NORMAL
+- en: CNI plugin ordering
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'There are several ways CNI plugin ordering can cause confusion:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: DaemonSets versus other Pods
+  prefs: []
+  type: TYPE_NORMAL
+- en: Kubernetes treats DaemonSet Pods just like any other Pods, which means that
+    an application Pod might be scheduled before the Linkerd CNI DaemonSet can install
+    the Linkerd CNI plugin! This implies that the Linkerd CNI plugin won’t run for
+    the application Pod, which in turn means that the application container(s) won’t
+    have a functioning Linkerd proxy.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Before Linkerd `stable-2.13.0`, there was no way to catch this, and the application
+    container would simply never be present in the mesh. As of `stable-2.13.0`, though,
+    the init container checks that the packet filter has been configured correctly.
+    If it’s not, the init container will exit, causing a crash loop from Kubernetes’s
+    point of view, which will make the failure obvious.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Multiple CNI plugins
+  prefs: []
+  type: TYPE_NORMAL
+- en: In most cases, a given Kubernetes installation will use more than one CNI plugin.
+    While the Linkerd CNI DaemonSet puts a lot of effort into allowing the Linkerd
+    CNI plugin to run last, and to not disrupting other CNI plugins, it’s not perfect.
+    If this goes wrong, the Pod will (again) probably never appear to be in the mesh.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Misconfigured CNI
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'It’s always possible to simply misconfigure the Linkerd CNI plugin when you
+    install it in the first place. For example, when running k3d, it’s necessary to
+    supply the plugin with certain paths, and if these are wrong, the plugin itself
+    won’t work. This might cause application Pods to silently fail to launch, or it
+    might cause “corrupt message” errors to show up in the proxy logs:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The only real saving grace of CNI issues is that they’re typically pretty obvious,
+    conspicuous errors: you’ll see `linkerd check` fail, or Pods won’t start, or similar
+    things. On the other hand, *resolving* the failures can be tricky and depends
+    greatly on the specific CNI involved, so in general we recommend sticking with
+    the init container mechanism where possible.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Summary
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'There’s a lot of complexity to the Kubernetes startup process—especially with
+    Linkerd—but there are also some simple recommendations to help keep everything
+    going smoothly:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Keep Linkerd up-to-date! Recent versions have added some really helpful things
+    for startup.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Use `proxy-await` unless you have a *very* good reason to disable it. It’ll
+    make sure that your application code has a working mesh before starting.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Stick with the init container if you can. If not, just use the CNI plugin, but
+    if your cluster can run with the init container, it’s probably simplest to do
+    so.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL

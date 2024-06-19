@@ -1,0 +1,693 @@
+- en: Chapter 20\. Performing Transactions
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 20.0 Introduction
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The MySQL server can handle multiple clients at the same time because it is
+    multithreaded. To deal with contention among clients, the server performs any
+    necessary locking so that two clients cannot modify the same data at once. However,
+    as the server executes SQL statements, it’s very possible that successive statements
+    received from a given client will be interleaved with statements from other clients.
+    If a client executes multiple statements that are dependent on each other, the
+    fact that other clients may be updating tables in between those statements can
+    cause difficulties.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Statement failures can be problematic, too, if a multiple-statement operation
+    does not run to completion. Suppose that a `flight` table contains information
+    about airline flight schedules and you want to update the row for Flight 578 by
+    choosing a pilot from among those available. You might do so using three statements
+    as follows:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The first statement chooses an available pilot, the second marks the pilot
+    as unavailable, and the third assigns the pilot to the flight. That’s straightforward
+    enough in principle, but in practice there are significant difficulties:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Concurrency issues
+  prefs: []
+  type: TYPE_NORMAL
+- en: If two clients want to schedule pilots, it’s possible for both to run the initial
+    `SELECT` query and retrieve the same pilot ID number before either has a chance
+    to set the pilot’s status to unavailable. If that happens, the same pilot is scheduled
+    for two flights at once.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Integrity issues
+  prefs: []
+  type: TYPE_NORMAL
+- en: All three statements must execute successfully as a unit. For example, if the
+    `SELECT` and the first `UPDATE` run successfully, but the second `UPDATE` fails,
+    the pilot’s status is set to unavailable without the pilot being assigned a flight.
+    The database becomes inconsistent.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To prevent concurrency and integrity problems in these types of situations,
+    transactions are helpful. A transaction groups a set of statements and guarantees
+    the following properties:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: No other client can update the data used in the transaction while the transaction
+    is in progress; it’s as though you have the server all to yourself. For example,
+    other clients cannot modify the pilot or flight records while you’re booking a
+    pilot for a flight. Transactions solve concurrency problems arising from the multiple-client
+    nature of the MySQL server. In effect, transactions serialize access to a shared
+    resource across multiple-statement operations.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Statements grouped within a transaction are committed (take effect) as a unit,
+    but only if they all succeed. If an error occurs, any actions that occurred prior
+    to the error are rolled back, leaving the relevant tables unaffected as though
+    none of the statements had been executed. This keeps the database from becoming
+    inconsistent. For example, if an update to the `flights` table fails, rollback
+    causes the change to the `pilots` table to be undone, leaving the pilot still
+    available. Rollback frees you from having to figure out how to undo a partially
+    completed operation yourself.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: This chapter shows the syntax for the SQL statements that begin and end transactions.
+    It also describes how to implement transactional operations from within programs,
+    using error detection to determine whether to commit or roll back.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Scripts related to the examples shown here are located in the *transactions*
+    directory of the `recipes` distribution.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 20.1 Choosing a Transactional Storage Engine
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to use transactions.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: To use transactions, you must use a transaction-safe engine. Check your MySQL
+    server to determine which transactional storage engines it supports.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'MySQL supports several storage engines. Currently, the transactional engines,
+    shipped with the standard distribution, include InnoDB and NDB. To see which your
+    MySQL server supports, use this statement:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: If MySQL Cluster is enabled, you’ll also see a line that says `ndbcluster`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Transactional engines are those that have a `TRANSACTIONS` value of `YES`; those
+    actually usable have a `SUPPORT` value of `YES` or `DEFAULT`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'After determining which transactional storage engines are available, to create
+    a table that uses a given engine, add an `ENGINE` `=` *`tbl_engine`* clause to
+    your `CREATE` `TABLE` statement:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'If you need to modify an existing application to perform transactions, but
+    it uses nontransactional tables, you can alter the tables to use a transactional
+    storage engine. For example, MyISAM tables are nontransactional and trying to
+    use them for transactions will yield incorrect results because they do not support
+    rollback. In this case, you can use `ALTER` `TABLE` to convert the tables to a
+    transactional type. Suppose that `t` is a MyISAM table. To make it an InnoDB table,
+    do this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: One thing to consider before altering a table is that changing it to use a transactional
+    storage engine may affect its behavior in other ways. For example, the MyISAM
+    engine provides more flexible handling of `AUTO_INCREMENT` columns than do other
+    storage engines. If you rely on MyISAM-only sequence features, changing the storage
+    engine will cause problems.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 20.2 Performing Transactions Using SQL
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: A set of statements must succeed or fail as a unit—that is, you require a transaction.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Manipulate MySQL’s auto-commit mode to enable multiple-statement transactions,
+    and then commit or roll back the statements depending on whether they succeed
+    or fail.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: This recipe describes the SQL statements that control transactional behavior
+    in MySQL. The immediately following recipes discuss how to perform transactions
+    from within programs. Some APIs require that you implement transactions by executing
+    the SQL statements discussed in this recipe; others provide a special mechanism
+    that enables transaction management without writing SQL directly. However, even
+    in the latter case, the API mechanism maps program operations onto transactional
+    SQL statements, so reading this recipe will give you a better understanding of
+    what the API does on your behalf.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'MySQL normally operates in auto-commit mode, which commits the effect of each
+    statement as soon as it executes. (In effect, each statement is its own transaction.)
+    To perform a transaction, you must disable auto-commit mode, execute the statements
+    that make up the transaction, and then either commit or roll back your changes.
+    In MySQL, you can do this two ways:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Execute a `START` `TRANSACTION` (or `BEGIN`) statement to suspend auto-commit
+    mode, then execute the statements that make up the transaction. If the statements
+    succeed, record their effect in the database and terminate the transaction by
+    executing a `COMMIT` statement:'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: 'If an error occurs, don’t use `COMMIT`. Instead, cancel the transaction by
+    executing a `ROLLBACK` statement. In the following example, `t` remains empty
+    after the transaction because the effects of the `INSERT` statements are rolled
+    back:'
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: 'Another way to group statements is to turn off auto-commit mode explicitly
+    by setting the `autocommit` session variable to 0\. After that, each statement
+    you execute becomes part of the current transaction. To end the transaction and
+    begin the next one, execute a `COMMIT` or `ROLLBACK` statement:'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: 'To turn auto-commit mode back on, use this statement:'
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Transactions have their limits because not all statements can be part of a transaction.
+    For example, if you execute a `DROP` `DATABASE` statement, don’t expect to restore
+    the database by executing a `ROLLBACK`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 20.3 Performing Transactions from Within Programs
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You’re writing a program that must implement transactional operations.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use the transaction abstraction provided by your language API, if it has such
+    a thing. If it doesn’t, use the API’s usual statement-execution mechanism to execute
+    the transactional SQL statements directly.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: To perform transactional processing from within a program, use your API language
+    to detect errors and take appropriate action. This recipe provides general background
+    on doing this. The next recipes provide language-specific details for the MySQL
+    APIs for Perl, Ruby, PHP, Python, Go, and Java.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Every MySQL API supports transactions, even if only in the sense that you can
+    explicitly execute transaction-related SQL statements such as `START` `TRANSACTION`
+    and `COMMIT`. However, some APIs also provide a transaction abstraction that enables
+    control over transactional behavior without working directly with SQL. That approach
+    hides the details and provides better portability to other database engines that
+    have different underlying transaction SQL syntax. An API abstraction is available
+    for each language that we use in this book.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The next few recipes each implement the same example to illustrate how to perform
+    program-based transactions. They use a table `money` containing the following
+    initial rows that show how much money two people have:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The sample transaction is a simple financial transfer that uses two `UPDATE`
+    statements to give six dollars of Eve’s money to Ida:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The intended result is that the table should look like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: It’s necessary to execute both statements within a transaction to ensure that
+    both of them take effect at once. Without a transaction, Eve’s money disappears
+    without being credited to Ida if the second statement fails. By using a transaction,
+    the table is left unchanged if statement failure occurs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The sample programs for each language are located in the *transactions* directory
+    of the `recipes` distribution. If you compare them, you’ll see that they all employ
+    a similar framework for performing transactional processing:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The transaction statements are grouped within a control structure, along with
+    a commit operation.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: If the status of the control structure indicates that it did not execute successfully
+    to completion, the transaction is rolled back.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'That logic can be expressed as follows, where `block` represents the control
+    structure used to group statements:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: If the statements in the block succeed, you reach the end of the block and perform
+    a commit. Otherwise, occurrence of an error raises an exception that triggers
+    execution of the error-handling code where you roll back the transaction.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The benefit of structuring your code as just described is that it minimizes
+    the number of tests needed to determine whether to roll back. The alternative—checking
+    the result of each statement within the transaction and rolling back on individual
+    statement errors—quickly turns your code into an unreadable mess.
+  prefs: []
+  type: TYPE_NORMAL
+- en: A subtle point to be aware of when rolling back within languages that raise
+    exceptions is that it may be possible for the rollback itself to fail, causing
+    another exception to be raised. If you don’t deal with that, your program itself
+    may terminate. To handle this, execute the rollback within another block that
+    has an empty exception handler. The sample programs do this as necessary.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Those sample programs that disable auto-commit mode explicitly when performing
+    a transaction enable auto-commit afterward. In applications that perform all database
+    processing in transactional fashion, it’s unnecessary to do this. Just disable
+    auto-commit mode once after you connect to the database server, and leave it off.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 20.4 Performing Transactions in Perl Programs
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to perform a transaction in a Perl DBI script.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use the standard DBI transaction support mechanism.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'The Perl DBI transaction mechanism is based on explicit manipulation of auto-commit
+    mode:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Turn on the `RaiseError` attribute if it’s not enabled and disable `PrintError`
+    if it’s on. You want errors to raise exceptions without printing anything, and
+    leaving `PrintError` enabled can interfere with failure detection in some cases.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Disable the `AutoCommit` attribute so that a commit will be done only when you
+    say so.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Execute the statements that make up the transaction within an `eval` block so
+    that errors raise an exception and terminate the block. The last thing in the
+    block should be a call to `commit()`, which commits the transaction if all its
+    statements completed successfully.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: After the `eval` executes, check the `$@` variable. If `$@` contains the empty
+    string, the transaction succeeded. Otherwise, the `eval` will have failed due
+    to the occurrence of some error and `$@` will contain an error message. Invoke
+    `rollback()` to cancel the transaction. To display an error message, print `$@`
+    before calling `rollback()`.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: If desired, restore the original values of the `RaiseError` and `PrintError`
+    attributes.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'Because it can be messy to change and restore the error-handling and auto-commit
+    attributes if an application performs multiple transactions, let’s put the code
+    to begin and end a transaction into convenience functions that handle the processing
+    that occurs before and after the `eval`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'By using those two functions, our sample transaction can be performed easily
+    as follows:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  prefs: []
+  type: TYPE_PRE
+- en: In Perl DBI, an alternative to manipulating the `AutoCommit` attribute manually
+    is to begin a transaction by invoking `begin_work()`. This method disables `AutoCommit`
+    and causes it to be enabled again automatically when you invoke `commit()` or
+    `rollback()` later.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 20.5 Performing Transactions in Ruby Programs
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to perform a transaction in a Ruby Mysql2 script.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Send transaction management statements, such as `START TRANSACTIONS`, `BEGIN`,
+    `COMMIT`, and `ROLLBACK` as regular queries.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The Ruby Mysql2 module does not have built-in functions for the transaction
+    support. Instead, it expects its users to run transaction management statements
+    as regular queries.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To start transaction, execute `client.query("START TRANSACTION")`, then execute
+    required updates, and finish the block with `client.query("COMMIT")`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Put your transaction into a `begin ... rescue` block, so you can call `ROLLBACK`
+    if something goes wrong.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE14]'
+  prefs: []
+  type: TYPE_PRE
+- en: 20.6 Performing Transactions in PHP Programs
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to perform a transaction in a PHP script.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use the standard PDO transaction support mechanism.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'The PDO extension supports a transaction abstraction that can be used to perform
+    transactions. To begin a transaction, use the `beginTransaction()` method. Then,
+    after executing your statements, invoke either `commit()` or `rollback()` to commit
+    or roll back the transaction. The following code illustrates this. It uses exceptions
+    to detect transaction failure, so it assumes that exceptions are enabled for PDO
+    errors:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE15]'
+  prefs: []
+  type: TYPE_PRE
+- en: 20.7 Performing Transactions in Python Programs
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to perform a transaction in a Python DB API script.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use the standard DB API transaction support mechanism.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'The Python DB API abstraction provides transaction processing control through
+    connection object methods. The DB API specification indicates that database connections
+    should begin with auto-commit mode disabled. Therefore, when you open a connection
+    to the database server, Connector/Python disables auto-commit mode, which implicitly
+    begins a transaction. End each transaction with either `commit()` or `rollback()`.
+    The `commit()` call occurs within a `try` statement, and the `rollback()` occurs
+    within the `except` clause to cancel the transaction if an error occurs:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE16]'
+  prefs: []
+  type: TYPE_PRE
+- en: 20.8 Performing Transactions in Go Programs
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to perform a transaction in a Go Program
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use the standard transaction support mechanism, provided by the `database/sql`
+    package.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The Go `sql` interface supports a transaction abstraction that could be used
+    to perform transactions. To begin a transaction, use the `DB.Begin()` function.
+    Then, after executing your statements, invoke either `Tx.Commit()` or `Tx.Rollback()`
+    to commit or rollback the transaction. The following code illustrates this.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE17]'
+  prefs: []
+  type: TYPE_PRE
+- en: 20.9 Using Context-Aware Functions to Handle Transactions in Go
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to rollback transactions automatically in your Go program.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The Go-MySQL-Driver supports context cancellation. This means that you can cancel
+    database operations, such as running a query, if cancel the context.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: To use the package [context](https://pkg.go.dev/context) with SQL you need to
+    create the object of type `Context` first, then pass it to the database function.
+    Function names of the `sql` interface that support context are similar to ones
+    that do not, but have prefix `Context`. For example, function `Query()` does not
+    support `Context` while the function `QueryContext()` does.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The following example uses `Context` to handle database transactions. You will
+    find code for it in the file *transaction_context.go* in the *transactions* directory
+    of the `recipes` distribution.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE18]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](Images/1.png)](#co_nch-xact-xact-go-context_import_co)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Import statement for the context support.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](Images/2.png)](#co_nch-xact-xact-go-context_funcparam_co)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Our user-defined functions take `context.Context` as a parameter.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![3](Images/3.png)](#co_nch-xact-xact-go-context_exec_co)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: To execute statements that do not return a result set, use a context-aware function
+    `ExecContext()`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![4](Images/4.png)](#co_nch-xact-xact-go-context_query_co)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: To execute queries that do return a result set, use a context-aware function
+    `QueryContext()`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![5](Images/5.png)](#co_nch-xact-xact-go-context_begin_co)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: To start a transaction that will automatically rollback if context is cancelled,
+    use a context-aware function `BeginTx()`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![6](Images/6.png)](#co_nch-xact-xact-go-context_tx_co)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: To execute a statement that could be cancelled inside the transaction, use context-aware
+    function `Tx.ExecContext()`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![7](Images/7.png)](#co_nch-xact-xact-go-context_ctx_co)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Before using context, you need to create it. In our example we created a cancellable
+    context. Function `context.WithCancel()` takes parent context as a parameter and
+    returns just created new context, and a `cancel()` function. We deferred its call
+    to the end of the `main()` function execution. You have options to call the `cancel()`
+    function in whatever place of the code when appropriate. You may prefer to use
+    `context.WithDeadline()` or `context.WithTimeout()`, so your SQL execution code
+    will be cancelled if runs longer than certain time.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 20.10 Performing Transactions in Java Programs
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to perform a transaction in a JDBC application.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use the standard JDBC transaction support mechanism.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'To perform transactions in Java, use your `Connection` object to turn off auto-commit
+    mode. Then, after executing your statements, use the object’s `commit()` method
+    to commit the transaction or `rollback()` to cancel it. Typically, you execute
+    the statements for the transaction in a `try` block, with `commit()` at the end
+    of the block. To handle failures, invoke `rollback()` in the corresponding exception
+    handler:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE19]'
+  prefs: []
+  type: TYPE_PRE

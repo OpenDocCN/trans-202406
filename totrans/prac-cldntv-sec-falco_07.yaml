@@ -1,0 +1,484 @@
+- en: Chapter 5\. Data Enrichment
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Falco’s architecture allows you to capture events from different data sources,
+    as you’ve learned. This process delivers raw data, which can be very rich but
+    isn’t very useful for runtime security unless paired with the right context. That’s
+    why Falco first extracts and then enriches the raw data with contextual information,
+    so that the rule author can comfortably use it. Typically, we refer to this information
+    as the event *metadata*. Getting metadata can be a complex task, and getting it
+    efficiently is even more complex.
+  prefs: []
+  type: TYPE_NORMAL
+- en: You’ve already seen that the system-state collection capabilities in *libscap*
+    and the state engine implemented by *libsinsp* (discussed in [Chapter 3](ch03.xhtml#understanding_falcoapostr))
+    are central to this activity, but there’s much more to discover. In this chapter,
+    we’ll delve into the design aspects of the Falco stack to help you better understand
+    how data enrichment works. In particular, we will show you *libsinsp*’s efficient
+    layered approach to obtaining system, container, and Kubernetes metadata for system
+    call (syscall) events. This is what enables you to access the information you
+    need relating to different contexts (depending on your use case), such as a container’s
+    ID or the name of a Pod where a suspicious event occurred. Finally, we’ll show
+    you how plugins, Falco’s other main data source, can implement their own data
+    enrichment mechanisms, opening up infinite possibilities.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Understanding Data Enrichment for Syscalls
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Understanding how data enrichment works will help you to fully understand Falco’s
+    mechanics. Moreover, although data enrichment usually works out of the box, each
+    context Falco supports has its own implementation and may need a specific configuration.
+    Knowing the implementation details will help you troubleshoot and fine-tune Falco.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*Data enrichment* in Falco refers to the process of providing the rule engine
+    with event metadata obtained by decoding the raw data or collecting it from complementary
+    sources. You can then use this metadata as fields in both rule conditions and
+    output formatting. Falco organizes the collected metadata in a set of field classes,
+    so you can easily recognize which context they belong to. (You can find the complete
+    list of supported fields in [Chapter 6](ch06.xhtml#fields_and_filters) or, if
+    you have a Falco installation at your fingertips, by typing `**falco --list**`.)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: One of the most significant examples of data enrichment is when using system
+    calls as a data source, which you learned about in [Chapter 4](ch04.xhtml#data_source).
+    Since syscalls are essential to every application, they occur in just about every
+    context. Information directly provided by a syscall would not be useful without
+    context, however, so it therefore becomes critical to collect and connect the
+    surrounding information.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Table 5-1](#contextual_metadata_for_system_calls) shows the different categories
+    of metadata that Falco collects for syscalls, and the field classes associated
+    with each data enrichment layer.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 5-1\. Contextual metadata for system calls
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Context | Metadata | Field classes |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| Operating system | Processes and threads File descriptors'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Users and groups
+  prefs: []
+  type: TYPE_NORMAL
+- en: Network interfaces | `proc`, `thread`, `fd`, `fdlist`, `user`, `group` |
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Container | ID and name Type'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Image name
+  prefs: []
+  type: TYPE_NORMAL
+- en: Privileged
+  prefs: []
+  type: TYPE_NORMAL
+- en: Mount points
+  prefs: []
+  type: TYPE_NORMAL
+- en: Health checks | `container` |
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Kubernetes | Namespace Pod'
+  prefs: []
+  type: TYPE_NORMAL
+- en: ReplicationController
+  prefs: []
+  type: TYPE_NORMAL
+- en: Service
+  prefs: []
+  type: TYPE_NORMAL
+- en: ReplicaSet
+  prefs: []
+  type: TYPE_NORMAL
+- en: Deployment | `k8s` |
+  prefs: []
+  type: TYPE_NORMAL
+- en: The enrichment process happens in user space and involves several components
+    of Falco’s stack. Most importantly, the metadata must be immediately available
+    every time the rule engine requests it. Collecting it from other complementary
+    sources on the fly would thus not be feasible, as attempting to do so would risk
+    blocking the rule engine and the entire flow of incoming events.
+  prefs: []
+  type: TYPE_NORMAL
+- en: For that reason, data enrichment involves two distinct phases. The first initializes
+    a local state by collecting in bulk the data that is present when Falco starts,
+    and the second continuously updates the local state while Falco runs. Having a
+    local state allows Falco to extract metadata immediately. This design is shared
+    among all implementation layers, as you will discover in the following sections.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Operating System Metadata
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'As you learned in [Chapter 3](ch03.xhtml#understanding_falcoapostr), *libscap*
+    and *libsinsp* work together to provide all the necessary infrastructure to create
+    and update contextual information in a hierarchical structure composed of several
+    state tables (see [Figure 3-4](ch03.xhtml#the_libsinsp_state_hierarchy) if you
+    need a refresher). Those tables include information about:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Processes and threads
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: File descriptors
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Users and groups
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Network interfaces
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: At a high level, the mechanism for collecting system information is relatively
+    simple. At start time, one of *libscap*’s tasks is to scan the [*process information
+    pseudo-filesystem*](https://oreil.ly/xso1E), or *procfs*, which provides a user-space
+    interface to the Linux kernel data structures and contains most of the information
+    to initialize the state tables. It also collects system information (not available
+    in */proc*) using functions provided by the standard C library, which in turn
+    obtains the data from the underlying operating system (for example, `getpwent`
+    and `getgrent` for users and groups lists, respectively, and `getifaddrs` for
+    the network interfaces list). At this point, the initialization phase is complete.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '*libscap* and *libsinsp* rely on the host’s procfs to access the host’s system
+    information. That happens by default when Falco runs on the host since it can
+    directly access the host’s */proc*. However, when Falco runs in a container, the
+    */proc* inside the container refers to a different namespace. In such a situation,
+    you can configure *libscap* via the `HOST_ROOT` environment variable to read from
+    an alternative path. If you set `HOST_ROOT`, *libscap* will use its value as a
+    base path when looking for system paths. For example, when running Falco in a
+    container, the usual approach is to mount the host’s */proc* to */host/proc* inside
+    the container and set `HOST_ROOT` to */host*. With this setup, *libscap* will
+    read from */host/proc*, and thus it will use the information provided by the host’s
+    procfs.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Afterward, *libsinsp* comes into play with its state engine (see [Figure 5-1](#system_state_collection_before_left_par)).
+    It updates the tables by inspecting the constantly captured stream of syscalls
+    provided by the driver, which runs in kernel space. After the initialization phase,
+    Falco will not need to make any syscalls or tap into the system to obtain updates
+    from the Linux kernel. This approach has the double benefit of not creating noise
+    in the system and having a low impact on performance. Furthermore, this technique
+    enables *libsinsp* to discover system changes with low latency, allowing Falco
+    to function as a streaming engine (one of its most important design goals).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The last important thing to note is that *libsinsp* updates the state tables
+    before dispatching the event to the rule engine. This ensures that when the conditions
+    or output require metadata, it will always be available and consistent. You can
+    then find the system metadata grouped in the set of field classes you saw in [Table 5-1](#contextual_metadata_for_system_calls):
+    `proc`, `thread`, `fd`, `fdlist`, `user`, and `group`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This set of information represents the basic metadata that enables a rule author
+    to make a syscall event usable. Think about it: how would you use a numeric file
+    descriptor in a rule? A filename is much better!'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![](Images/pcns_0501.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 5-1\. System state collection before (1) and after (2) the initialization
+    phase
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The system information (i.e., the state tables) produced by this data enrichment
+    layer is also essential for collecting contextual information at the container
+    level. We’ll look at that next.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Container Metadata
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Additional fundamental contextual information resides in the container runtime
+    layer. A *container runtime* is a software component that can run containers on
+    a host operating system. It is commonly responsible for managing container images
+    and the lifecycles of containers running on your system. It is also responsible
+    for managing a set of information related to each running container and providing
+    that information to other applications.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Because Falco is a cloud native runtime security tool, it needs to be able to
+    deal with container information. To achieve this goal, *libsinsp* works with the
+    most commonly used container runtime environments, including Docker, Podman, and
+    CRI-compatible^([2](ch05.xhtml#ch01fn6)) runtimes like containerd and CRI-O.
+  prefs: []
+  type: TYPE_NORMAL
+- en: When *libsinsp* finds a running container runtime on the host, the container
+    metadata enrichment functionality works out of the box in almost all cases. For
+    example, *libsinsp* tries to use Docker’s Unix socket at */var/run/docker.sock*;
+    if this exists, *libsinsp* automatically connects to it and starts grabbing container
+    metadata. *libsinsp* does the same for Podman and containerd. For other CRI-compatible
+    runtimes, you will need to pass the socket path to Falco using the `--cri` command-line
+    flag (for CRI-O, for example, you would pass `/var/run/crio/crio.sock`).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: If the `HOST_ROOT` environment variable is set, *libsinsp* will use its value
+    as the base path when looking for those Unix sockets. For example, when running
+    Falco in a container, it’s common to set `HOST_ROOT=/host` and mount */var/run/docker.sock*
+    to */host/var/run/docker.sock* inside the container.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Regardless of which container runtime you are using, at initialization *libsinsp*
+    requests a list of all running containers, which it uses to initialize an internal
+    cache. At the same time, *libsinsp* updates the state table of running processes
+    and threads, associating each of them with its respective container ID, if any.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*libsinsp* handles subsequent updates by using the syscalls stream coming from
+    the driver (similar to what it does for system information). Since container information
+    is always associated with a process, *libsinsp* tracks all new processes and threads.
+    When it detects one, it looks up the corresponding container ID in the internal
+    cache. If the container ID is not in the cache, *libsinsp* queries the container
+    runtime to gather the missing data.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Ultimately, each syscall-generated event that occurs in a container has a process
+    or thread ID that maps to a container ID and, consequently, to the container metadata
+    (as shown in [Figure 5-2](#container_info_in_the_libsinsp_state_hi)). So, when
+    the rule engine requires this metadata, *libsinsp* looks it up from the state
+    tables and returns system information along with the container metadata. You will
+    find the available container metadata grouped in the field class `container`,
+    which can be used in both conditions and output formatting.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![](Images/pcns_0502.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 5-2\. Container info in the libsinsp state hierarchy
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Note that the field `container.id` can contain either the container ID *or*
+    the special value `host`. This special value indicates that the event did not
+    happen inside a container. The condition `container.id != host` is a common way
+    to express a rule that applies only in the context of a container.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the final data enrichment layer, Falco collects the Kubernetes metadata associated
+    with system calls. We’ll look at how this works next.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Kubernetes Metadata
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Kubernetes, the flagship project of the Cloud Native Computing Foundation, is
+    an open source platform for managing workloads and services. It has introduced
+    many new concepts that make it easier to manage and scale clusters and is the
+    most popular container orchestration system today.
+  prefs: []
+  type: TYPE_NORMAL
+- en: One of the essential features of Kubernetes is encapsulating your applications
+    in objects called *Pods*, which contain one or more containers. Pods are ephemeral
+    objects that you can quickly deploy and easily replicate. *Services* in Kubernetes
+    are an abstraction that allows you to expose a set of Pods as a single network
+    service. Finally, Kubernetes lets you arrange those and many other objects into
+    *namespaces*, which are objects that allow partitioning of a single cluster into
+    multiple virtual clusters.
+  prefs: []
+  type: TYPE_NORMAL
+- en: While these concepts greatly facilitate managing and automating clusters, they
+    also introduce a set of contextual information about how and where your application
+    is running. Awareness of this information is essential, since knowing that something
+    has happened in your Kubernetes cluster is of little use if you don’t know where
+    it happened (for example, in which namespace or Pod). Falco collects information
+    such as the container image name, Pod name, namespace, labels, annotations, and
+    exposed service names so it can offer as accurate a view as possible of your deployments
+    and applications. This is important for runtime alerting and protection of your
+    infrastructure, because you’re typically much more interested in what service
+    or deployment is showing a strange behavior than in getting a container ID or
+    some other hard-to-link piece of information. As a cloud native tool, Falco can
+    readily obtain this metadata and attach it to the event.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Similar to the operating system and container metadata collection mechanisms
+    you saw in the previous sections, this feature allows Falco to enrich syscall
+    events by adding Kubernetes metadata. For full Kubernetes support, you must opt
+    in by passing two command-line options to Falco:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`--k8s-api` (or just `-k`)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This enables Kubernetes support by connecting to the API server specified as
+    an argument (e.g., `http://admin:password@127.0.0.1:8080`).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`--k8s-api-cert` (or just `-K`)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This provides certificate materials to authenticate the user and (optionally)
+    verify the Kubernetes API server’s identity.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Further details are provided in [Chapter 10](ch10.xhtml#configuring_and_running).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'When Falco is running in a Pod, Kubernetes injects that information in the
+    container, so you just need to set:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: Most installation methods use this strategy to fetch those values automatically.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Once Kubernetes support is configured, *libsinsp* will get all the necessary
+    data from Kubernetes to create and maintain a local copy of the state of the cluster.
+    However, unlike the other enrichment mechanisms that get metadata locally from
+    the host, *libsinsp* has to connect to the Kubernetes API server (usually a remote
+    endpoint) to get cluster information. Because of this difference, the implementation
+    design needs to take performance and scalability concerns into account.
+  prefs: []
+  type: TYPE_NORMAL
+- en: A typical Falco deployment (pictured in [Figure 5-3](#a_falco_deployment_using_a_daemonset_to))
+    runs one Falco sensor on every node in the cluster. At startup, each sensor connects
+    to the API server to collect the cluster data and build the initial state locally.
+    From then on, each sensor will use the [Kubernetes watch API](https://oreil.ly/g0hCZ)
+    to periodically update the local state.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![](Images/pcns_0503.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 5-3\. A Falco deployment using a [DaemonSet](https://oreil.ly/WTTGU)
+    to ensure that all nodes run a copy of a Pod
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Since Falco sensors are distributed in the cluster (one per node) and grab data
+    from the API server—and because collecting some resource types from Kubernetes
+    may result in huge responses that severely impact both the API server and Falco—*libsinsp*
+    has mechanisms to avoid congestion. First, it waits for a short time between downloading
+    each chunk. Falco allows you to fine-tune that wait time, along with several other
+    parameters, by changing a value in */etc/falco/falco.yaml*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: More importantly, it’s possible to request *only* the relevant metadata for
+    the targeted node from the API server. This is helpful because Falco’s architecture
+    is distributed, so each sensor needs data only from the node on which the event
+    occurred. This optimization is fundamental if you want to scale Falco on a cluster
+    with thousands of nodes. To enable it, add the `--k8s-node` flag to the Falco
+    command-line arguments, passing the current node name as the value. You can usually
+    obtain this name easily from the Kubernetes [Downward API](https://oreil.ly/F1Dnv).^([3](ch05.xhtml#ch01fn7))
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you don’t include the `--k8s-node` flag, *libsinsp* will still be able to
+    get the data from Kubernetes, but each Falco sensor will have to request the whole
+    cluster’s data. This can introduce a performance penalty on large clusters, so
+    we strongly discourage it. (You will learn more about running Falco on a production
+    Kubernetes cluster in [Part III](part03.xhtml#iii_running_falco_in_production).)
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'When Kubernetes metadata is available, you will find it grouped in the `k8s`
+    field class. Many of the Falco default rules include `k8s` fields in their conditions.
+    Falco, when used with the `-pk` command-line option, automatically appends the
+    most crucial Kubernetes metadata to the output of all notifications, as you can
+    see in the following example, which we’ve pretty-printed to improve readability
+    (more on this in [“Output Settings”](ch10.xhtml#output_settings)):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: This output is the result of the complex mechanism you’ve just learned about
+    that allows you to obtain accurate and contextualized information to immediately
+    identify what event has just occurred, and where.
+  prefs: []
+  type: TYPE_NORMAL
+- en: So far, we’ve only discussed Falco’s data enrichment process for system calls.
+    Although that’s likely to be the most relevant information for most users, you
+    should know that Falco also offers custom enrichment mechanisms. We’ll take a
+    quick look at how to implement those next.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Data Enrichment with Plugins
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Plugins can extend Falco by adding new data sources and defining new fields
+    to describe how to use these new events. As you’ll recall from [Chapter 4](ch04.xhtml#data_source),
+    a plugin that offers the field extraction capability works on events provided
+    by other plugins or core libraries. While it might not seem obvious yet, a plugin
+    with this capability has everything it takes to provide a custom data-enrichment
+    mechanism. First, it can receive data from any data source. Second, it can define
+    new fields. Fundamentally, it allows the plugin author to implement logic to return
+    the values of those fields, thus potentially providing additional metadata. This
+    opens the door to the possibility of implementing custom data enrichment.
+  prefs: []
+  type: TYPE_NORMAL
+- en: When such a plugin runs, *libsinsp* calls the plugin function for field extraction
+    for each incoming event. The function receives the raw payload of the event and
+    the list of fields the rule engine needs. The plugin API interface does not impose
+    any other constraints to make the extraction process work. Although data enrichment
+    is possible in the flow just described, the plugin author will still have to consider
+    all the implications of the use case; for example, the plugin will need to manage
+    the local state and subsequent updates. Extracting fields and enriching the event
+    is thus entirely up to the plugin author. The APIs merely provide the essential
+    tools.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Chapter 14](ch14.xhtml#falco_development) shows you how to implement a plugin.
+    If you’re interested in doing that, however, our advice is to read the next chapter
+    about fields and filters first, so you have a more complete picture of how extracting
+    data works.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Conclusion
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: This chapter illustrated how Falco works internally to provide a rich set of
+    metadata. Falco makes this metadata available as fields you can use in rules’
+    conditions. Read on to discover how to use fields to filter only those events
+    that are really pertinent to your needs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([1](ch05.xhtml#ch01fn5-marker)) In older Falco versions, the Kubernetes audit
+    log was a built-in data source. From Falco 0.32, this data source has been refactored
+    out as a plugin.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([2](ch05.xhtml#ch01fn6-marker)) The [Container Runtime Interface (CRI)](https://oreil.ly/fiCGp)
+    is a plugin interface introduced by Kubernetes that enables the kubelet to use
+    any container runtimes implementing the CRI.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([3](ch05.xhtml#ch01fn7-marker)) The Downward API allows containers to consume
+    information about themselves or the cluster without using the Kubernetes API server.
+    Among other things, it allows exposing the current node name through an environment
+    variable that can be then used in Falco command-line arguments.
+  prefs: []
+  type: TYPE_NORMAL

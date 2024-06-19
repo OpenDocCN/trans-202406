@@ -1,0 +1,913 @@
+- en: Chapter 8\. Working Example of Multicluster Application Delivery
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Let’s take a look at a simple working example of a web application with a backing
+    datastore. For our purposes, we will deploy an app that mimics the game PAC-MAN
+    game from Atari. A user will interact with a dynamic frontend that stores information
+    in a backing MongoDB.
+  prefs: []
+  type: TYPE_NORMAL
+- en: We will deploy this application across multiple distinct clusters using the
+    techniques discussed in [Chapter 5](ch05.html#continuous_delivery_across_clusters).
+    Each of the clusters will be provisioned from a hub running Open Cluster Management,
+    as discussed in [Chapter 6](ch06.html#multicluster_fleets_provision_and_upgrad).
+    Further, we will configure an external load balancer provided by a GSLB service
+    hosted by F5\. Incoming user requests will be routed from a global domain into
+    one of the specific clusters. If any one of the clusters or the application experiences
+    a problem, then user requests will no longer be routed to that cluster. We are
+    going to go a little further and demonstrate how to integrate off-cluster resources
+    like an F5 DNS Load Balancer Cloud Service, and we will integrate a ServiceNow
+    change ticket into the example.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In [Figure 8-1](#a_working_example_made_up_of_multiple_cl), we see our PAC-MAN
+    application running on two OpenShift clusters with a load balancer routing traffic
+    to app instances on either cluster. We can see the hub cluster with various resources
+    that are helping to manage the overall system. Through the rest of this chapter,
+    we will explain what these various parts are doing and provide a walk-through
+    that you can do on your own to experiment with all of the moving parts.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![](assets/hcok_0801.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 8-1\. A working example made up of multiple clusters and a two-tier web
+    application, managed by an Open Cluster Management hub and integrating off-cluster
+    automation
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Failure Is Inevitable
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: We have seen from many angles how OpenShift recovers from failures of the underlying
+    infrastructure or cloud provider and how you can achieve a responsive and adaptive
+    open hybrid cloud to support your applications. Let’s review some of the things
+    we’ve talked about.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In [Chapter 4](ch04.html#single_cluster_availability), we discussed single cluster
+    availability where the control plane of a Kubernetes cluster is able to tolerate
+    the failure of any one availability zone. When an availability zone fails in a
+    single cluster, both the control plane and applications running within the cluster
+    can tolerate loss of supporting compute, network, or storage infrastructure. Your
+    applications must take advantage of Kubernetes concepts like services that act
+    as a load balancer within the cluster, routing user requests to multiple supporting
+    application pods. When an application pod is no longer healthy (as determined
+    by health checks) or the node supporting the pod is no longer healthy, then the
+    Kubernetes scheduler will look for a new home for the failing pod. We design applications
+    for resiliency by having redundant pods that continue to run and service incoming
+    user requests.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Now what happens if the cluster cannot reschedule the failing pod because it
+    has exhausted capacity? What happens if more than a single availability zone fails?
+    Under these scenarios, it may be preferable to deploy additional instances of
+    the application to other clusters in alternative regions or even alternative cloud
+    providers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As we saw in [Chapter 6](ch06.html#multicluster_fleets_provision_and_upgrad),
+    we can use OpenShift to provision running clusters across many different cloud
+    providers. The [Open Cluster Management](https://oreil.ly/3J1SW) project allows
+    you to manage those clusters from a central control plane, referred to as the
+    “hub” cluster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Further, in [Chapter 7](ch07.html#multicluster_policy_configuration), we saw
+    how a given cluster was matched to required configurations through a `PlacementRule`.
+    Whenever an Open Cluster Management policy was matched against a cluster because
+    the cluster was selected by a `PlacementRule`, required configuration could be
+    audited or enforced against that cluster. Because OpenShift is very operator-centric
+    both for the control plane and for workloads, using policies to drive declarative
+    configuration is a natural and simple way to ensure that your clusters are ready
+    to support application workloads. An added benefit is that the declarative policies
+    are easily managed in your source control systems if you’re adopting a full or
+    semi-GitOps approach.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In [Chapter 5](ch05.html#continuous_delivery_across_clusters), we examined how
+    an appropriate `PlacementRule` can ensure that an application is running across
+    multiple clusters. By running an application across more than one cluster in separate
+    regions, we can now tolerate the failure of an entire cloud region. Alternatively,
+    you can use this when your organization happens to have adopted different cloud
+    providers just due to organizational inertia, because of a merger and acquisition,
+    or because you need to survive the complete outage of a cloud provider. The simplest
+    example of multicluster, though, likely is that you are leveraging your existing
+    datacenter virtualization provider and adopting at least one public cloud provider
+    as well. `PlacementRule`s help separate the “what” needs to run from the “where”
+    very easily. `PlacementRule`s also enable your application to adjust if the availability
+    or labeling of clusters changes. That is, if either the `PlacementRule` is changed
+    or the set of available clusters changes due to additions or removals, then the
+    application components will be dynamically redeployed across new clusters or taken
+    off of failing clusters.
+  prefs: []
+  type: TYPE_NORMAL
+- en: So, we can create clusters easily ([Chapter 6](ch06.html#multicluster_fleets_provision_and_upgrad)),
+    we can ensure those clusters are configured correctly to support the enterprise
+    configuration and security standards ([Chapter 7](ch07.html#multicluster_policy_configuration)),
+    and we can deliver applications to those clusters ([Chapter 5](ch05.html#continuous_delivery_across_clusters)).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Multicluster Load Balancing
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: How do we ensure that user requests are routed to healthy application instances?
+    For our example, we will use a cloud-based GSLB service managed by F5.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'There are a number of solutions to handle multicluster load balancing. We’ve
+    chosen to use an cloud-based service from F5 for these reasons:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: It’s not supported by an operator at the time of this writing (and yet is still
+    important to automate with our application).
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: It’s easy to sign up for a lightweight account through the AWS Marketplace.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: We expect most datacenters will need to automate how their applications integrate
+    with an F5 BIG-IP load balancer. Even though the cloud-based service and the F5
+    BIG-IP appliances use different APIs, we believe the example will give you enough
+    of an understanding that you can adapt the principles that are demonstrated to
+    your own applications. Also, if we used a BIG-IP virtual appliance for the example,
+    it would increase the complexity for users who want to re-create the complete
+    example.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The F5 service will work for you even if your clusters run across completely
+    different cloud environments or your own datacenters with public routes exposed.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'For your own awareness and reference, here are two other options to provide
+    load balancing across clusters:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The [external-dns](https://oreil.ly/eyHBj) project extends the typical internal
+    cluster DNS registry for services into a public DNS record. The project is still
+    somewhat young as of the time of this writing but has a number of supported providers.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The [k8gb.io](https://www.k8gb.io) project will set up DNS registries within
+    each cluster. An external DNS entry must be configured in some top-level DNS provider
+    that delegates to the cluster-specific DNS registries. The architecture has the
+    benefit that there is no centralized controller that can be a single point of
+    failure. However, features like latency-based routing are not currently supported
+    (as in the F5 or external-dns options).
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'In our example application, you will establish a top-level DNS record (e.g.,
+    `*.www-apps.<*clusterName*>.<*baseDomain*>`) that delegates to the F5 DNS Load
+    Balancer to resolve the address (e.g., ns1.f5cloudservices.com and ns2.f5cloudservices.com).
+    Then the general flow of DNS requests to resolve the address will go through the
+    following steps:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: User resolves `app-name.www-apps.<*clusterName*>.<*baseDomain*>` against the
+    top-level DNS provider, which redirects the request to the relevant cloud DNS
+    provider for `*.<*baseDomain*>`.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: The `<*baseDomain*>` is resolved against your cloud provider’s DNS (e.g., Amazon
+    Route 53).
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: The cloud DNS provider returns a nameserver record for `*.www-apps.<*clusterName*>.<*baseDomain*>`
+    to route the request to one of ns1.f5cloudservices.com or ns2.f5cloudservices.com.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: The final resolution request to ns1.f5cloudservices.com or ns2.f5cloudservices.com
+    evaluates the list of managed zones and, based on where the DNS request originated
+    from and current health of backing services, returns the best match to an application
+    route hosted by one of your clusters.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: As shown in [Figure 8-2](#the_ffive_dns_load_balancer_cloud_servic), in the
+    F5 DNS Load Balancer Cloud Service, you will have one DNS load balancer zone for
+    each collection of clusters that may host the application. Each of these zones
+    will correspond to a top-level DNS entry in your cloud provider DNS that delegates
+    to F5 to resolve the correct cluster for a requested application route.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![](assets/hcok_0802.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 8-2\. The F5 DNS Load Balancer Cloud Service
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: When logged into the F5 DNS Load Balancer, you will see your various DNS load
+    balancer services (each of these routes to one or more applications provided across
+    multiple clusters) and the IP endpoints that are currently registered. Each IP
+    endpoint resolves to the application router of one of the clusters hosting one
+    of the application instances.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Now each time that your application has an instance that becomes available or
+    is removed from a cluster, we need to update the DNS load balancer zone for that
+    application (identified by `*.www-apps.<*clusterName*>.<*baseDomain*>`). How are
+    we going to do this automatically? Here, we’re going to introduce how you can
+    automate around your clusters whenever something in your environment is not “native”
+    Kubernetes. To accomplish this, we’re going to walk through how Ansible can automate
+    an update to the F5 DNS Load Balancer whenever our application is introduced to
+    a new cluster or removed from an existing cluster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You will need to carry out the following prerequisites for running our example
+    application:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Create an account with the F5 DNS Load Balancer Cloud Service. You can do this
+    at [F5 Cloud Services](https://oreil.ly/tmmSY) or through the [AWS Marketplace](https://oreil.ly/HF5mw).
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Delegate your global domain to the F5 DNS nameservers. Create a nameserver-delegating
+    DNS record with the global domain that you will use with F5\. You can do this
+    via Route 53 or your DNS provider. The [F5 DNS Load Balancer Cloud Service FAQ](https://oreil.ly/xK0sK)
+    answers questions related to this prerequisite.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Automating Without Operators
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: As we’ve covered extensively in this book, Kubernetes makes comprehensive use
+    of declarative configuration. While we believe that Kubernetes will underpin most
+    modern applications in the better part of the next decade, we recognize that not
+    all things are Kubernetes native today and may *never* be Kubernetes native.
+  prefs: []
+  type: TYPE_NORMAL
+- en: For those aspects of your application across multiple clusters or even multiple
+    clouds, we introduce Ansible as a method to automate any behavior that you want
+    to occur when the system introduces a change dynamically. As discussed in the
+    previous section, we want to have our OpenShift environment automatically place
+    our application instances across multiple clusters. Whenever our application is
+    deployed on a new cluster or has to be removed because a cluster is unhealthy,
+    we want our global load balancer configuration in front of the system to be updated.
+    Since we are relying heavily on automated recovery from failures, we want this
+    behavior to be automatic as well.
+  prefs: []
+  type: TYPE_NORMAL
+- en: With Ansible, there is a vibrant community that uses automation to simplify
+    the lives of systems administrators managing Linux, containers, clouds, networking
+    devices, security, and so forth. We aren’t going to go into a lot of depth to
+    teach you about Ansible. However, we will introduce some basic concepts so that
+    you can see how it works and evaluate whether it is appropriate for your needs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note that even if you do not have to automate anything outside of the cluster,
+    all of the details covered around availability, multicluster provisioning, configuration,
+    application delivery, and so on still apply.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'For our purposes, you should only need a grasp of the following concepts in
+    Ansible:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Playbook
+  prefs: []
+  type: TYPE_NORMAL
+- en: An Ansible playbook is “a blueprint of automation tasks—which are complex IT
+    actions executed with limited or no human involvement. Ansible playbooks are executed
+    on a set, group, or classification of hosts, which together make up an Ansible
+    inventory.”^([1](ch08.html#ch01fn38))
+  prefs: []
+  type: TYPE_NORMAL
+- en: Project
+  prefs: []
+  type: TYPE_NORMAL
+- en: An Ansible project groups together playbooks along with supporting resources
+    to run those playbooks. Conveniently, projects can be backed by a source control
+    repository that is used to manage the Ansible playbooks and supporting resources.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Ansible Tower
+  prefs: []
+  type: TYPE_NORMAL
+- en: Ansible Tower is a supported version of the open source project Ansible AWX.
+    Ansible Tower provides the capabilities to organize a set of Ansible projects
+    and an automation engine that keeps track of credentials, scheduled jobs, job
+    templates to be invoked as needed, available inventory of systems to run playbooks
+    against, and so on. In essence, think of Tower as a way to organize and track
+    everything you need to automate systems management.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Job template
+  prefs: []
+  type: TYPE_NORMAL
+- en: An Ansible job template defines an available playbook from an Ansible project
+    within Ansible Tower. Job templates can specify exactly which parameters to externalize
+    and which stored credentials to use, and it can associate a list of all invocations
+    of the job template for auditing or diagnostic purposes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Job
+  prefs: []
+  type: TYPE_NORMAL
+- en: An Ansible job is a running instance of a job template.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As discussed in the previous section, we are going to use Ansible to update
+    the F5 DNS Load Balancer Cloud Service for our application. We are going to use
+    a slightly modified version of [an open source tool](https://oreil.ly/p2AyH) from
+    F5 that incorporates all of the API calls required to update the service implemented
+    in Ansible. We will load the f5-bd-gslb-tool playbooks into an Ansible project
+    and define a job template that invokes the required playbook, accepting parameters
+    for the clusters that currently host the application. For an example of what the
+    Ansible project within Ansible Tower looks like, see [Figure 8-3](#an_ansible_project_within_ansible_towers).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![](assets/hcok_0803.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 8-3\. An Ansible project within Ansible Tower; the contents of the project
+    are managed under source control (via [GitHub](https://github.com))
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: We will also use Ansible to integrate a simple change management process backed
+    by ServiceNow. Our example is derived from published blogs on the topic.^([2](ch08.html#ch01fn39))
+    Many IT organizations and operators still make extensive use of ticket-driven
+    change management processes. In our example application, an Ansible job will run
+    before adjusting the placement of the app to create a change request in ServiceNow.
+    Our example will make only superficial use of ServiceNow, but you will see one
+    way that you may still use your existing process for record-keeping and auditing
+    purposes even when the system undergoes a dynamic, automatic change.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'We have covered several concepts that support application deployment, including
+    the Open Cluster Management Subscription (API Group: apps.open-cluster-management.io/v1)
+    and `PlacementRule` (API Group: apps.open-cluster-management.io/v1). We now introduce
+    a new API kind that will be part of our example application: `AnsibleJob` (API
+    Group: tower.ansible.com/v1alpha1). As with other CRDs introduced throughout the
+    book, `AnsibleJob` is reconciled using an operator known as the Ansible Resource
+    Operator. Let’s deploy the Ansible Resource Operator alongside Ansible Tower so
+    that we can link the execution of Ansible jobs whenever the placement of our application
+    instances is updated by the system. The `AnsibleJob` to create a change request
+    ticket is shown in [Example 8-1](#the_ansiblejob_api_kind_allows_us_to_inv).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 8-1\. The `AnsibleJob` API kind allows us to invoke an Ansible job template
+    configured in Ansible Tower; input parameters are sent via the `extra_vars` parameter
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: In terms of order, the `AnsibleJob` to create a ServiceNow ticket will run before
+    the new placement decisions are applied (a prehook), and the `AnsibleJob` to update
+    the F5 load balancer will run last (a posthook).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Deploying the Example Application
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: We’re laying down a lot of capabilities to get to a simple web frontend application—and
+    the goal is to provide you with a realistic example of some of the concerns that
+    you will likely encounter as you adopt Kubernetes and OpenShift as part of your
+    enterprise standards.
+  prefs: []
+  type: TYPE_NORMAL
+- en: We’ve covered how the application will be replicated across multiple clusters
+    with a global load balancer in front of those multiple application instances and
+    how whenever the placement decisions change, we will have a simple ticket-based
+    record within ServiceNow of the change.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'We reviewed the PAC-MAN application extensively in [Chapter 5](ch05.html#continuous_delivery_across_clusters),
+    but here is a quick catchup:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: PAC-MAN is made up of two deployments (the web frontend application and a backing
+    MongoDB datastore).
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'PAC-MAN exposes two public routes: one for the local cluster and one for the
+    global route provided by our F5 DNS Load Balancer.'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The PAC-MAN subscription references a Git repository where our Kubernetes manifests
+    are managed. If a change is introduced to those Kubernetes manifests, then the
+    update will automatically be rolled out to all active clusters.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The `PlacementRule` defines a list of conditions that a cluster must match to
+    be selected to host the application.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: For our purposes (and because we’re already dealing with several moving parts),
+    we are not doing anything to cluster the set of MongoDB replicas that will back
+    the application across multiple clusters. We could perform additional actions
+    (via Ansible or operators) to cluster the set of MongoDB replicas and make distributed
+    writes persistent whenever a cluster is lost. Alternatively, we could back the
+    state of the PAC-MAN application with a cloud-based MongoDB service. You will
+    likely have your own strong opinions about how persistent the backing datastores
+    of your applications need to be and what the relevant MTBF and MTTR availability
+    metrics should be for the application itself.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Now that we’ve covered the details of how all of the parts fit together, let’s
+    dive in and get our hands on a running example!
+  prefs: []
+  type: TYPE_NORMAL
+- en: To simplify this process, fork the example repository. You will need to make
+    a few modifications to be able to deliver the application out of your repository
+    fork.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Fork the [repository](https://oreil.ly/8nMgb) into your own organization and
+    then clone the repository to your laptop:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: All of the paths referenced in the following sections refer to files within
+    this repository.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You will need to update the values in the following files according to your
+    specific DNS settings for your OpenShift clusters and Route53:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*hack/install-config.yaml*'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '*deploy/posthook/f5-update-dns-load-balancer.yaml*'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '*deploy/pacman-f5-route.yaml*'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '*hack/tower-setup/config/inventory*'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[Table 8-1](#dns_settings_update) shows the required updates.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 8-1\. Required file updates
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Key | Value |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| SPECIFY_YOUR_CLUSTER_NAME | The name of your hub cluster as defined in the
+    *install-config.yaml*. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| SPECIFY_YOUR_BASE_DOMAIN | The value of the base DNS name of your hub cluster
+    as defined in your *install-config.yaml*. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| SPECIFY_YOUR_CLUSTER_ADDRESS | The concatenation of *clusterName* and *clusterBaseDomain*
+    separated by a period (e.g., *clusterName.clusterBaseDomain*). |'
+  prefs: []
+  type: TYPE_TB
+- en: '| SPECIFY_YOUR_OWN_PASSWORD | Define your own secure password. When in doubt,
+    the output of `**uuid**` can be a useful password. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| SPECIFY_YOUR_EMAIL_ADDRESS | Used to assign a tag for any cloud resources
+    for tracking purposes. You can also just delete the tag if you do not wish to
+    specify your email address. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| SPECIFY_YOUR_PULL_SECRET | An image pull secret that you can download from
+    [Red Hat](https://cloud.redhat.com) after logging into the service. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| SPECIFY_YOUR_SSH_RSA_PUBLIC_KEY | An SSH public key that will enable you
+    to connect to hosts that are provisioned as part of your OpenShift cluster. |'
+  prefs: []
+  type: TYPE_TB
+- en: Configure Your Hub Cluster
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Recall that the hub cluster hosts components for Open Cluster Management that
+    allow managed clusters to be managed from a centralized control plane. You can
+    either provision clusters from the hub or import existing OpenShift clusters from
+    a managed provider like Red Hat OpenShift on IBM Cloud or Azure Red Hat OpenShift.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the following sections, you will create a cluster to act as the hub, install
+    the Open Cluster Management hub, and provision two clusters to host the example
+    application.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Provision an OpenShift Cluster to Host the Open Cluster Management Hub
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Provision an OpenShift 4.5 or later cluster following the default instructions.
+    The cluster should have at least three worker nodes with a total of 18 CPU and
+    80G of memory or m5.xlarge (times three workers) on AWS EC2.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The following example *install-config.yaml* was used to prepare the hub cluster
+    for this example, but so long as your starting cluster has the required capacity,
+    you do not need to provision a cluster exactly like the *install-config.yaml*
+    in [Example 8-2](#an_example_install_configdotyaml_t).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 8-2\. An example *install-config.yaml* to provision a cluster to use
+    as a hub
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: Configure the Open Cluster Management Hub
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: For our example, we will deploy Open Cluster Management using Red Hat’s supported
+    product offering, RHACM. Instructions for configuring RHACM were given in [Chapter 5](ch05.html#continuous_delivery_across_clusters).
+    You can also deploy RHACM directly from the Red Hat Operator Catalog or by using
+    the [documented instructions](https://oreil.ly/a1zlD).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Provision Two or More Clusters to Host the Application
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Once you have configured the hub cluster, you will be able to register your
+    cloud credentials and provision one or more clusters that will be managed automatically
+    by the hub. These clusters can be provisioned across the same cloud provider in
+    different regions or against multiple cloud providers. The example PAC-MAN app
+    is very lightweight, so you will not need a lot of capacity to run the sample
+    application.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Deploy Ansible Tower and the Ansible Resource Operator
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: In addition to a containerized application, we will configure a DNS Load Balancer
+    provided by F5 and use a ServiceNow developer instance to demonstrate how you
+    might integrate a change management process into the deployment life cycle of
+    your containerized apps. Detailed instructions on setting up the Ansible Tower
+    container-based installation method are available in the [Ansible documentation](https://oreil.ly/Uzm3y).
+    The following steps capture the specific actions taken to prepare the demo captured
+    in this repository.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To simplify the configuration of this example, we will leverage some pre-defined
+    policies that help prepare the hub cluster to deploy Ansible.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Clone the sample repository and apply the policies under *hack/manifests/policies*:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: The result of these policies will set up the Ansible Resource Operator, prepare
+    the Ansible Tower project named `tower`, and create a `PersistentVolumeClaim`
+    using the default storage class to support Ansible Tower’s database (PostgreSQL).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'After a few moments, verify that the resources were correctly applied on your
+    hub cluster. You can see that the `policy-ansible-tower-prep` and `policy-auth-provider`
+    are compliant from your RHACM web console (under “Govern Risk”). You can also
+    verify the resources that were created as follows:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: Download the Ansible Tower installer release from the [available releases](https://oreil.ly/utowL).
+    Extract the archive into a working directory. Configure the inventory for your
+    OpenShift cluster. The inventory file should be placed directly under the folder
+    for the archive (e.g., *ansible-tower-openshift-setup-3.7.2/inventory*).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The inventory in [Example 8-3](#an_example_inventory_file_that_provides) can
+    be placed under the root directory of the extracted release archive. Be sure to
+    override the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`SPECIFY_YOUR_OWN_PASSWORD`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Choose a strong password of at least 16 characters.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`SPECIFY_YOUR_CLUSTER_ADDRESS`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Provide the correct hostname of the API server for your OpenShift cluster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`SPECIFY_YOUR_OPENSHIFT_CREDENTIALS`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The password for your OpenShift cluster admin user. Be sure to also override
+    kubeadmin if you have defined an alternate administrative user.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 8-3\. An example inventory file that provides input values for the Ansible
+    Tower installer
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: Update the default task image that is used to run the defined jobs. Because
+    the jobs use additional modules, we need to ensure that various Python module
+    dependencies are available.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In *group_vars/all*, update the following key:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You can build this image and consume it from your own registry by building
+    the *Dockerfile.taskimage* under *hack/tower-setup/container_task_image*. Optionally,
+    you could build the task image and publish to your own registry. If you’re using
+    the existing image as previously defined, you will not need to build your own
+    image. Use the correct Ansible version based on the release you downloaded:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Once you have made the relevant updates to your inventory file, you can run
+    the Ansible Tower installer. Retrieve an authentication token from the OpenShift
+    web console from the “Copy login command” action under your user name:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Launch the Tower web console:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: Log in with the user and password that you specified in the inventory file.
+    You must then choose your license for Tower. If you have a Red Hat user identity,
+    you can log in and choose the 60-day evaluation license.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Optionally, you can customize the *hack/manifests/ansible-tower-console-link.yaml*
+    for your own cluster. Then apply the file (note: you must update the URL within
+    the file before this will work in your cluster):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: After applying the `ConsoleLink`, refresh your OpenShift web console and view
+    the shortcut to your Ansible Tower under the Applications drop-down menu in the
+    header.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Configure Projects for ServiceNow and F5 DNS Load Balancer
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'The example application uses the F5 DNS Load Balancer Cloud Service and ServiceNow
+    to demonstrate Ansible automation. This assumes that you have completed the following
+    steps:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Create a developer instance of ServiceNow. If you need a developer instance
+    of ServiceNow, follow the directions at [ServiceNow Developers](https://developer.servicenow.com).
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Create an account with the F5 DNS Load Balancer Cloud Service. If you need to
+    create an account with [F5 DNS Load Balancer Cloud Service](https://oreil.ly/tmmSY),
+    you can do this directly or through the [AWS Marketplace](https://oreil.ly/HF5mw).
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Delegate your global domain to the F5 DNS nameservers. Create a nameserver-delegating
+    DNS record with the global domain that you will use with F5\. You can do this
+    via Route 53 or your DNS provider. The [F5 DNS Load Balancer Cloud Service FAQ](https://oreil.ly/ObL27)
+    answers questions related to this prerequisite.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Once you have the credentials for these services, you can configure the Ansible
+    Tower instance that you deployed with the two relevant Ansible projects providing
+    the job templates that will be executed as part of the prehook and posthooks that
+    run when the application is placed or removed on a cluster. For convenience, all
+    of the configuration for Ansible Tower is completely automated (using Ansible
+    playbooks that talk to Ansible Tower to create the projects/job templates/jobs/credentials
+    that are needed for the example).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Create a file named *tower_cli.cfg* under *hack/tower-setup* with the following
+    contents:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'If you’re unsure of the host address for Tower, you can use `oc` to find the
+    correct value:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Create a file named *credentials.yml* under *hack/tower-setup/group_vars* with
+    the following contents:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You may need to install required Python libraries:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE14]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Run the playbook that will talk to Ansible Tower and configure our two projects
+    (one for F5 and one for ServiceNow) and the relevant job templates:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE15]'
+  prefs: []
+  type: TYPE_PRE
+- en: Configure the toweraccess Secret and Create the Ansible Tower Token
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'From Ansible Tower, create an authorization token. The authorization token
+    will be used in a secret that the application will reference to invoke the Ansible
+    Tower Jobs. Follow these steps:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Log in to the Ansible Tower instance:'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: '[PRE16]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: Click on the “admin” user in the header.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Click on Tokens.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Click on the +.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Set the scope to Write.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Click Save and be sure to copy and save the value of the token.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'Create a file *named hack/manifests/toweraccess-secret.yaml* with the following
+    contents:'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: '[PRE17]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: Deploy the pacman-app Example to Your Cluster
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Now we will deploy the manifests that govern our application placement to the
+    hub. By creating the application, subscription, and `PlacementRule`, you will
+    enable the hub to deploy the application dynamically to one or more of the clusters
+    that you created earlier.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'First, create the project for the application and apply the secret:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE18]'
+  prefs: []
+  type: TYPE_PRE
+- en: You can either create the application manifest from the RHACM web console (Managed
+    Applications > Create application) or apply the prebuilt resources from the example
+    Git repository. An example of the final result is provided in [Example 8-4](#the_pac_man_application_manifest_and_sup).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 8-4\. The PAC-MAN application manifest and supporting resources to allow
+    the hub cluster to deploy the application to any managed cluster in the fleet
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE19]'
+  prefs: []
+  type: TYPE_PRE
+- en: The `channel` references the source of Kubernetes manifests in GitHub. Any changes
+    that are made to the supporting GitHub repository will trigger an update across
+    the fleet. The `application` provides a way to associate a set of subscriptions
+    to a logical unit of deployment and management. The `subscription` selects a specific
+    branch and directory from within the GitHub repository. You may have a single
+    GitHub repository that feeds multiple subscriptions for one application or multiple
+    applications. Each subscription can be placed independently, so you may have different
+    parts of an application deployed to different clusters. The `PlacementRule` defines
+    a set of labels and a match expression that must be met for the subscription to
+    be deployed against a managed cluster within the fleet.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Be aware of how you label your clusters and the supporting `PlacementRule`.
+    You want to ensure that the `PlacementRule` indicates the selected clusters in
+    their status conditions:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE20]'
+  prefs: []
+  type: TYPE_PRE
+- en: Now that you have deployed all of the supporting pieces, you can experiment
+    by adding or removing matching clusters or changing the desired labels specified
+    in the `PlacementRule`. The application instances will be added or removed to
+    supporting clusters while keeping the F5 DNS Load Balancer Cloud Service up to
+    date automatically.
+  prefs: []
+  type: TYPE_NORMAL
+- en: From the topology view, your application deployment should resemble [Figure 8-4](#pac-man_app_config_hooks).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![](assets/hcok_0804.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 8-4\. The PAC-MAN application configured with pre-hooks and post-hooks
+    with Ansible Tower Jobs
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Summary
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: In this chapter, we focused on providing a practical example that demonstrates
+    how to deliver an application across multiple clusters, how to manage any parts
+    of your system that are still not natively programmable from Kubernetes operators,
+    and how to integrate a set of clusters behind a global load balancer service.
+    Many specific examples from earlier in the book were used to pull all of this
+    together, including the PAC-MAN application that used a Tekton pipeline to build
+    its supporting images in [Chapter 5](ch05.html#continuous_delivery_across_clusters).
+    We used policies to configure an operator on our cluster (the Ansible Resource
+    Operator on the hub) and used the Open Cluster Management hub to provision clusters
+    that were used to support the running application. We also introduced one way
+    that you can adapt your existing change management process using Ansible to create
+    change request tickets whenever the system dynamically reacts to a change.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Hopefully, by now you have a firm grasp of what is possible with Kubernetes
+    and OpenShift and how you can use some of these capabilities to streamline your
+    adoption of these technologies for your organization.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([1](ch08.html#ch01fn38-marker)) From “What Is an Ansible Playbook?”, Red Hat,
+    [*https://oreil.ly/At7XY*](https://oreil.ly/At7XY).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '^([2](ch08.html#ch01fn39-marker)) Colin McCarthy, “Ansible + ServiceNow Part
+    1: Opening and Closing Tickets,” Red Hat Ansible Blog (June 6, 2019), [*https://oreil.ly/NI9ZX*](https://oreil.ly/NI9ZX).'
+  prefs: []
+  type: TYPE_NORMAL

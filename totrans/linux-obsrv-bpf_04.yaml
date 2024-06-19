@@ -1,0 +1,1177 @@
+- en: Chapter 3\. BPF Maps
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Message passing to invoke behavior in a program is a widely used technique in
+    software engineering. A program can modify another program’s behavior by sending
+    messages; this also allows the exchange of information between those programs.
+    One of the most fascinating aspects about BPF, is that the code running on the
+    kernel and the program that loaded said code can communicate with each other at
+    runtime using message passing.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In this chapter we cover how BPF programs and user-space programs can talk to
+    one another. We describe the different channels of communication between the kernel
+    and user-space, and how they store information. We also show you use cases for
+    those channels and how to make the data in those channels persistent between programs
+    initialization.
+  prefs: []
+  type: TYPE_NORMAL
+- en: BPF maps are key/value stores that reside in the kernel. They can be accessed
+    by any BPF program that knows about them. Programs that run in user-space can
+    also access these maps by using file descriptors. You can store any kind of data
+    in a map, as long as you specify the data size correctly beforehand. The kernel
+    treats keys and values as binary blobs, and it doesn’t care about what you keep
+    in a map.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The BPF verifier includes several safeguards to ensure that the way you create
+    and access maps is safe. We talk about these guarantees when we explain how to
+    access data in these maps.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Creating BPF Maps
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'The most direct way to create a BPF map is by using the `bpf` syscall. When
+    the first argument in the call is `BPF_MAP_CREATE`, you’re telling the kernel
+    that you want to create a new map. This call will return the file descriptor identifier
+    associated with the map you just created. The second argument in the syscall is
+    the configuration for this map:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: The third argument in the syscall is the size of this configuration attribute.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'For example, you can create a hash-table map to store unsigned integers as
+    keys and values as follows:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: If the call fails, the kernel returns a value of `-1`. There might be three
+    reasons why it fails. If one of the attributes is invalid, the kernel sets the
+    `errno` variable to `EINVAL`. If the user executing the operation doesn’t have
+    enough privileges, the kernel sets the `errno` variable to `EPERM`. Finally, if
+    there is not enough memory to store the map, the kernel sets the `errno` variable
+    to `ENOMEM`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the following sections, we guide you through different examples to show you
+    how to perform more advanced operations with BPF maps; let’s begin with a more
+    direct way to create any type of map.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ELF Conventions to Create BPF Maps
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The kernel includes several conventions and helpers to generate and work with
+    BPF maps. You’ll probably find these conventions more frequently presented than
+    direct syscall executions because they are more readable and easier to follow.
+    Keep in mind that these conventions still use the `bpf` syscall to create the
+    maps, even when run directly in the kernel, and you’ll find using the syscall
+    directly more useful if you don’t know which kind of maps you’re going to need
+    beforehand.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The helper function `bpf_map_create` wraps the code you just saw to make it
+    easier to initialize maps on demand. We can use it to create the previous map
+    with only one line of code:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'If you know which kind of map you’re going to need in your program, you can
+    also predefine it. This is helpful to get more visibility in the maps your program
+    is using beforehand:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: When you define a map in this way, you’re using what’s called a *section attribute*,
+    in this case `SEC("maps")`. This macro tells the kernel that this structure is
+    a BPF map and it should be created accordingly.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You might have noticed that we don’t have the file descriptor identifier associated
+    with the map in this new example. In this case, the kernel uses a global variable
+    called `map_data` to store information about the maps in your program. This variable
+    is an array of structures, and it’s ordered by how you specified each map in your
+    code. For example, if the previous map was the first one specified in your code,
+    you’d get the file descriptor identifier from the first element in the array:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: You can also access the map’s name and its definition from this structure; this
+    information is sometimes useful for debugging and tracing purposes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: After you have initialized the map, you can begin sending messages between the
+    kernel and user-space with them. Let’s see now how to work with the data that
+    these maps store.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Working with BFP Maps
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Communication between the kernel and user-space is going to be a fundamental
+    piece in every BPF program you write. The APIs to access maps differ when you’re
+    writing the code for the kernel than when you’re writing the code for the user-space
+    program. This section introduces the semantics and specific details of each implementation.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Updating Elements in a BPF Map
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: After creating any map, you’ll probably want to populate it with information.
+    The kernel helpers provide the function `bpf_map_update_elem` for this purpose.
+    This function’s signature is different if you load it from *bpf/bpf_helpers.h*,
+    within the program running on the kernel, than if you load it from *tools/lib/bpf/bpf.h*,
+    within the program running in user-space. This is because you can access maps
+    directly when you’re working in the kernel, but you reference them with file descriptors
+    when you’re working in user-space. Its behavior is also slightly different; the
+    code running on the kernel can access the map in memory directly, and it will
+    be able to update elements atomically in place. However, the code running in user-space
+    has to send the message to the kernel, which copies the value supplied before
+    updating the map; this makes the update operation not atomic. This function returns
+    0 when the operation succeeds, and it returns a negative number when it fails.
+    In case of failure, the global variable `errno` is populated with the failure
+    cause. We list failure cases later in this chapter with more context.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The `bpf_map_update_elem` function within the kernel takes four arguments.
+    The first one is the pointer to the map we’ve already defined. The second one
+    is a pointer to the key we want to update. Because the kernel doesn’t know the
+    type of key we’re updating, this method is defined as an opaque pointer to `void`,
+    which means we can pass any data. The third argument is the value we want to insert.
+    This argument uses the same semantics as the key argument. We show some advanced
+    examples of how to take advantage of opaque pointers throughout this book. You
+    can use the fourth argument in this function to change the way the map is updated.
+    This argument can take three values:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you pass `0`, you’re telling the kernel that you want to update the element
+    if it exists or that it should create the element in the map if it doesn’t exist.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: If you pass `1`, you’re telling the kernel to create the element only when it
+    doesn’t exist.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: If you pass `2`, the kernel will update the element only when it exists.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: These values are defined as constants that you can also use, instead of having
+    to remember the integer semantics. The values are `BPF_ANY` for `0`, `BPF_NOEXIST`
+    for `1`, and `BPF_EXIST` for `2`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s use the map we defined in the previous section to write some examples.
+    In our first example, we add a new value to the map. Because the map is empty,
+    we can assume that any update behavior is good for us:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: In this example we’re using `strerror` to describe the error set in the `errno`
+    variable. You can learn more about this function on the manual pages using `man
+    strerror`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Now let’s see which result we get when we try to create an element with the
+    same key:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Because we have already created an element with key `1` in our map, the result
+    from calling `bpf_map_update_elem` will be `-1`, and the `errno` value will be
+    `EEXIST`. This program will print the following on the screen:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`Failed to update map with new value: -1 (File exists)`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Similarly, let’s change this program to try to update an element that doesn’t
+    exist yet:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'With the flag `BPF_EXIST`, the result of this operation is going to be `-1`
+    again. The kernel will set the `errno` variable to `ENOENT`, and the program will
+    print the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`Failed to update map with new value: -1 (No such file or directory)`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'These examples show how you can update maps from within the kernel program.
+    You can also update maps from within user-space programs. The helpers to do this
+    are similar to the ones we just saw; the only difference is that they use the
+    file descriptor to access the map, rather than using the pointer to the map directly.
+    As you remember, user-space programs always access maps using file descriptors.
+    So in our examples, we’d replace the argument `my_map` with the global file descriptor
+    identifier `map_data[0].fd`. Here is what the original code looks like in this
+    case:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: Although the type of information that you can store in a map is directly related
+    to the type of map that you’re working with, the method to populate the information
+    will remain the same, as you saw in this previous example. We discuss the types
+    of keys and values accepted for each type of map later; let’s first see how to
+    manipulate the store data.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Reading Elements from a BPF Map
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Now that we’ve populated our map with new elements, we can begin reading them
+    from other points in our code. The reading API will look familiar after learning
+    about `bpf_map_update_element`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: BPF also provides two different helpers to read from a map depending on where
+    your code is running. Both helpers are called `bpf_map_lookup_elem`. Like the
+    update helpers, they differ in their first argument; the kernel method takes a
+    reference to the map, whereas the user-space helper takes the map’s file descriptor
+    identifier as its first argument. Both methods return an integer to represent
+    whether the operation failed or succeeded, just like the update helpers. The third
+    argument in these helpers is a pointer to the variable in your code that’s going
+    to store the value read from the map. We present two examples based on the code
+    you saw in the previous section.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The first example reads the value inserted in the map when the BPF program
+    is running on the kernel:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: If the key we were trying to read, `bpf_map_lookup_elem`, returned a negative
+    number, it would set the error in the `errno` variable. For example, if we had
+    not inserted the value before trying to read it, the kernel would have returned
+    the “not found” error `ENOENT`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This second example is similar to the one you just saw, but this time we’re
+    reading the map from the program running in user-space:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: As you can see, we’ve replaced the first argument in `bpf_map_lookup_elem` with
+    the map’s file descriptor identifier. The helper behavior is the same as the previous
+    example.
+  prefs: []
+  type: TYPE_NORMAL
+- en: That’s all we need to be able to access information within a BPF map. We examine
+    how this has been streamlined by different toolkits to make accessing data even
+    simpler in later chapters. Let’s talk about deleting data from maps next.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Removing an Element from a BPF Map
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The third operation we can execute on maps is to remove elements. Like with
+    writing and reading elements, BPF gives us two different helpers to remove elements,
+    both called `bpf_map_delete_element`. Like in the previous examples, these helpers
+    use the direct reference to the map when you use them in the program running on
+    the kernel, and they use the map’s file descriptor identifier when you use them
+    in the program running on user-space.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The first example deletes the value inserted in the map when the BPF program
+    is running on the kernel:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: If the element that you’re trying to delete doesn’t exist, the kernel returns
+    a negative number. In that case, it also populates the `errno` variable with the
+    “not found” error `ENOENT`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This second example deletes the value when the BPF program is running on user-space:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: You can see that we’ve changed the first argument again to use the file descriptor
+    identifier. Its behavior is going to be consistent with the kernel’s helper.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This concludes what could be considered the create/read/update/delete (CRUD)
+    operations of the BPF map. The kernel exposes some additional functions to help
+    you with other common operations; we’ll talk about some of them in the next two
+    sections.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Iterating Over Elements in a BPF Map
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The final operation we look at in this section can help you to find arbitrary
+    elements in a BPF program. There will be occasions when you don’t know exactly
+    the key for the element you’re looking for or you just want to see what’s inside
+    a map. BPF provides an instruction for this called `bpf_map_get_next_key`. Unlike
+    the helpers you’ve seen up to now, this instruction is available only for programs
+    running on user-space.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This helper gives you a deterministic way to iterate over the elements on a
+    map, but its behavior is less intuitive than iterators in most programming languages.
+    It takes three arguments. The first one is the map’s file descriptor identifier,
+    like the other user-space helpers you’ve already seen. The next two arguments
+    are where it becomes tricky. According to the official documentation, the second
+    argument, `key`, is the identifier you’re looking for, and the third one, `next_key`,
+    is the next key in the map. We prefer to call the first argument `lookup_key`—it’s
+    going to become apparent why in a second. When you call this helper, BPF tries
+    to find the element in this map with the key that you’re passing as the lookup
+    key; then, it sets the `next_key` argument with the adjacent key in the map. So
+    if you want to know which key comes after key `1`, you need to set `1` as your
+    lookup key, and if the map has an adjacent key to this one, BPF will set it as
+    the value for the `next_key` argument.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Before seeing how `bpf_map_get_next_key` works in an example, let’s add a few
+    more elements to our map:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'If you want to print all of the values in the map, you can use `bpf_map_get_next_key`
+    with a lookup key that doesn’t exist in the map. This forces BPF to start from
+    the beginning of the map:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE14]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This code prints something like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE15]'
+  prefs: []
+  type: TYPE_PRE
+- en: You can see that we’re assigning the next key to `lookup_key` at the end of
+    the loop; that way, we continue iterating over the map until we reach the end.
+    When `bpf_map_get_next_key` arrives at the end of the map, the value returned
+    is a negative number, and the `errno` variable is set to `ENOENT`. This will abort
+    the loop execution.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As you can imagine, `bpf_map_get_next_key` can look up keys starting at any
+    point in the map; you don’t need to start at the beginning of the map if you want
+    only the next key for another specific key.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The tricks that `bpf_map_get_next_key` can play on you don’t end here; there
+    is another behavior that you need to be aware of. Many programming languages copy
+    the values in a map before iterating over its elements. This prevents unknown
+    behaviors if some other code in your program decides to mutate the map. This is
+    especially dangerous if that code deletes elements from the map. BPF doesn’t copy
+    the values in a map before looping over them with `bpf_map_get_next_key`. If another
+    part of your program deletes an element from the map while you’re looping over
+    the values, `bpf_map_get_next_key` will start over when it tries to find the next
+    value for the element’s key that was removed. Let’s see this with an example:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE16]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This program prints the next output:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE17]'
+  prefs: []
+  type: TYPE_PRE
+- en: This behavior is not very intuitive, so keep it in mind when you use `bpf_map_get_next_key`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Because most of the map types that we cover in this chapter behave like arrays,
+    iterating over them is going to be a key operation when you want to access the
+    information that they store. However, there are additional functions to access
+    data, as you’ll see next.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Looking Up and Deleting Elements
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Another interesting function that the kernel exposes to work with maps is `bpf_map_lookup_and_delete_elem`.
+    This function searches for a given key in the map and deletes the element from
+    it. At the same time, it writes the value of the element in a variable for your
+    program to use. This function comes in handy when you use queue and stack maps,
+    which we describe in the next section. However, it’s not restricted for use only
+    with those types of maps. Let’s see an example of how to use it with the map we’ve
+    been using in our previous examples:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE18]'
+  prefs: []
+  type: TYPE_PRE
+- en: In this example, we try to fetch the same element from the map twice. In the
+    first iteration, this code will print the value of the element in the map. However,
+    because we’re using `bpf_map_lookup_and_delete_element`, this first iteration
+    will also delete the element from the map. The second time the loop tries to fetch
+    the element, this code will fail, and it will populate the `errno` variable with
+    the “not found” error `ENOENT`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Until now, we haven’t paid much attention to what happens when concurrent operations
+    try to access the same piece of information within a BPF map. Let’s talk about
+    this next.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Concurrent Access to Map Elements
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: One of the challenges of working with BPF maps is that many programs can access
+    the same maps concurrently. This can introduce race conditions in our BPF programs,
+    and make accessing resources in maps unpredictable. To prevent race conditions,
+    BPF introduced the concept of BPF spin locks, which allow you to lock access to
+    a map’s element while you’re operating on it. Spin locks work only on array, hash,
+    and cgroup storage maps.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'There are two BPF helper functions to work with spin locks: `bpf_spin_lock`
+    locks an element, and `bpf_spin_unlock` unlocks that element. These helpers work
+    with a structure that acts as a semaphone to access an element that includes this
+    semaphore. When the semaphore is locked, other programs cannot access the element’s
+    value, and they wait until the semaphore is unlocked. At the same time, BPF spin
+    locks introduce a new flag that user-space programs can use to change the state
+    of that lock; that flag is called `BPF_F_LOCK`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The first thing we need to do to work with spin locks is create the element
+    that we want to lock access to and then add our semaphore:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE19]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'We’ll store this structure in our BPF map, and we’ll use the semaphore within
+    the element to prevent undesired access to it. Now, we can declare the map that’s
+    going to hold these elements. This map must be annotated with BPF Type Format
+    (BTF) so the verifier knows how to intepret the structure. The type format gives
+    the kernel and other tools a much richer understanding of BPF data structures
+    by adding debug information to binary objects. Because this code will run within
+    the kernel, we can use the kernel macros that `libbpf` provides to annotate this
+    concurrent map:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE20]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Within a BPF program we can use the two locking helpers to protect from race
+    conditions on those elements. Even though the semaphore is locked, our program
+    is guaranteed to be able to modify the element’s value safely:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE21]'
+  prefs: []
+  type: TYPE_PRE
+- en: This example initializes our concurrent map with a new entry that can lock access
+    to its value. Then, it fetches that value from the map and locks its semaphore
+    so that it can hold the count value, preventing data races. When it’s done using
+    the value, it releases the lock so other maps can access the element safely.
+  prefs: []
+  type: TYPE_NORMAL
+- en: From user-space, we can hold the reference to an element in our concurrent map
+    by using the flag `BPF_F_LOCK`. You can use this flag with the `bpf_map_update_elem`
+    and `bpf_map_lookup_elem_flags` helper functions. This flag allows you to update
+    elements in place without having to worry about data races.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '`BPF_F_LOCK` has a slightly different behavior when updating hash map and updating
+    array and cgroup storage maps. With the latter two, the updates happen in place,
+    and the elements that you’re updating must exist in the map before executing the
+    update. In the case of hash maps, if the element doesn’t exist already, the program
+    locks the bucket in the map for the element and inserts a new element.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Spin locks are not always necessary. You don’t need them if you’re only aggregating
+    values in a map. However, they are useful if you want to ensure that concurrent
+    programs don’t change elements in a map when you’re performing several operations
+    on them, preserving atomicity.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In this section you’ve seen the possible operations you can do with BPF maps;
+    however, we’ve worked with only one type of map so far. BPF includes many more
+    map types that you can use in different situations. We explain all types of maps
+    that BPF defines and show you specific examples on how to use them for different
+    situations.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Types of BPF Maps
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The [Linux documentation](https://oreil.ly/XfoqK) defines maps as generic data
+    structures where you can store different types of data. Over the years, the kernel
+    developers have added many specialized data structures that are more efficient
+    in specific use cases. This section explores each type of map and how you can
+    use them.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Hash-Table Maps
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Hash-table maps were the first generic map added to BPF. They are defined with
+    the type `BPF_MAP_TYPE_HASH`. Their implementation and usage are similar to other
+    hash tables you might be familiar with. You can use keys and values of any size;
+    the kernel takes care of allocating and freeing them for you as needed. When you
+    use `bpf_map_update_elem` on a hash-table map, the kernel replaces the elements
+    atomically.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Hash-table maps are optimized to be very fast at lookup; they are useful for
+    keeping structured data that’s read frequently. Let’s see an example program that
+    uses them to keep track of network IPs and their rate limits:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE22]'
+  prefs: []
+  type: TYPE_PRE
+- en: In this code we’ve declared a structured key, and we’re going to use it to keep
+    information about IP addresses. We define the map that our program will use to
+    keep track of rate limits. You can see that we’re using the IP addresses as keys
+    in this map. The values are going to be the number of times that our BPF program
+    receives a network packet from a specific IP address.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s write a small code snippet that updates those counters in the kernel:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE23]'
+  prefs: []
+  type: TYPE_PRE
+- en: This function takes an IP address extracted from a network packet and performs
+    the map lookup with the compound key that we’re declaring. In this case, we’re
+    assuming that we’ve previously initialized the counter with a zero value; otherwise,
+    the `bpf_map_lookup_elem` call would return a negative number.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Array Maps
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Array maps were the second type of BPF map added to the kernel. They are defined
+    with the type `BPF_MAP_TYPE_ARRAY`. When you initialize an array map, all of its
+    elements are preallocated in memory and set to their zero value. Because these
+    maps are backed by a slice of elements, the keys are indexes in the array, and
+    their size must be exactly four bytes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: A disadvantage of using array maps is that the elements in the map cannot be
+    removed and you cannot make the array smaller than it is. If you try to use `map_delete_elem`
+    on an array map, the call will fail, and you’ll get an error `EINVAL` as a result.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Array maps are commonly used to store information that can change in value,
+    but it’s usually fixed in behavior. People use them to store global variables
+    with a predefined assignment rule. Because you cannot remove elements, you can
+    assume that the element in a specific position always represents the same element.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Something else to keep in mind is that `map_update_elem` is not atomic, like
+    you saw with hash-table maps. The same program can read different values from
+    the same position at the same time if there is an update in process. If you’re
+    storing counters in an array map, you can use the kernel’s built-in function `__sync_fetch_and_add`
+    to perform atomic operations on the map’s values.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Program Array Maps
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Program array maps were the first specialized map added to the kernel. They
+    are defined with the type `BPF_MAP_TYPE_PROG_ARRAY`. You can use this type of
+    map to store references to BPF programs using their file descriptor identifiers.
+    In conjunction with the helper `bpf_tail_call`, this map allows you to jump between
+    programs, bypassing the maximum instruction limit of single BPF programs and reducing
+    implementation complexity.
+  prefs: []
+  type: TYPE_NORMAL
+- en: There are a few things you need to consider when you use this specialized map.
+    The first aspect to remember is that both key and value sizes must be four bytes.
+    The second aspect to remember is that when you jump to a new program, the new
+    program will reuse the same memory stack, so your program doesn’t consume all
+    the available memory. Finally, if you try to jump to a program that doesn’t exist
+    in the map, the tail call will fail, and the current program will continue its
+    execution.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s dive into a detailed example to understand how to use this type of map
+    better:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE24]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'First, we need to declare our new program map (as we mentioned earlier, the
+    key and value sizes are always four bytes):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE25]'
+  prefs: []
+  type: TYPE_PRE
+- en: We need to declare the program that we’re going to jump to. In this case, we’re
+    writing a BPF program, and its only purpose is to return 0\. We use `bpf_prog_load`
+    to load it in the kernel, and then we add its file descriptor identifier to our
+    program map.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Now that we have that program stored, we can write another BPF program that
+    will jump to it. BPF programs can jump to other programs only if they are of the
+    same type; in this case, we’re attaching the program to a kprobe trace, like we
+    saw in [Chapter 2](ch02.html#running_your_first_BPF_programs):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE26]'
+  prefs: []
+  type: TYPE_PRE
+- en: With `bpf_tail_call` and `BPF_MAP_TYPE_PROG_ARRAY`, you can chain up to 32 nested
+    calls. This is an explicit limit to prevent infinite loops and memory exhaustion.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Perf Events Array Maps
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: These types of maps store `perf_events` data in a buffer ring that communicates
+    between BPF programs and user-space programs in real time. They are defined with
+    the type `BPF_MAP_TYPE_PERF_EVENT_ARRAY`. They are designed to forward events
+    that the kernel’s tracing tools emit to user-space programs for further processing.
+    This is one of the most interesting types of maps and is the base for many observability
+    tools that we’ll talk about in the next chapters. The user-space program acts
+    as a listener that waits for events coming from the kernel, so you need to make
+    sure that your code starts listening before the BPF program in the kernel is initialized.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s see an example of how we can trace all the programs that our computer
+    executes. Before jumping into the BPF program code, we need to declare the event
+    structure that we’re going to send from the kernel to user-space:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE27]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Now, we need to create the map that’s going to send the events to user-space:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE28]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'After we have our data type and map declared, we can create the BPF program
+    that captures the data and sends it to user-space:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE29]'
+  prefs: []
+  type: TYPE_PRE
+- en: In this snippet, we’re using `bpf_perf_event_output` to append the data to the
+    map. Because this is a real-time buffer, you don’t need worry about keys for the
+    elements in the map; the kernel takes care of adding the new element to the map
+    and flushing it after the user-space program processes it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In [Chapter 4](ch04.html#tracing_with_bpf) we talk about more advanced usages
+    for these types of maps, and we present examples of processing programs in user-space.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Per-CPU Hash Maps
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: This type of map is a refined version of `BPF_MAP_TYPE_HASH`. These maps are
+    defined with the type `BPF_MAP_TYPE_PERCPU_HASH`. When you allocate one of these
+    maps, each CPU sees its own isolated version of the map, which makes it much more
+    efficient for high-performant lookups and aggregations. This type of map is useful
+    if your BPF program collects metrics and aggregates them in hash-table maps.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Per-CPU Array Maps
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: This type of map is also a refined version of `BPF_MAP_TYPE_ARRAY`. They are
+    defined with the type `BPF_MAP_TYPE_PERCPU_ARRAY`. Just like the previous map,
+    when you allocate one of these maps, each CPU sees its own isolated version of
+    the map, which makes it much more efficient for high-performant lookups and aggregations.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Stack Trace Maps
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: This type of map stores stack traces from the running process. They are defined
+    with the type `BPF_MAP_TYPE_STACK_TRACE`. Along with this map, the kernel developers
+    already added the helper `bpf_get_stackid` to help you populate this map with
+    stack traces. This helper takes the map as an argument and a series of flags so
+    that you can specify whether you want traces only from the kernel, only from user-space,
+    or both. The helper returns the key associated with the element added to the map.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Cgroup Array Maps
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: This type of map stores references to cgroups. Cgroup array maps are defined
+    with the type `BPF_MAP_TYPE_CGROUP_ARRAY`. In essence, their behavior is similar
+    to `BPF_MAP_TYPE_PROG_ARRAY`, but they store file descriptor identifiers that
+    point to cgroups.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This map is useful when you want to share cgroup references between BPF maps
+    for controlling traffic, debugging, and testing. Let’s see an example of how to
+    populate this map. We start with the map definition:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE30]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'We can retrieve a cgroup’s file descriptor by opening the file containing its
+    information. We’re going to open the cgroup that controls the base CPU shares
+    for Docker containers and store that cgroup in our map:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE31]'
+  prefs: []
+  type: TYPE_PRE
+- en: LRU Hash and Per-CPU Hash Maps
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: These two types of map are hash-table maps, like the ones you saw earlier, but
+    they also implement an internal LRU cache. LRU stands for least recently used,
+    which means that if the map is full, these maps will erase elements that are not
+    used frequently to make room for new elements in the map. Therefore, you can use
+    these maps to insert elements beyond the maximum limit, as long as you don’t mind
+    loosing elements that have not been used recently. They are defined with the types
+    `BPF_MAP_TYPE_LRU_HASH` and `BPF_MAP_TYPE_LRU_PERCPU_HASH`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `per cpu` version of this map is slightly different than the other `per
+    cpu` maps you saw earlier. This map keeps only one hash table to store all the
+    elements in the map, and it uses different LRU caches per CPU, that way, it ensures
+    that the most used elements in each CPU remain in the map.
+  prefs: []
+  type: TYPE_NORMAL
+- en: LPM Trie Maps
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: LPM trie maps are types of map that use longest prefix match (LPM) to look up
+    elements in the map. LPM is an algorithm that selects the element in a tree that
+    matches with the longest lookup key from any other match in the tree. This algorithm
+    is used in routers and other devices that keep traffic forwarding tables to match
+    IP addresses with specific routes. These maps are defined with the type `BPF_MAP_TYPE_LPM_TRIE`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: These maps require their key sizes to be multiples of eight and in a range from
+    8 to 2,048\. If you don’t want to implement your own key, the kernel provides
+    a struct that you can use for these keys called `bpf_lpm_trie_key`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In this next example, we add two forwarding routes to the map and try to match
+    an IP address to the correct route. First we need to create the map:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE32]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'We’re going to populate this map with three forwarding routes: `192.168.0.0/16`,
+    `192.168.0.0/24`, and `192.168.1.0/24`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE33]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Now, we use the same key structure to look up the correct match for the IP
+    `192.168.1.1/32`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE34]'
+  prefs: []
+  type: TYPE_PRE
+- en: In this example, both `192.168.0.0/24` and `192.168.1.0/24` could match the
+    lookup IP because it’s within both ranges. However, because this map uses the
+    LPM algorithm, the result will be populated with the value for the key `192.168.1.0/24`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Array of Maps and Hash of Maps
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '`BPF_MAP_TYPE_ARRAY_OF_MAPS` and `BPF_MAP_TYPE_HASH_OF_MAPS` are two types
+    of maps that store references to other maps. They support only one level of indirection,
+    so you cannot use them to store maps of maps of maps, and so on. This ensures
+    that you don’t consume all of the memory by accidentally storing infinite chained
+    maps.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: These types of maps are useful when you want to be able to replace entire maps
+    at runtime. You can create full-state snapshots if all of your maps are children
+    of a global map. The kernel ensures that any update operation in the parent map
+    waits until all the references to old children maps are dropped before completing
+    the operation.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Device Map Maps
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: This specialized type of map stores references to network devices. These maps
+    are defined with the type `BPF_MAP_TYPE_DEVMAP`. They are useful for network applications
+    that want to manipulate traffic at the kernel level. You can build a virtual map
+    of ports that point to specific network devices and then redirect packets by using
+    the helper `bpf_redirect_map`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: CPU Map Maps
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '`BPF_MAP_TYPE_CPUMAP` is another type of map that allows you to forward network
+    traffic. In this case, the map stores references to different CPUs in your host.
+    Like the previous type of map, you can use it with the `bpf_redirect_map` helper
+    to redirect packets. However, this map sends packets to a different CPU. This
+    allows you to assign specific CPUs to network stacks for scalability and isolation
+    purposes.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Open Socket Maps
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '`BPF_MAP_TYPE_XSKMAP` is a type of map that stores references to open sockets.
+    Like the previous maps, these maps are useful for forwarding packets, between
+    sockets in this case.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Socket Array and Hash Maps
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '`BPF_MAP_TYPE_SOCKMAP` and `BPF_MAP_TYPE_SOCKHASH` are two specialized maps
+    that store references to open sockets in the kernel. Like the previous maps, this
+    type of maps is used in conjunction with the helper `bpf_redirect_map` to forward
+    socket buffers from the current XDP program to a different socket.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Their main difference is that one of them uses an array to store the sockets
+    and the other one uses a hash table. The advantage of using a hash table is that
+    you can access a socket directly by its key without the need to traverse the full
+    map to find it. Each socket in the kernel is identified by a five-tuple key. These
+    five tuples include the necessary information to establish bidirectional network
+    connections. You can use this key as the lookup key in your map when you use the
+    hash-table version of this map.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Cgroup Storage and Per-CPU Storage Maps
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: These two types of maps were introduced to help developers work with BPF programs
+    attached to cgroups. As you saw in [Chapter 2](ch02.html#running_your_first_BPF_programs),
+    you can attach and detach BPF programs from control groups and isolate their runtime
+    to specific cgroups with `BPF_PROG_TYPE_CGROUP_SKB`. These two maps are defined
+    with the types `BPF_MAP_TYPE_CGROUP_STORAGE` and `BPF_MAP_TYPE_PERCPU_CGROUP_STORAGE`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: These types of maps are similar to hash-table maps from the developer point
+    of view. The kernel provides a structure helper to generate keys for this map,
+    `bpf_cgroup_storage_key`, which includes information about the cgroup node identifier
+    and the attachment type. You can add any value you want to this map; its access
+    will be restricted to the BPF program inside the attached cgroup.
+  prefs: []
+  type: TYPE_NORMAL
+- en: There are two limitations with these maps. The first is that you cannot create
+    new elements in the map from user-space. The BPF program in the kernel can create
+    elements with `bpf_map_update_elem`, but if you use this method from user-space
+    and the key doesn’t exist already, `bpf_map_update_elem` will fail, and `errno`
+    will be set to `ENOENT`. The second limitation is that you cannot remove elements
+    from this map. `bpf_map_delete_elem` always fails and sets `errno` to `EINVAL`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The main difference between these two types of maps, as you saw with other similar
+    maps earlier, is that `BPF_MAP_TYPE_PERCPU_CGROUP_STORAGE` keeps a different hash
+    table per CPU.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Reuseport Socket Maps
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: This specialized type of map stores references to sockets that can be reused
+    by an open port in the system. They are defined with the type `BPF_MAP_TYPE_REUSEPORT_SOCKARRAY`.
+    These maps are mainly used with `BPF_PROG_TYPE_SK_REUSEPORT` program types. Combined,
+    they give you control to decide how to filter and serve incoming packets from
+    the network device. For example, you can decide which packets go to which socket,
+    even though both sockets are attached to the same port.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Queue Maps
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Queue maps use a first-in, first-out (FIFO) storage to keep the elements in
+    the map. They are defined with the type `BPF_MAP_TYPE_QUEUE`. FIFO means that
+    when you fetch an element from the map, the result is going to be the element
+    that has been in the map for the longest time.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `bpf` map helpers work in a predictable way for this data structure. When
+    you use `bpf_map_lookup_elem`, this map always looks for the oldest element in
+    the map. When you use `bpf_map_update_elem`, this map always appends the element
+    to the end of the queue, so you’ll need to read the rest elements in the map before
+    being able to fetch this element. You can also use the helper `bpf_map_lookup_and_delete`
+    to fetch the older element and remove it from the map in an atomic way. This map
+    doesn’t support the helpers `bpf_map_delete_elem` and `bpf_map_get_next_key`.
+    If you try to use them, they will fail and set the `errno` variable to `EINVAL`
+    as a result.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Something else that you need to keep in mind about these types of map is that
+    they don’t use the map keys for lookups, and the key size must always be 0 when
+    you initialize these maps. When you push elements to these maps, the key must
+    be a null value.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s see an example of how to use this type of map:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE35]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Let’s insert several elements in this map and retrieve them in the same order
+    in which we inserted them:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE36]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This program prints the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE37]'
+  prefs: []
+  type: TYPE_PRE
+- en: If we try to pop a new element from the map, `bpf_map_lookup_and_delete` will
+    return a negative number, and the `errno` variable will be set to `ENOENT`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Stack Maps
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Stack maps use a last-in, first-out (LIFO) storage to keep the elements in the
+    map. They are defined with the type `BPF_MAP_TYPE_STACK`. LIFO means that when
+    you fetch an element from the map, the result is going to be the element that
+    was added to the map most recently.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `bpf` map helpers also work in a predictable way for this data structure.
+    When you use `bpf_map_lookup_elem`, this map always looks for the newest element
+    in the map. When you use `bpf_map_update_elem`, this map always appends the element
+    to the top of the stack, so it’s the first one to fetch. You can also use the
+    helper `bpf_map_lookup_and_delete` to fetch the newest element and remove it from
+    the map in an atomic way. This map doesn’t support the helpers `bpf_map_delete_elem`
+    and `bpf_map_get_next_key`. If you try to use them, they will always fail and
+    set the `errno` variable to `EINVAL` as a result.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s see an example of how to use this map:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE38]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Let’s insert several elements in this map and retrieve them in the same order
+    in which we inserted them:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE39]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This program prints the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE40]'
+  prefs: []
+  type: TYPE_PRE
+- en: If we try to pop a new element from the map, `bpf_map_lookup_and_delete` will
+    return a negative number, and the `errno` variable will be set to `ENOENT`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: These are all the map types that you can use in a BPF program. You’ll find some
+    of them more useful than others; it will depend on the kind of program that you’re
+    writing. We’ll see more usage examples throughout the book that will help you
+    cement the fundamentals that you just saw.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As we mentioned earlier, BPF maps are stored as regular files in your operating
+    system. We have not talked about the specific characteristics of the filesystem
+    that the kernel uses to save maps and programs. The next section guides you through
+    the BPF filesystem, and the type of persistence that you can expect from it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The BPF Virtual Filesystem
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: A fundamental characteristic of BPF maps is that being based on file descriptors
+    means that when a descriptor is closed, the map and all the information it holds
+    disappear. The original implementation of BPF maps was focused on short-lived
+    isolated programs that didn’t share any information among one another. Erasing
+    all data when the file descriptor was closed made a lot of sense in those scenarios.
+    However, with the introduction of more complex maps and integrations within the
+    kernel, its developers realized that they needed a way to save the information
+    that maps held, even after a program terminated and closed the map’s file descriptor.
+    Version 4.4 of the Linux kernel introduced two new syscalls to allow pinning and
+    fetching maps and BPF programs from a virtual filesystem. Maps and BPF programs
+    pinned to this filesystem will remain in memory after the program that created
+    them terminates. In this section we explain how to work with this virtual filesystem.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The default directory where BPF expects to find this virtual filesystem is
+    */sys/fs/bpf*. Some Linux distributions don’t mount this filesystem by default
+    because they don’t assume that the kernel supports BPF. You can mount it yourself
+    by using the `mount` command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE41]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Like any other file hierarchy, persistent BPF objects in the filesystem are
+    identified by paths. You can organize these paths in any way that makes sense
+    for your programs. For example, if you want to share a specific map with IP information
+    between programs, you might want to store it in */sys/fs/bpf/shared/ips*. As we
+    mentioned earlier, there are two types of objects that you can save in this filesystem:
+    BPF maps and full BPF programs. Both of these are identified by file descriptors,
+    so the interface to work with them is the same. These objects can be manipulated
+    only by the `bpf` syscall. Although the kernel provides high-level helpers to
+    assist you in interacting with them, you cannot do things like trying to open
+    these files with the `open` syscall.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`BPF_PIN_FD` is the command to save BPF objects in this filesystem. When the
+    command succeeds, the object will be visible in the filesystem in the path that
+    you specified. If the command fails, it returns a negative number, and the global
+    `errno` variable is set with the error code.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`BPF_OBJ_GET` is the command to fetch BPF objects that have been pinned to
+    the filesystem. This command uses the path you assigned the object to to load
+    it. When this command succeeds, it returns the file descriptor identifier associated
+    to the object. If it fails, it returns a negative number, and the global `errno`
+    variable is set with the specific error code.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Let’s see an example of how to take advantage of these two commands in different
+    programs using the helper functions that the kernel provides.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'First, we’re going to write a program that creates a map, populates it with
+    several elements, and saves it in the filesystem:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE42]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](assets/1.png)](#co_bpf_maps_CO1-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This section of code should already look familiar to you from our previous examples.
+    First, we create a hash-table map with a fixed size of one element. Then we update
+    the map to add only that element. If we tried to add more elements, `bpf_map_update_elem`
+    would fail because we would be overflowing the map.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'We use the helper function `pbf_obj_pin` to save the map in the filesystem.
+    You can actually check that you have a new file under that path in your machine
+    after the program has terminated:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE43]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Now we can write a similar program that loads that map from the file system
+    and prints the elements we inserted. That way we can verify that we saved the
+    map correctly:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE44]'
+  prefs: []
+  type: TYPE_PRE
+- en: Being able to save BPF objects in the filesystem opens the door to more interesting
+    applications. Your data and programs are no longer tied to a single execution
+    thread. Information can be shared by different applications, and BPF programs
+    can run even after the application that created them terminates. This gives them
+    an extra level or availability that would have not been possible without the BPF
+    filesystem.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Conclusion
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Establishing communication channels between the kernel and user-space is fundamental
+    to take full advantage of any BPF program. In this chapter you learned how to
+    create BPF maps to establish that communication and how to work with them. We’ve
+    also described the types of maps that you can use in your programs. As you progress
+    in the book, you’ll see more specific map examples. Finally, you learned how to
+    pin entire maps to the system to make them and the information they hold durable
+    to crashes and interruptions.
+  prefs: []
+  type: TYPE_NORMAL
+- en: BPF maps are the central bus of communication between the kernel and user-space.
+    In this chapter, we established the fundamental concepts that you need to know
+    to understand them. In the next chapter we make more extensive use of these data
+    structures to share data. We also introduce you to additional tools that will
+    make working with BPF maps more efficient.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the next chapter you’ll see how BPF programs and maps work together to give
+    you tracing capabilities on your systems from the kernel point of view. We explore
+    different ways to attach programs to different entry points in the kernel. Finally,
+    we cover how to represent multiple data points in a way that makes your applications
+    easier to debug and observe.
+  prefs: []
+  type: TYPE_NORMAL

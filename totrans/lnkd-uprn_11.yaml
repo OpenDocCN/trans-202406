@@ -1,0 +1,852 @@
+- en: Chapter 11\. Ensuring Reliability with Linkerd
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: As discussed from the very beginning, back in [Chapter 1](ch01.html#LUAR_service_mesh_101),
+    microservices applications are utterly reliant on the network for all of their
+    communications. Networks are slower and less reliable than in-process communication,
+    which introduces new failure modes and presents new challenges to our applications.
+  prefs: []
+  type: TYPE_NORMAL
+- en: For service mesh users, where the mesh mediates all your application traffic,
+    the reliability benefit is that the mesh can make intelligent choices about what
+    to do when things go wrong. In this chapter, we’ll talk about the mechanisms that
+    Linkerd provides to mitigate the problems of unreliability in the network, helping
+    to address the inherent instability of microservices applications.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Load Balancing
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Load balancing might seem like an odd reliability feature to lead with, since
+    many people think that Kubernetes already handles it. As we first discussed in
+    [Chapter 5](ch05.html#LUAR_ingress_and_linkerd), Kubernetes Services make a distinction
+    between the IP address of the Service and the IP addresses of the Pods associated
+    with the Service. When traffic is sent to the ClusterIP, it ends up being redirected
+    to one of the endpoint IPs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: However, in Kubernetes, the built-in load balancing is limited to entire connections.
+    Linkerd improves on this by using the proxy, which understands more about the
+    protocol involved in the connection, to choose an endpoint for each request, as
+    shown in [Figure 11-1](#service-discovery-in-linkerd).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![luar 1101](assets/luar_1101.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 11-1\. Service discovery in Linkerd
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: As you can see from [Figure 11-1](#service-discovery-in-linkerd), Linkerd will
+    use the destination address from a given request and, depending on the object
+    type it refers to, will adjust its endpoint selection algorithm to select a target.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Request-Level Load Balancing
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: This distinction between connection-level load balancing and request-level load
+    balancing is more important than it might appear at first glance. Under the hood,
+    Linkerd actually maintains a pool of connections between your workloads, letting
+    it rapidly dispatch requests to whichever workload it thinks appropriate without
+    connection overhead, load balancing the individual requests so that the load is
+    evenly and efficiently distributed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: You can learn more about connection-level load balancing in Kubernetes on the
+    [Kubernetes blog](https://oreil.ly/FMALe).
+  prefs: []
+  type: TYPE_NORMAL
+- en: The aptly named destination controller in the Linkerd control plane makes this
+    all possible. For each service in the mesh, it maintains a list of the service’s
+    current endpoints as well as their health and relative performance. The Linkerd
+    proxy uses that information to make intelligent decisions about where and how
+    to send a given request.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Retries
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Sometimes, due to network issues or intermittent application failures, a request
+    might fail. In this situation, the Linkerd proxy can *retry* the request for you,
+    automatically repeating it to give the workload another chance to handle it successfully.
+    Of course, it’s not always safe to retry every request, so the Linkerd proxy will
+    only do automatic retries if you’ve explicitly configured retries for a given
+    route, and you should only configure retries when you know they’re safe.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Don’t Blindly Retry!
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Think before you enable retries for a particular request! Not all requests can
+    be safely retried—consider a request that withdraws money from an account, and
+    imagine retrying it in a scenario where the request succeeds but somehow the response
+    gets lost, or the withdrawal service crashes before it can send a reply but after
+    the money is moved. This is not a request that should be retried.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Retry Budgets
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Many service meshes and API gateways use *counted retries*, where you define
+    a maximum number of times a request can be retried before a failure is returned
+    to the caller. Linkerd, by contrast, uses *budgeted retries*, where retrying continues
+    as long as the ratio of retries to original requests doesn’t exceed the budget.
+  prefs: []
+  type: TYPE_NORMAL
+- en: By default, the budget is 20%, plus 10 more “free” retries per second, averaged
+    over 10 seconds. For example, if your workload is taking 100 requests per second
+    (RPS), then Linkerd would allow adding 30 more retries per second (20% of 100
+    is 20, plus an additional 10).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Budgeted Retries Versus Counted Retries
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'Linkerd uses budgeted retries because they tend to let you more directly control
+    the thing you really care about: how much extra load will retries add to the system?
+    Usually, choosing a specific number of retries doesn’t really help control load:
+    if you’re taking 10 RPS and allow 3 retries, you’re up to 40 RPS, but if you’re
+    at 100 RPS and allow 3 retries, you might be up to *400* RPS. Budgeted retries
+    control the added load much more directly, while also tending to avoid the retry
+    storms that can happen under high load (where large amounts of retries can themselves
+    crash a Pod, thus causing more retries…).'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Configuring Retries
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Take a minute to examine the traffic from `books` to `authors` using `linkerd
+    viz`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You’ll see that the `books` workload is only sending requests to a single route
+    over on the `authors` service: `HEAD /authors/{id}.json`. Those requests are failing
+    half the time, making them a great candidate for retries—`HEAD` requests are always
+    idempotent (that is, they can always be repeated without the result changing),
+    so we can always safely enable retries on that route.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: In Linkerd, we control retry behavior with ServiceProfile resources. In this
+    case, we’ll be using the ServiceProfile for the `authors` service, since we’re
+    going to enable retries when talking *to* the `authors` workload.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Retries, ServiceProfiles, HTTPRoutes, and Linkerd
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: As mentioned earlier, the Linkerd project is in the midst of a transition to
+    fully adopting [Gateway API](https://oreil.ly/a-Xug), which means you’ll soon
+    see a few Linkerd custom resources, including ServiceProfile, begin to be deprecated.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In Linkerd 2.13 and 2.14, ServiceProfile and HTTPRoute often have mutually exclusive
+    functionality, which makes it particularly important to review the [retry and
+    timeout documentation](https://oreil.ly/1EPEX) to verify the current state of
+    ServiceProfile as you begin building retries into your applications.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Start by looking at the existing ServiceProfile using `kubectl get`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: This ServiceProfile should look a lot like the one in [Example 11-1](#EX-rel-authors-sp).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 11-1\. The `authors` ServiceProfile
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: You can see five routes listed in the ServiceProfile. We’re going to focus on
+    the last route, `HEAD /authors/{id}.json`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'We can configure retries independently for each route by adding the `isRetryable:
+    true` property to the ServiceProfile entry for the route. In addition to that,
+    each ServiceProfile object can define the retry budget for the all the routes
+    in the ServiceProfile.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The easiest way to add this property is to interactively edit the ServiceProfile:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: Use your editor to change the ServiceProfile so that the `HEAD /authors/{id}.json`
+    route has the `isRetryable` property set to `true`, as shown in [Example 11-2](#EX-rel-edited-authors).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 11-2\. The `authors` ServiceProfile with retries
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Save your changes to the `authors` ServiceProfile and examine the routes using
+    `linkerd viz routes` once again, as shown here:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Switching the output format using `-o wide` tells the `linkerd viz routes`
+    command to show the effective success rate (after retries) as well as the actual
+    success rate (before retries are taken into consideration). If you run this command
+    repeatedly after enabling retries, you’ll see that the effective success rate
+    will climb as the overall latency goes up. Over time, the effective success rate
+    should climb to 100%, even though the actual success rate stays consistent at
+    about 50%: the `authors` workload is still failing about half the time, even though
+    retries are able to mask that from the caller.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The watch Command
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'If you have the `watch` command, this is a great time to use it. It will rerun
+    the command every two seconds until interrupted, giving you an easy way to see
+    things changing:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: You can also see the difference in the effective and actual RPS. The effective
+    RPS is about 2.2, but the actual RPS will hover near double that—that’s because
+    *retries add load to the failing service* by making additional requests to mask
+    the failures.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Why Are We Seeing a Factor of Two?
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: We often quote the default retry budget as 20%—so how is it possible that we’re
+    seeing twice the traffic in this situation? For that matter, how is it possible
+    that we’re seeing Linkerd mask all the failures when *50%* of requests are failing?
+  prefs: []
+  type: TYPE_NORMAL
+- en: The answer to both questions lies with the “free” 10 requests per second included
+    in the default budget. Since the actual load is significantly less than 10 RPS,
+    the extra 10 “free” requests per second are plenty to effectively allow retrying
+    100% of the actual traffic, permitting Linkerd to mask all the failures…at the
+    cost of doubling the traffic.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Those “free” 10 RPS also mean that you don’t have to worry about Linkerd’s budget
+    letting failures leak through on a lightly used service, even while the budget
+    protects you from retry storms on a heavily used service.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Configuring the Budget
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Linkerd’s default budget actually works out well for many applications, but
+    if you need to change it, you’ll need to edit the `retryBudget` stanza in your
+    ServiceProfile, as shown in [Example 11-3](#EX-rel-retry-budget).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 11-3\. An example retry budget
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: The `retryBudget` stanza shown in [Example 11-3](#EX-rel-retry-budget) would
+    allow retrying 30% of original requests, plus *50* “free” requests per second,
+    averaged over a full minute.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Don’t Blindly Use This Budget!
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The budget shown in [Example 11-3](#EX-rel-retry-budget) is *just an example*.
+    Please do not assume that it will be helpful for any actual application!
+  prefs: []
+  type: TYPE_NORMAL
+- en: Timeouts
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Timeouts are a tool that allows us to force a failure in the event a given request
+    is taking too long. They’re particularly effective when used hand-in-hand with
+    retries, so that a request that takes too long will be retried—but you don’t have
+    to use them together! There are a lot of situations where a judiciously placed
+    timeout can help return agency to an application, opening the door to providing
+    a better user experience by making intelligent decisions about what to do if things
+    are slow.
+  prefs: []
+  type: TYPE_NORMAL
+- en: When timeouts are configured and a request takes too long, the Linkerd proxy
+    will return an HTTP 504 for the request. The timeout will look like any other
+    request failure as far as Linkerd’s observability functionality is concerned (including
+    triggering a retry, if retries are enabled), and it will be counted toward the
+    effective failure rate on a given route.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Configuring Timeouts
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Let’s start things off by taking a look at requests from `webapp` to `books`,
+    to see what the average latency for user requests looks like:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: Let’s focus on the `PUT /books/{id}.json` route. Latency varies from environment
+    to environment, but we’ll start with a latency of 25 ms for our example; this
+    will probably result in some timeouts being triggered in most environments. You
+    can use the resulting success rates to tune the timeouts in your cluster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Just like retries, timeouts are configured via ServiceProfiles in Linkerd.
+    As we did with retries, we’ll start by looking at the existing profile. We can
+    get the `books` ServiceProfile with this command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: This ServiceProfile should look very similar to the one in [Example 11-4](#EX-rel-books-sp).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 11-4\. The `books` ServiceProfile
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: We configure timeouts by adding the `timeout` property to a route entry, setting
+    its value to a time specification that can be parsed by Go’s `time.ParseDuration`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Timeouts, ServiceProfiles, HTTPRoutes, and Linkerd
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: As mentioned earlier, the Linkerd project is in the midst of a transition to
+    fully adopting [Gateway API](https://oreil.ly/6XTtV), so a few Linkerd custom
+    resources, including ServiceProfile, will soon begin to be deprecated.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ServiceProfile and HTTPRoute have overlapping functionality for timeouts starting
+    with Gateway API 1.0.0, which at the time of writing is not yet supported by a
+    stable Linkerd version. It’s particularly important to review the [retry and timeout
+    documentation](https://oreil.ly/41V-2) to verify the current state of ServiceProfile
+    as you begin building retries into your applications.
+  prefs: []
+  type: TYPE_NORMAL
+- en: One particular note is that the syntax for HTTPRoute timeouts, specified by
+    [GEP-2257](https://oreil.ly/lxLGa), is rather more restrictive than Go’s `time.ParseDu⁠ration`,
+    which is used for ServiceProfile timeouts. For maximum compatibility in the future,
+    you may want to consider updating your ServiceProfile timeouts to conform to GEP-2257.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The simplest way to add a timeout to the `PUT /books/{id}.json` route is to
+    edit the ServiceProfile interactively, which you can do using the following command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: You will need to add the `timeout` element to the `PUT /books/{id}.json` route,
+    with a value of `25ms`. This is shown in [Example 11-5](#EX-rel-edited-books-sp).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 11-5\. The `books` ServiceProfile with a timeout
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'With the timeout set, you’ll want to observe the traffic going from the `webapp`
+    to the `books` service to see how the timeout is impacting the overall availability
+    of your service. Once again, `linkerd viz routes` is one of the simplest ways
+    to do this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  prefs: []
+  type: TYPE_PRE
+- en: (You can use `-o wide` if you want—it won’t directly help you when observing
+    latency, but it’s certainly not harmful.)
+  prefs: []
+  type: TYPE_NORMAL
+- en: Timeouts provide a valuable tool to ensure the overall availability of your
+    applications. They allow you to control latency and ensure applications don’t
+    hang while waiting for responses from downstream services.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Traffic Shifting
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: '*Traffic shifting* refers to changing the destination of a request based on
+    outside criteria. Typically this is a weighted split between two or more destinations
+    (a *canary*), or a split based on a header match, username, etc. (an *A/B split*),
+    although many other types are possible. Traffic shifting is a major part of progressive
+    delivery, where you roll out new application versions by carefully shifting traffic
+    to the new version and verifying functionality as you go. However, you needn’t
+    do progressive delivery to benefit from traffic shifting.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Traffic Shifting, Gateway API, and the Linkerd SMI Extension
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: As of Linkerd 2.13, Linkerd natively supports traffic shifting using the Gateway
+    API HTTPRoute resource, so traffic shifting is the first area where we’ll use
+    Gateway API resources to configure Linkerd.
+  prefs: []
+  type: TYPE_NORMAL
+- en: HTTPRoutes Versus Linkerd SMI
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: In Linkerd versions prior to 2.13, you can still do traffic shifting, but you
+    need to use the Linkerd SMI extension (which we mentioned in [Chapter 2](ch02.html#LUAR_intro_to_linkerd)).
+    For information about the SMI extension and its legacy TrafficSplit resources,
+    check out the [official Linkerd docs on SMI](https://oreil.ly/56HlN). We recommend
+    using Gateway API in 2.13 and later, though.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'As we explore traffic shifting in Linkerd, we’ll look at the two basic ways
+    of doing it: weight-based and header-based.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Setting Up Your Environment
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: In this section we’ll be demonstrating traffic shifting using an entirely different
+    application called [podinfo](https://oreil.ly/1IL4K). To follow along with the
+    traffic shifting demos, we recommend you start a new cluster; please refer to
+    the material in [Chapter 3](ch03.html#LUAR_deploying_linkerd) if you need any
+    help with that.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Once you have your new cluster, you can follow along with [Example 11-6](#EX-rel-setup-podinfo)
+    to get started shifting traffic with podinfo.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 11-6\. Launching podinfo
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE14]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[PRE15]'
+  prefs: []
+  type: TYPE_PRE
+- en: With that, we have our base demo application ready for traffic splitting. The
+    basic layout of our application is shown in [Figure 11-2](#podinfo).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![luar 1102](assets/luar_1102.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 11-2\. podinfo application architecture
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Next, you’ll want to watch how traffic is moving through your cluster. It’s
+    best to start this running in a separate window, as shown in [Example 11-7](#EX-rel-watch-podinfo),
+    so you can see what changes as you manipulate resources.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 11-7\. Watching podinfo traffic
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE16]'
+  prefs: []
+  type: TYPE_PRE
+- en: This will show you how traffic is being routed in your cluster. You should see
+    two podinfo deployments, `podinfo` and `podinfo-v2`. `podinfo-v2` should be receiving
+    very little traffic at the moment since we haven’t yet shifted any traffic to
+    it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Weight-Based Routing (Canary)
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '*Weight-based routing* is a method of shifting traffic that selects where a
+    given request will go based on simple percentages: a certain percentage of available
+    traffic goes to one destination, and the rest goes to another. Weight-based routing
+    allows us to shift a small percentage of traffic to the new version of a service
+    to see how it behaves.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: In progressive delivery this is called *canary routing*, named after the proverbial
+    “canary in a coal mine” that would warn miners when the air was going bad by dying.
+    Here, the idea is that you can shift a small amount of traffic to test if the
+    new version of your workload will die, or work, before you shift more traffic.
+    A successful canary ends when all the traffic has been shifted and the old version
+    can be retired.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To start the canary running, we’ll need to create an HTTPRoute, as shown in
+    [Example 11-8](#EX-rel-canary-route).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Which HTTPRoute?
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: We’re going to use `policy.linkerd.io` HTTPRoutes to accommodate readers with
+    older versions of Linkerd. It’s important to be aware, though, that tools like
+    Flagger and Argo Rollouts *do not* support `policy.linkerd.io`! If you’re using
+    one of these tools, you’ll need to use the `gateway.networking.k8s.io` HTTPRoutes,
+    which requires Linkerd 2.14 or higher.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 11-8\. The canary HTTPRoute
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE17]'
+  prefs: []
+  type: TYPE_PRE
+- en: This HTTPRoute will split traffic between the `podinfo` and `podinfo-v2` services.
+    We set the weight to 5 for both services, which will cause 50% of the traffic
+    to shift over to `podinfo-v2`, while leaving 50% with our original `podinfo`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Ratio Is What Matters
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The absolute values of the weights don’t usually matter—they don’t need to add
+    up to any particular number. What does matter is the *ratio* of weights, so using
+    weights of 5 and 5, or 100 and 100, or 1 and 1 would all give 50/50 splits.
+  prefs: []
+  type: TYPE_NORMAL
+- en: On the other hand, a weight of 0 explicitly means *not* to direct any traffic
+    to that backend—so don’t try to use 0/0 for a 50/50 split.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Service versus Service: ClusterIPs, endpoints, and HTTPRoutes'
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'The astute reader will notice that we’re using `podinfo` twice: once in `parentRefs`
+    and once in `backendRefs`. Won’t this cause a routing loop? Aren’t we arranging
+    for traffic to come to `podinfo`, then get directed to `podinfo` again, and do
+    this forever until eventually it finally gets shuffled to `podinfo-v2`?'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Rest assured that that won’t happen. If we go back to the Kubernetes Service
+    architecture shown in [Figure 11-3](#k8s-service-architecture-3), the critical
+    bits are that:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: When a Service is used in `parentRefs`, it means that the HTTPRoute will control
+    traffic directed to the Service.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: When a Service is used in `backendRefs`, it allows the HTTPRoute to direct traffic
+    to the Pods attached to the Service.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '![luar 1103](assets/luar_1103.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 11-3\. The three distinct parts of a Kubernetes Service
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: So what we’re really saying with `podinfo-route` is that 95% of the traffic
+    to the `podinfo` Service IP will be directed to the `podinfo` *endpoints*, and
+    the other 5% will be directed to the `podinfo-v2` *endpoints*, so there are no
+    loops. This behavior is defined in [GEP-1426](https://oreil.ly/uYWpL) from the
+    GAMMA initiative.
+  prefs: []
+  type: TYPE_NORMAL
+- en: You Can’t Route to a Route
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'GEP-1426 also prevents HTTPRoutes from “stacking.” Suppose that we apply `podinfo-route`
+    as shown in [Example 11-8](#EX-rel-canary-route), then also apply another HTTPRoute
+    (`podinfo-v2-canary`) that tries to split traffic to `podinfo-v2`. In that case:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Traffic sent directly to `podinfo-v2` *will* be split by `podinfo-v2-canary`.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Traffic sent to `podinfo` that `podinfo-route` then directs to `podinfo-v2`
+    will *not* be split.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: This is because `podinfo-route` will send its traffic directly to the `podinfo-v2`
+    *endpoints*. Since that traffic bypasses the `podinfo-v2` Service IP, `podinfo-v2-canary`
+    never gets a chance to work with it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Apply `podinfo-route` to your cluster and take a look at how the traffic shifts
+    in your terminal window that’s watching traffic. You’ll see around 25 requests
+    per second going to the v2 deployment (remember that it will take a little time
+    for the metrics that `linkerd viz` is watching to catch up).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You can modify the weights and see how traffic shifts around in real time:
+    just use `kubectl edit` as shown here:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE18]'
+  prefs: []
+  type: TYPE_PRE
+- en: As soon as you save an edited version, the new weights should instantly take
+    effect, changing what you see in your window that’s watching traffic.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Once you’re finished, go ahead and delete the `podinfo-route` route, using
+    the following command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE19]'
+  prefs: []
+  type: TYPE_PRE
+- en: You should see all the traffic shifting back to `podinfo`, setting the stage
+    for our header-based routing experiment.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Header-Based Routing (A/B Testing)
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '*Header-based routing* allows you to make routing decisions based on the headers
+    included in a request. This is commonly used for A/B testing. For example, if
+    you have two versions of a user interface, you typically don’t want to randomly
+    choose between them every time your user loads a page. Instead, you might use
+    some header that identifies the user to pick a version of the UI in a deterministic
+    way, so that a given user will always see a consistent UI, but different users
+    might get different UIs.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: We’ll use header-based routing to allow selecting a version of `podinfo` using
+    a header. Start by applying a new `podinfo-route` HTTPRoute, as shown in [Example 11-9](#EX-rel-ab-route).
+    (Once again, we’re going to use `policy.linkerd.io` HTTPRoutes; see [“Which HTTPRoute?”](#which_httproute_ch11_LUAR_reliability_1710429511809)
+    for a caveat on this choice.)
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 11-9\. Header-based routing
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE20]'
+  prefs: []
+  type: TYPE_PRE
+- en: (If you were just following the instructions for weight-based routing, that’s
+    fine; this `podinfo-route` will overwrite the one from that section if you didn’t
+    already delete it.)
+  prefs: []
+  type: TYPE_NORMAL
+- en: This version has a new `matches` section for header matches. We also move the
+    reference to `podinfo-v2` from the main `backendRefs` section to a new `backendRefs`
+    under `matches`. The effect is that traffic will be shifted to `podinfo-v2` only
+    if it has the header `x-request-id` with a value of `alternative`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Since the traffic generator we installed doesn’t send any requests with the
+    correct header, when you apply this HTTPRoute, you should immediately see all
+    the traffic fall away from `podinfo-v2`. We can use `curl` to send traffic with
+    the correct header to be routed to `podinfo-v2`, as shown in [Example 11-10](#EX-rel-curl-header).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 11-10\. Testing header-based routing with `curl`
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE21]'
+  prefs: []
+  type: TYPE_PRE
+- en: Traffic Shifting Summary
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You now have a sense of how to use HTTPRoute objects to manipulate traffic in
+    your cluster. While it’s still possible, for the moment, to use the Linkerd SMI
+    extension, we strongly recommend using Gateway API instead—and if you’re using
+    Linkerd with a progressive delivery tool like Flagger or Argo Rollouts, using
+    Gateway API can dramatically simplify the interface with that tool (although,
+    as noted earlier, you’ll likely need to use Linkerd 2.14 for its support for the
+    official Gateway API types).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Circuit Breaking
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: When you run applications at scale, it can be helpful to automatically isolate
+    and direct traffic away from any Pod that is experiencing issues. Linkerd tends
+    to route away from underperforming Pods automatically, by virtue of using an exponentially
+    weighted moving average of latency to select the Pod to receive a given request.
+    With circuit breaking, you can make Linkerd explicitly avoid routing to any Pods
+    that are experiencing issues.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Enabling Circuit Breaking
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: When you enable circuit breaking on a Service, Linkerd will selectively quarantine
+    endpoints that experience multiple consecutive failures. As always with advanced
+    features, make sure you read the [latest Linkerd circuit breaking documentation](https://oreil.ly/33gHv)
+    before implementing this in your environment.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'We’ll demonstrate using Linkerd circuit breaking by installing a deliberately
+    bad Pod:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE22]'
+  prefs: []
+  type: TYPE_PRE
+- en: In your terminal that’s watching traffic, you should now see three `podinfo`
+    deployments running. Traffic should be roughly evenly split between `podinfo`
+    and `podinfo-v3`, because `podinfo-v3` is carefully set up to be part of the same
+    Service as `podinfo`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Seeing podinfo-v2?
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: If you’re seeing any traffic to `podinfo-v2`, check to make sure you don’t have
+    any HTTPRoutes still splitting traffic by running `kubectl get httproute -n podinfo`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You should also note that `podinfo-v3` has a less than 100% success rate. Adding
+    a circuit breaker to the `podinfo` Service, as shown here, should improve things:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE23]'
+  prefs: []
+  type: TYPE_PRE
+- en: This tells Linkerd to apply the circuit breaking policy to the `podinfo` Service.
+    It will look for consecutive failures and stop routing to any Pods that are having
+    issues. If you look back at your window that’s watching traffic, you’ll soon see
+    that `podinfo-v3` is no longer receiving much traffic.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Why Annotations?
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Circuit breakers are still rather new in Linkerd, so they’re currently configurable
+    only using annotations. Keep an eye on the [latest Linkerd circuit breaking documentation](https://oreil.ly/bdiFR)
+    to stay up-to-date as development proceeds!
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tuning Circuit Breaking
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'We can further tune circuit breaking with additional annotations on the Service:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`balancer.linkerd.io/failure-accrual-consecutive-max-failures`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Sets the number of failures that you’ll need to see before an endpoint is quarantined.
+    Defaults to `7`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`balancer.linkerd.io/failure-accrual-consecutive-min-penalty`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Sets the minimum time an endpoint should be put in quarantine. GEP-2257 Duration,
+    defaults to one second (`1s`).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`balancer.linkerd.io/failure-accrual-consecutive-max-penalty`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Sets the upper bound for the quarantine period (the maximum time that an endpoint
+    will be quarantined before the mesh tests it again). GEP-2257 Duration, defaults
+    to one minute (`1m`).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`balancer.linkerd.io/failure-accrual-consecutive-jitter-ratio`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Adds some randomness to the quarantine and test timeframes. Defaults to `0.5`;
+    tuning is only rarely appropriate.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Looking at the traffic, you’ll probably still see `podinfo-v3` showing too many
+    failures. Making it a bit more sensitive to failure, as shown in [Example 11-11](#EX-rel-tune-breaker),
+    will allow the circuit breaker to more aggressively take `podinfo-v3` out of circulation,
+    which should help the situation.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 11-11\. Tuning circuit breaking
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE24]'
+  prefs: []
+  type: TYPE_PRE
+- en: With that, we should see far fewer errors making it through to `podinfo-v3`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Circuit Breaking Won’t Hide All Failures
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: When Linkerd checks to see if a given endpoint has recovered, it does so by
+    allowing an actual user request through. If this request fails, the failure will
+    get all the way back to the caller (unless retries are also enabled).
+  prefs: []
+  type: TYPE_NORMAL
+- en: In our example, this would mean that a potentially failing request will make
+    it to `podinfo-v3` every 30 seconds, in order for Linkerd to check to see if the
+    circuit breaker can be reset.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Summary
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: With that, we’ve covered how Linkerd can help reliability in your applications.
+    You can retry in the event of transient failures in the network and in your APIs,
+    add timeouts to requests to preserve overall availability, split traffic between
+    versions of a service to perform safer rollouts, and set up circuit breakers to
+    protect services from failing Pods. With all this, you’re well on your way to
+    being able to run a reliable and resilient platform with Linkerd.
+  prefs: []
+  type: TYPE_NORMAL

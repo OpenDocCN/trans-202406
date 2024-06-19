@@ -1,0 +1,1066 @@
+- en: Chapter 7\. GATK Best Practices for Somatic Variant Discovery
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: In this chapter, we tackle somatic variant discovery, mainly as it applies to
+    cancer research. This is going to introduce new challenges and, correspondingly,
+    new experimental and computational designs. We begin with somatic short variants,
+    which still have a lot in common with germline short variants, with enough new
+    challenges to keep things interesting. Then we expand our horizons to include
+    copy-number variation, which involves a very different approach from what we’ve
+    taken so far.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Challenges in Cancer Genomics
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'Before we get into the weeds, let’s make one thing clear: everything is more
+    difficult with respect to cancer. Consider what is happening in the body before
+    a tumor even begins to develop. Living cells in our bodies are not static; they
+    are metabolically active, taking in nutrients, doing work, and pumping out waste.
+    Some of them are dividing at various rates. Enzymes are unraveling DNA to transcribe
+    it and/or copy and repackage it. At the scale of a single cell, very few of those
+    molecular transactions ever go wrong, but because this is happening all the time
+    in millions of cells, the numbers add up to a lot of little things going wrong,
+    causing mutations across the board.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Most of the time, these mutations have no discernible effect whatsoever. But
+    from time to time, a mutation arises that destabilizes the affected cell’s metabolism
+    in a way that causes it to begin dividing more rapidly and produce a tumor. That’s
+    still not cancer yet, mind you; most tumors in our bodies remain relatively contained
+    and harmless. However, some then experience other destabilizing mutations that
+    kick off a chain reaction, leading to cancerous development, including aggressive
+    growth and in the worst-case scenario, *metastasis*: dissemination to other parts
+    of the body. The mutation events that drive this progression are appropriately
+    called *driver mutations*, in contrast to the others, which are called *passenger
+    mutations*. Driver mutations are typically the main focus of somatic analysis
+    in cancer research.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The difficulty here is that as the tumor progresses, various metabolic functions
+    begin to break down and the cells lose their ability to repair damaged DNA. As
+    a result, the frequency of mutation events increases, and variants accumulate
+    in a variety of divergent cell lineages, producing a highly heterogeneous environment.
+    When a pathologist samples the tumor tissue, they end up extracting a mix of multiple
+    cell lines instead of the well-behaved population of largely clonal cells that
+    you expect from healthy tissue.
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is a huge problem for detecting somatic variation, because depending on
+    the internal state of the tumor tissue at the time we sample it, the variants
+    caused by driver mutations might be represented at only a low fraction of the
+    total genomic material. The most direct consequence is that we can’t allow the
+    variant caller to make any assumptions about the fraction of variant allele that
+    we expect to find. This is a big difference compared to the germline case, in
+    which variant allele fractions should roughly follow the ploidy of the organism.
+    That is why we use different variant callers for somatic versus germline variant
+    discovery analysis, which, under the hood, use different algorithms to model genomic
+    variation in the data.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In addition, the sampling process itself introduces confounding factors. Depending
+    on the skill of the pathologist, the stage of progression of the tumor, and the
+    type of biological tissue affected, we can end up with a tumor sample that is
+    contaminated with healthy “normal” cells. Conversely, if we are able to obtain
+    a *matched normal sample*, a sample taken from supposed healthy tissue from the
+    same person—that sample can, in fact, be contaminated with low levels of tumor
+    cells, as depicted in [Figure 7-1](#aright_parenthesis_tumor_progression_le).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![A) Tumor progression leads to heterogeneity; B) sampling is difficult.](Images/gitc_0701.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 7-1\. Tumor progression leads to heterogeneity (left); sampling is difficult
+    (right).
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The practical consequence of all this for somatic variant analysis is that our
+    work will necessarily be deeply vulnerable to sources of contamination and error
+    because the signal we are trying to detect is much lower compared to the noise
+    that is present in the data, particularly in the case of advanced cancers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Somatic Short Variants (SNVs and Indels)
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Let’s commence our exploration of somatic variant calling with short variants—SNVs
+    and indels. Some of the core concepts we cover here should feel familiar if you’ve
+    already worked through [Chapter 6](ch06.xhtml#best_practices_for_germline_short_varia),
+    and indeed some of the tools and underlying algorithms are the same. As we’ve
+    done previously, we’ll be looking at piles of reads and their exact sequences
+    to identify substitutions and small insertions and deletions.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'However, the basic experimental design that we follow is actually very different.
+    In germline variant discovery, we were mainly interested in identifying variants
+    that were present in some people but not in others, which led us to favor the
+    joint calling approach. In somatic variant discovery, we’re primarily looking
+    for differences between samples coming from the same person, so we will shift
+    our focus to a different paradigm: the *Tumor-Normal* pair analysis.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The most useful source of information for identifying somatic short variants
+    in the context of cancer is the comparison of the tumor against a sampling of
+    healthy tissue from the same individual, which, as we said previously, is called
+    a *matched normal*, or often *normal* for short. The idea here is that any variation
+    observed in the normal sample is part of the germline genome of the individual
+    and can be discounted as background, whereas any variant observed in the tumor
+    sample that is not present in the normal sample is more likely to be a somatic
+    mutation, as demonstrated in [Figure 7-2](#the_fundamental_concept_of_tumor_normal).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Unfortunately, some confounding factors muddy the waters. For example, biopsy
+    samples preserved with formalin and paraffin, a widely used laboratory technique
+    (FFPE, for formalin-fixed paraffin-embedded), are subject to biochemical alterations
+    that happen during sample preparation and cause patterns of false-positive variant
+    calls that are specific to the tumor sample. Conversely, the presence of tumor
+    cells in normal tissue (either due to contamination during sampling or metastatic
+    dispersion) can cause real somatic variants to be erroneously discounted as being
+    part of the germline of the individual. Finally, as we discussed earlier, the
+    various sources of technical error and contamination that affect all high-throughput
+    sequencing techniques to some degree will have a proportionately higher impact
+    on somatic calling. So, we will need to apply some robust processing and filtering
+    techniques to mitigate all these problems. (The overall workflow is illustrated
+    in [Figure 7-3](#best_practices_for_somatic_short_varian).)
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![The fundamental concept of Tumor-Normal comparison.](Images/gitc_0702.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 7-2\. The fundamental concept of Tumor-Normal comparison.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Before we get into the details of the Tumor-Normal workflow in the next subsection,
+    it’s important to note that sometimes it’s not possible to apply the full Tumor-Normal
+    pair analysis to a sample or set of samples, usually because we simply don’t have
+    matched normals for them. This is particularly frustrating when that lack comes
+    from an investigator’s failure to collect a matched normal from the participant
+    or patient. Such cases highlight the importance of making sure that researchers
+    map out the full analysis protocol before engaging in data collection. On the
+    other hand, in some cases it’s biologically impossible to obtain a matched normal;
+    for example, blood-borne cancers typically reach every tissue in the body, so
+    we can’t assume that any tissue sample would constitute an appropriate normal.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Whatever the reason for the absence of a matched normal, the workflow that we
+    present in the next subsection can be run on a tumor sample with only a few minor
+    modifications, which are detailed in the online [GATK documentation](https://oreil.ly/ZgIrB).
+    However, you should be aware that the results will necessarily be noisier because
+    you will be relying on the germline population resource to exclude the person’s
+    own germline genome.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Overview of the Tumor-Normal Pair Analysis Workflow
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: This workflow, illustrated in [Figure 7-3](#best_practices_for_somatic_short_varian),
+    is designed to be applied to a tumor sample and its matched normal. We can apply
+    it equally to whole genome data as well as exome data, but both the tumor and
+    the normal must be of the same data type and have been run through the same preprocessing
+    workflow, as we described for germline variant discovery.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Best Practices for somatic short variant discovery.](Images/gitc_0703.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 7-3\. Best Practices for somatic short variant discovery.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'The main variant calling step, which involves a tool called `Mutect2`, is applied
+    on both the tumor and the normal sample, with the addition of two important resources:
+    a Panel of Normals (PoN) and a database of germline population frequencies of
+    all germline variants that have been previously reported. The PoN is a resource
+    that allows us to eliminate common technical artifacts; we dedicate the next subsection
+    to explaining how it works and how to create one, although you won’t run it yourself
+    for practical reasons. We talk about the germline population frequencies resource
+    in [“Filtering Mutect2 Calls”](#filtering_mutect2_calls). The filtering process
+    will take into account read orientation statistics, an estimate of cross-sample
+    contamination, germline background, and concordance with the PoN. Finally, we
+    apply functional annotation to the variant callset to predict the effect of candidate
+    variants.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Creating a Mutect2 PoN
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The PoN is a callset in VCF format that aims to capture common recurring artifacts,
+    so we can filter those out if we encounter them in our tumor data. We generate
+    it by running the somatic caller, `Mutect2`, on a set of normal samples that were
+    produced with the same sequencing and library preparation technologies as our
+    tumor sample. The idea is that we’re asking the caller to show us everything it
+    could consider a somatic variant, excluding obvious germline variants (unless
+    otherwise specified). Because these are normals, not tumor samples, we can reasonably
+    assume that any variant calls that are produced this way are either germline variants
+    or artifacts. For those that are more likely to be artifacts, we can therefore
+    further assume that if we see the same artifacts in multiple normals, they might
+    have been caused by the technological processes involved, so we can expect to
+    see them pop up in some of our tumor samples that were processed the same way.
+    If we do see them, we’ll want to discount their likelihood of being real somatic
+    variants.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The normal samples used for making the PoN usually come from people who are
+    unrelated to the person whose tumor we are analyzing. They can be matched normals
+    from other cancer research participants or germline samples collected from healthy
+    individuals in unrelated research projects, as long as the appropriate consents
+    have been provided. The background genetics of the participants or their population
+    of origin don’t really matter; it’s all about the technical profile of the data.
+    Ideally, we want to include at least 40 samples; most PoNs used for research purposes
+    at the Broad Institute are composed of several hundred samples.
+  prefs: []
+  type: TYPE_NORMAL
+- en: We won’t run the PoN creation commands in this chapter, because they would take
+    too long to run. Instead, we demonstrate usage with some generic command lines.
+    You can find links to full implementations in the [GATK Best Practices documentation](https://oreil.ly/ZgIrB).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If we were to do this, we would first run `Mutect2` in tumor-only mode on the
+    normals selected to be in our PoN. We would do this separately on all the normals
+    in our panel. The following command (and subsequent ones in this section) are
+    just examples; we’ll have you execute commands on your VM a little later:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: This command applies the somatic variant calling model to the normal tissue
+    sample’s BAM file and produces a VCF file of calls that are most likely all either
+    artifacts or germline variants.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The `--max-mnp-distance 0` setting disables the tool’s ability to combine neighboring
+    SNVs into multinucleotide variants in order to maximize comparability across all
+    the normals in the PoN that we’re putting together.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Next, we would consolidate all the per-normal VCFs using `GenomicsDB`, which
+    you might recognize from the germline joint calling workflow. At that time, we
+    were consolidating GVCFs, whereas here we’re working with regular VCFs, but it
+    doesn’t make any difference: the `GenomicsDB` tools are quite happy to work with
+    either type of VCF:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Finally, we would extract the calls that are relevant to the goals of the PoN.
+    By default, the rule is to keep any variant call observed in two or more samples
+    but below a certain frequency threshold in the germline population resource:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: You might recognize [gnomAD](https://oreil.ly/gNICj) as the population resource
+    we used in [Chapter 6](ch06.xhtml#best_practices_for_germline_short_varia), in
+    the single-sample filtering protocol. The gnomAD database is a public resource
+    that includes variant calls from more than 100,000 people, and for each, it provides
+    the frequency at which each allele is found in the population of the database.
+    We use that information here to gauge the likelihood that a variant call that
+    shows up in several normals in the panel might in fact be a germline variant rather
+    than a recurring artifact.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This generates the final VCF that we will use as a PoN. It does not include
+    any of the sample genotypes; only site-level information is retained. We provide
+    an example PoN that you can examine with good old `zcat`, `grep`, and `head`,
+    as we’ve done previously, if you want to see the structure of the information
+    within the file (execute this command in the */home/book/data/somatic* directory
+    inside the GATK container):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note that this example PoN file includes data only in a subset of regions of
+    interest that are located within chromosome 6, chromosome 11, and chromosome 17.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Running Mutect2 on the Tumor-Normal Pair
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Now that you know how to create a PoN, let’s move to the main event of this
+    section, which consists of running `Mutect2` on the Tumor-Normal pair using a
+    PoN that we created for you from 40 publicly available normal samples from the
+    1000 Genomes Project. Just as in [Chapter 6](ch06.xhtml#best_practices_for_germline_short_varia),
+    we’re going to do this work within the GATK container on our trusty VM, so turn
+    on your VM if it’s not already running, and spin up the GATK container as we showed
+    you in [Chapter 5](ch05.xhtml#first_steps_with_gatk). This time, however, our
+    working directory is */home/book/data/somatic*, and we’ll need to make another
+    sandbox:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'We run `Mutect2` on the Tumor-Normal pair together, specifying which sample
+    name (as encoded in the `SM` tag in the BAM file) should be used for the normal
+    with the `-normal` argument. We provide the PoN and the gnomAD germline resource
+    with the `-pon` and `--germline-resource` arguments, respectively. Plus, we specify
+    intervals (using `-L` and an interval list file) because we’re running on exome
+    data:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This will run for a few minutes, so it’s a good time to take a stretch break.
+    After about five minutes, you should see the completion message from `Mutect2`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: This `Mutect2` command produces a VCF file containing possible variant calls
+    as well as a bamout file. You might remember the bamout file from the exercises
+    we ran with `HaplotypeCaller` in [Chapter 5](ch05.xhtml#first_steps_with_gatk);
+    this is the same thing. `Mutect2` is built on most of the same code as `HaplotypeCaller`,
+    and pulls the same graph-based realignment trick to improve sensitivity to indels.
+    The big difference between them is the genotyping model. For more information
+    on their respective algorithms, see the `Haplotype​Caller` and `Mutect2` documentation
+    on [GATK’s website](https://oreil.ly/Bits1). For now, just keep in mind that `Mutect2`
+    also realigns the reads, so if we want to look at the read data as part of the
+    variant review process later on, we’ll need the bamout. Because this is something
+    analysts do very frequently for somatic calls (much more, relatively speaking,
+    than for germline calls) we just set the `Mutect2` command to produce the bamout
+    systematically.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Estimating Cross-Sample Contamination
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: As we outlined earlier, identification of somatic mutations is more heavily
+    affected by sources of low-grade noise than the germline case. Even small amounts
+    of contamination between samples (which happens more often than researchers like
+    to think) can confuse the caller and lead to a lot of FPs. Indeed, we have no
+    direct way to distinguish between an allele that shows up in the data because
+    there is a real mutation in the biological tissue, and one that shows up because
+    our sample is contaminated with DNA from someone else who has that allele in their
+    germline.
+  prefs: []
+  type: TYPE_NORMAL
+- en: We can’t directly correct for such contamination, but we can estimate how much
+    it affects any given sample. From there, we can flag any mutation calls that are
+    observed at an allelic fraction equal to or smaller than the contamination rate.
+    It doesn’t mean we rule out those calls as being necessarily false, but it does
+    mean we’ll be extra skeptical of those calls when we move on to the next phase
+    of analysis.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To estimate the contamination rate in our tumor sample, we first identify homozygous-variant
+    sites in the Normal to choose what sites to look at in the Tumor and then evaluate
+    how much contamination we might have in the tumor based on the fraction of reads
+    supporting the reference allele at those sites. The idea is that because those
+    sites should be homozygous variant, any reference reads present must have come
+    from someone else through a contamination event.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To select the sites that we use in the calculation, we look at biallelic sites
+    that are found in a catalog of common variation (so that there’s a good chance
+    they will be relevant) but have an alternate allele frequency that is rather low
+    (so there won’t be too much noise from alternate alleles). Then, for every site
+    in that subset, we do a quick pileup-based genotyping run to identify those that
+    are homozygous-variant in that sample. We do this on both the tumor sample and
+    the matched normal:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: These two commands should run very quickly. If you see a warning about the `GetPileupSummaries`
+    tool being in a beta evaluation stage and not yet ready for production, you can
+    ignore it; this is a leftover of the development process and will be removed in
+    the near future.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: GATK developers tend to be very cautious and label their tools as alpha or beta
+    when they start working on them, to make sure that researchers don’t mistake an
+    experimental tool for something that has been fully vetted. However, they sometimes
+    forget to remove or update those labels when the tools have been fully vetted,
+    so the warnings remain longer than necessary. If you’re ever in doubt about the
+    state of a particular tool, don’t hesitate to ask the support team by posting
+    in the [community support forum](https://oreil.ly/KmHzX).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Each run produces a table that summarizes the allelic counts at each site that
+    was selected as well as the allele frequency annotated in the population resource:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Now we can do the actual estimation by providing both tables to the calculator
+    tool:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This command produces a final table that tells us the likely rate of cross-sample
+    contamination in the Tumor callset. Viewing the contents of the file shows us
+    that the level of contamination of the tumor is estimated at 1.15%, with an error
+    of 0.19%:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: This means that one read out of every hundred is likely to come from someone
+    else. This percentage will effectively be our floor for detecting low-frequency
+    somatic events; for any potential variant called at or below that AF, we would
+    have zero power to judge whether they were real or created through contamination.
+    And even a larger AF could be due entirely to contamination. We’ll feed the table
+    into the filtering tool so that it can take the contamination estimate properly
+    into account.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Filtering Mutect2 Calls
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Much like `HaplotypeCaller`, `Mutect2` is designed to be very sensitive and
+    capture as many true positives as possible. As a result, we know that the raw
+    callset will be rife with false positives of various types. To filter these calls,
+    we’re going to use a tool called `FilterMutectCalls`, which filters calls based
+    on a single quantity: the probability that a variant is a somatic mutation. Internally
+    the tool takes into account multiple factors, including the germline population
+    frequencies provided during the variant-calling step, the contamination estimates,
+    and the read orientation statistics computed earlier. After it has calculated
+    that probability for each variant call, the tool then determines the threshold
+    that optimizes the *F score,* the harmonic mean of sensitivity and precision across
+    the entire callset. As a result, we can simply run this one command to apply default
+    filtering to our callset:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The main output of this operation is the VCF output file containing all variants
+    with filter annotations applied as appropriate:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: If you want to tweak the balance point one way or the other, you can adjust
+    the relative weight of sensitivity versus precision in the harmonic mean. Setting
+    the `-f-score-beta` parameter to a value greater than its default of `1` increases
+    sensitivity, whereas setting it lower favors greater precision.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Alright, it’s time to have a look at the calls we produced in IGV. You might
+    have noticed that we’re now working with the hg38 reference build, so we’ll need
+    to adjust the reference setting in IGV before we can try to load any files.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You’re going to load the following files: the original BAM files for the Tumor
+    and the Normal, the bamout generated by `Mutect2`, and the filtered callset. Identify
+    the files based on the commands you ran a moment ago and then follow the same
+    procedure as in [Chapter 4](ch04.xhtml#first_steps_in_the_cloud) through [Chapter 6](ch06.xhtml#best_practices_for_germline_short_varia)
+    to copy the files to your Google Cloud Storage bucket and then load them in IGV
+    using the File > URL pathway.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: In IGV, set the view coordinates to `**chr17:7,666,402-7,689,550**` after the
+    files are loaded, as shown in [Figure 7-4](#zooming_in_on_tp53_in_igvdot), which
+    are centered on the TP53 locus. We care about this gene because it is known as
+    a tumor suppressor; it is activated by DNA damage and produces a protein called
+    p53 that can either repair the damage or trigger killing off the cell. Any mutations
+    to this gene that interfere with this very important function could contribute
+    to allowing unchecked tumor development.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To review this call in detail, zoom into the somatic call in the output BAM
+    track, using coordinates `**chr17:7,673,333-7,675,077**`. Hover over or click
+    the gray call in the variant track to view annotations, and try scrolling through
+    the data to evaluate the amount of coverage for each sample. In the sequence tracks,
+    we see a C to T variant light up in red for the Tumor but not the Normal ([Figure 7-4](#zooming_in_on_tp53_in_igvdot)).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Zooming in on TP53 in IGV.](Images/gitc_0704.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 7-4\. Zooming in on TP53 in IGV.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: What do you think of this somatic variant call?
+  prefs: []
+  type: TYPE_NORMAL
+- en: Annotating Predicted Functional Effects with Funcotator
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Filtering somatic mutation calls can be an especially daunting task compared
+    to their germline equivalent. It can therefore be particularly helpful to annotate
+    the calls with predicted functional effects and their significance. For example,
+    a stop codon in the middle of a protein coding region is likely to be more significant
+    than a mutation in the middle of an intron. Knowing this about your calls can
+    help you prioritize which ones you spend time investigating in depth.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To gauge functional impact, we need to know which regions of the genome code
+    for protein sequence and which correspond to elements important to gene expression.
+    Transcript annotation resources such as [GENCODE](https://www.gencodegenes.org)
+    capture such information in the standardized [Gene Transfer Format](https://oreil.ly/SDmFX)
+    (GTF). The GATK team provides a [set of resources](https://oreil.ly/LDGdM) containing
+    compiled functional annotation resources, or datasources, that are suitable for
+    many common functional annotation needs as well as a tool called `Funcotator`
+    to annotate your callset with information from these datasources. You can also
+    create your own custom data sources. In addition, although `Funcotator` outputs
+    results in VCF by default, you can make it output Mutation Annotation Format (MAF),
+    instead, which the cancer genomics community uses extensively. See the [Funcotator
+    documentation](https://oreil.ly/6qw0X) for details on both options.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'For now, though, let’s apply `Funcotator` to our filtered `Mutect2` callset:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This runs very quickly and produces a VCF in which our somatic callset has
+    now been lovingly annotated based on the GENCODE functional data. Here’s a sneak
+    peek of what the annotations look like in their natural habitat:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE14]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Now let’s have a look at the annotations specifically for the TP53 mutation
+    that we viewed earlier in IGV, at chr17:7674220:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE15]'
+  prefs: []
+  type: TYPE_PRE
+- en: This SNV is a C-to-T substitution that is predicted to cause an arginine-to-glutamine
+    *missense mutation*. Missense mutations change the protein that is produced from
+    the gene, which can be functionally neutral, but can also have deleterious effects.
+    If we look at the rest of the file, out of our 124 mutation records, 21 were annotated
+    as `MISSENSE`; and of these, 10 passed all filters. That information should help
+    us prioritize what to investigate in the next stage of our analysis.
+  prefs: []
+  type: TYPE_NORMAL
+- en: With that, we’re done with the Tumor-Normal pair analysis workflow for discovery
+    of somatic SNVs and indels! Next, we’re going to go over the process we apply
+    for investigating somatic copy-number alterations.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: If you’re taking a break before continuing on with the next section, consider
+    stopping your VM to avoid paying for it while you’re away living your best life.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Somatic Copy-Number Alterations
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: So far, we’ve been looking exclusively at small variants, SNVs, and indels that
+    are characterized based on the presence or absence of specific nucleotides compared
+    to the reference sequence. Moving to the copy number involves a big mental (and
+    methodological!) shift given that now we’re going to be looking at the *relative
+    amounts of sequence* in the sample of interest, measured relative to itself ([Figure 7-5](#difference_between_copy_number_and_copy)
+    and [Figure 7-6](#spectral_karyotyping_paints_each_chromo)). In other words, we’re
+    not actually going to measure the copy number that is physically present in the
+    biological material. What we measure is the copy ratio, which we use as a proxy
+    because it is a *consequence* of copy-number alterations (CNAs). As part of that
+    process, we’re going to use the reference genome primarily as a coordinate system
+    for defining segments that display CNAs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As shown in [Figure 7-5](#difference_between_copy_number_and_copy), the *copy
+    number* is the absolute, integer-valued number of copies of each locus (i.e.,
+    gene or other meaningful segment of DNA). The copy ratio is the relative, real-valued
+    ratio of the number of copies of each locus to the average ploidy.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Difference between copy number and copy ratio.](Images/gitc_0705.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 7-5\. Difference between copy number and copy ratio.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '[Figure 7-6](#spectral_karyotyping_paints_each_chromo) shows the striking contrast
+    in genomic composition between a normal cell line that has the expected copy number
+    for all chromosomes (left) and a cancer cell line that has suffered multiple major
+    CNAs (right), not to mention a variety of structural alterations. For the normal
+    cell line in this figure (and indeed, most healthy human cells), any given chromsome’s
+    copy number is 2 and its copy ratio is 1\. Meanwhile, in the cancer cell line,
+    there is a lot of variation between chromosomes; for example, it looks like the
+    copy number for chromosome 7 is 5, whereas for chromosome 12 it is 3, and we can’t
+    really guess their copy ratio because the alterations are so extensive that we
+    don’t have a good sense of the average ploidy of this genome.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Spectral karyotyping paints each chromosome pair with a color, showing various
+    chromosomal segments that are amplified or missing (colors in left and right panels
+    are not expected to match).](Images/gitc_0706.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 7-6\. Spectral karyotyping paints each chromosome pair with a color,
+    showing various chromosomal segments that are amplified or missing (colors in
+    left and right panels are not expected to match).
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The good news is that copy-number analysis is less sensitive than short variant
+    analysis to some of the challenges that we enumerated earlier because we don’t
+    care as much about exact sequence. However, it is more sensitive to technical
+    biases that affect the evenness of sequence coverage distribution. The consequence
+    of these two points for the analysis design is that it is less important to have
+    a matched normal available, whereas it is even more important to have a PoN composed
+    of normals that have a closely matching technical profile. Note, however, that
+    the copy-number PoN is completely different from the PoN used for short variant
+    analysis. We go over the specifics in the next section.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Overview of the Tumor-Only Analysis Workflow
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The standard workflow for somatic copy-number analysis involves four main steps
+    ([Figure 7-7](#best_practices_workflow_for_somatic_cop)). First, we collect proportional
+    coverage statistics for the case sample as well as any normals that will be used
+    for the PoN. Setting the case sample aside for a moment, we create a copy-number
+    PoN that captures the amount of systematic skew in coverage observed across the
+    exome or genome. Then, we use that information to normalize the coverage data
+    we collected for the case sample, which eliminates technical noise and reveals
+    actual copy ratio differences in the data. Finally, we run a segmentation algorithm
+    that identifies contiguous segments of sequence that presents the same copy ratio,
+    and emit CNA calls for those segments whose copy ratio diverges significantly
+    from the mean. Optionally, we can produce plots to visualize the data at several
+    stages, which is helpful for interpretation.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Best Practices workflow for somatic copy-number alteration discovery.](Images/gitc_0707.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 7-7\. Best Practices workflow for somatic copy-number alteration discovery.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Again, you’re going to do this work from within the GATK container on your VM,
+    so make sure everything is turned on and you’re in the */home/book/data/somatic*
+    directory. The exercises in this section use the same reference genome and some
+    of the same resource files as the first section, and we’re going to use the same
+    sandbox for writing outputs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Collecting Coverage Counts
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'We count *read depth*, or coverage, over a series of intervals. Here we use
+    exome capture targets because we’re analyzing exomes, but if we were analyzing
+    whole genomes, we would switch to using bins of arbitrary length. For exomes,
+    we take the interval list that corresponds to the capture targets (specific to
+    every manufacturer’s exome prep kit) and first add some padding:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE16]'
+  prefs: []
+  type: TYPE_PRE
+- en: In this command, the `--interval-merging-rule` argument controls whether the
+    GATK engine should merge adjacent intervals for processing. In some contexts,
+    it makes sense to merge them, but in this context, we prefer to keep them separate
+    in order to have more fine-grained resolution, and we’ll merge only intervals
+    that actually overlap.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: If we wanted to generate an intervals list for whole genome data, we would run
+    the same tool but without the targets file, and with the `--bin-length` argument
+    set to the length of bin we want to use (set to 100 bases by default).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'When we have the analysis-ready intervals list, we can run the read count collection
+    tool, which operates by counting how many reads start within each interval. By
+    default, the tool writes data in [HDF5 format](https://oreil.ly/uP_J4), which
+    is handled more efficiently by downstream tools, but here we change the output
+    format to tab-separated values (TSV) because it is easier to peek into:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE17]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The output file includes a header that recapitulates the sequence dictionary,
+    followed by a table of counts for each target:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE18]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Annoyingly, the sequence dictionary for the hg38 reference build is extremely
+    long because of the presence of all the *ALT contigs* (explained in the genomics
+    primer in [Chapter 2](ch02.xhtml#genomics_in_a_nutshell_a_primer_for_new)). So,
+    to peek into our file, it’s better to use `tail` instead of `head`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE19]'
+  prefs: []
+  type: TYPE_PRE
+- en: Ah, that’s more helpful, isn’t it? The first column is the chromosome or contig,
+    the second and third are the start and stop of the target region we’re looking
+    at, and the fourth is the count of reads overlapping the target. [Figure 7-8](#read_counts_in_each_genomic_target_or_b)
+    provides an example of what this looks like visualized.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Read counts in each genomic target or bin form the basis for estimating segmented
+    copy ratio.](Images/gitc_0708.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 7-8\. Read counts in each genomic target or bin form the basis for estimating
+    segmented copy ratio, and each dot is the value for a single target or bin.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Each dot in the figure represents one of the intervals for which we collected
+    coverage, arranged in the order of their position on the genome. The gray and
+    white stripes in the background represent alternating chromosomes, and the dotted
+    lines represent the position of their centromeres. Notice how the dots form a
+    wavy smear because of the huge variability in the amount of coverage present from
+    one to the next. At this point, it’s impossible to identify any CNAs with any
+    kind of confidence.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Creating a Somatic CNA PoN
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: As we discussed in [Chapter 2](ch02.xhtml#genomics_in_a_nutshell_a_primer_for_new),
+    a lot of technical variability affects the sequencing process, and some of it
+    is fairly systematic—some regions will produce more sequence data than others,
+    mainly because of chemistry. We can establish a baseline of what normal variability
+    looks like by using an algorithm called singular value decomposition, which is
+    conceptually similar to principal component analysis and aims to capture systematic
+    noise from a panel of normals that were sequenced and processed the same way.
+    The minimum number of samples in a CNA PoN should be at least 10 normal samples
+    for the tools to work properly, but the Best Practices recommendation is to use
+    40 or more normal samples if possible.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Creating the PoN is a lot of work, so we provide one for you made from 40 samples
+    from the 1000 Genomes Project. Each of the 40 samples was run individually through
+    the `CollectReadCounts` tool, as described earlier (but leaving the default output
+    format set to HDF5; hence, the *.hdf5* extension in the command line, shown in
+    the next code snippet). Then the panel was created by running the command that
+    follows on all the read count files. To be clear, we’re just showing this as an
+    example, so don’t try to run it; it won’t work with the data we’ve provided for
+    the book. for the book; we’re just showing it as an example.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE20]'
+  prefs: []
+  type: TYPE_PRE
+- en: The PoN produced by this command is completely different from the one we created
+    for the short variant section earlier in this chapter. For the short variants
+    pipeline, the PoN was just a kind of VCF file with annotated variant calls. In
+    this case, however, the file produced by aggregating the read count data from
+    the 40 normals is not meaningfully readable by the naked eye.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Applying Denoising
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'With our sample read counts in hand and the PoN ready to go, we have everything
+    we need to run the most important step in this workflow: denoising the case sample
+    read counts:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE21]'
+  prefs: []
+  type: TYPE_PRE
+- en: Even though we’re running only a single command, internally the tool is performing
+    two successive data transformations. First, it standardizes the read counts by
+    the median counts recorded in the PoN, which involves a base-2 log transformation
+    and normalization of the distribution to center around one, to produce *copy ratios*.
+    Then, it applies the denoising algorithm to these standardized copy ratios using
+    the principal components of the PoN.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: You can tune the denoising tool to be more or less aggressive by adjusting the
+    `--number-of-eigensamples` parameter, which affects the resolution of results;
+    that is, how smooth the resulting segments will be. Using a larger number will
+    produce a higher level of denoising but can reduce the sensitivity of the analysis.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Again, the output files are not really human readable, so let’s plot their
+    contents to get a sense of what the data shows at this point:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE22]'
+  prefs: []
+  type: TYPE_PRE
+- en: The resulting plot includes both the standardized copy ratios produced by the
+    first internal step and the final denoised copy ratios ([Figure 7-9](#copy_number_alteration_analysis_plots_s)).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You can use `gsutil` to copy the output plots from your VM to your Google bucket
+    and then view them (or download them) from the GCP console. If you need a refresher
+    on this, see [Chapter 4](ch04.xhtml#first_steps_in_the_cloud). The following is
+    done from your VM (which has the `gsutil` tool installed and configured in [Chapter 4](ch04.xhtml#first_steps_in_the_cloud))
+    rather than the Docker container you’ve run the `gatk` commands in, and uploads
+    to the bucket that you specify (`my-bucket`) in this example:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE23]'
+  prefs: []
+  type: TYPE_PRE
+- en: '![Copy-number alteration analysis plots showing the standardized copy ratios
+    after the first step of denoising (top) and the fully denoised copy ratios after
+    the second round (bottom).](Images/gitc_0709.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 7-9\. Copy-number alteration analysis plots showing the standardized
+    copy ratios after the first step of denoising (top) and the fully denoised copy
+    ratios after the second round (bottom).
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: It can be difficult to see very clearly in the book version of these images,
+    but if you zoom in on the plots you generated yourself, you should be able to
+    see that the range of values in the second-round image is tighter than in the
+    first round, which shows the improvement from one step to the next. In any case,
+    we can agree that these show much better resolution compared to the raw read counts
+    shown in [Figure 7-8](#read_counts_in_each_genomic_target_or_b), and we can already
+    discern some probable CNAs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Performing Segmentation and Call CNAs
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Now that we have our lovingly denoised copy ratios, all we need to do is identify
+    exactly which regions demonstrate evidence of CNA. To do that, we’re going to
+    group neighboring intervals that have similar copy ratios into segments. Then,
+    we should be able to determine which segments have an overall copy ratio that
+    supports the presence of an amplification or deletion relative to the rest.
+  prefs: []
+  type: TYPE_NORMAL
+- en: We do this using the `ModelSegments` tool, which uses a Gaussian-kernel binary-segmentation
+    algorithm to perform multidimensional kernel segmentation.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE24]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'As for the previous plots, the easiest way to view these is to transfer them
+    to your Google bucket and open (or download) them from the GCP console. This command
+    produces multiple files, so the output name we provide is simply the name that
+    we want to give to the new directory that will contain them. Again, the outputs
+    are not particularly user friendly, so we’re going to make some plots to visualize
+    the results. We provide the plotting tool with the denoised copy ratios (from
+    `DenoiseReadCounts`), the segments (from `ModelSegments`), and the reference sequence
+    dictionary:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE25]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[Figure 7-10](#plot_of_segments_modeled_based_on_denoi) shows the segments
+    identified by the `PlotModelSegments` tool. The dots representing targets or bins
+    on alternate segments are colored in either blue and orange, whereas segment medians
+    are drawn in black. Most segments have a copy ratio of approximately 1, which
+    constitutes the baseline. Against that backdrop, we can observe multiple amplifications
+    and deletions of different sizes and different copy ratios. You might notice that
+    most of these don’t correspond to the numbers that you would expect if you had,
+    for example, four copies instead of two for a given segment. That is because some
+    of the CNAs occur in subclonal populations, meaning that only part of the sampled
+    tissue is affected. As a result, the effect is diluted and you might see a copy
+    ratio of 1.8 instead of 2.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Plot of segments modeled based on denoised copy ratios.](Images/gitc_0710.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 7-10\. Plot of segments modeled based on denoised copy ratios.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: More generally, it seems like a lot is going on in this sample; in fact, we
+    can look in the segmentation file in the output directory and see that we’ve predicted
+    235 segments for this sample. This isn’t typical of regular tumor samples, although
+    some can be pretty messed up; what’s going on here is that we’re looking at a
+    sample taken from a cell line. Cancer cell lines are convenient for teaching and
+    testing software because the data can easily be made open access, but biologically
+    they tend to have accumulated very high numbers of alterations. So this represents
+    an extreme situation. On the bright side, most samples that you’ll encounter in
+    the real world are likely to be cleaner (and easier to interpret) than this. So
+    you have something to look forward to!
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'That being said, the software can still help us get a bit more clarity even
+    on a messy sample like this. We can get final CNA calls—that is, a determination
+    of which segments we can consider to have significant evidence of amplification
+    or deletion—by running the last tool in this workflow, as follows:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE26]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'This tool adds a column to the segmented copy-ratio *.cr.seg* file from `ModelSegments`,
+    marking amplifications (`+`), deletions (`-`), and neutral segments (`0`):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE27]'
+  prefs: []
+  type: TYPE_PRE
+- en: And there you have it; this shows you the output of the somatic copy-number
+    workflow. If we look at the full progression, you can see that we went from raw
+    coverage counts all the way to having identified specific regions of deletion
+    or amplification, as illustrated in [Figure 7-11](#full_progression_from_raw_data_to_resul)
+    (using different data and only a subset of chromosomes).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Full progression from raw data to results.](Images/gitc_0711.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 7-11\. Full progression from raw data to results.
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Copy ratio counts in [Figure 7-11](#full_progression_from_raw_data_to_resul)
+    are calculated and processed as shown in previous figures, rotated 90° to the
+    right. The leftmost panel shows raw copy ratio counts calculated per target or
+    genomic bin. The second and third panels show standardized and denoised counts,
+    respectively. The fourth panel shows segmentation and calling results, including
+    one whole chromosome amplification (AMP) and one deletion (DEL). The rightmost
+    panel shows a minor allele fraction calculated using the procedure outlines in
+    the next section.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Ironically, these results don’t include an actual copy number, just the boundaries
+    of each segment, its copy ratio, and the final call. To get the copy number, you
+    will need to do some additional work that is beyond the scope of this chapter.
+    See the [documentation](https://oreil.ly/NXTuz) for more information and next
+    steps.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Additional Analysis Options
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: We’ve just covered the standard workflow that is most commonly used for performing
+    copy-number analysis with GATK tools. This involved collecting coverage counts,
+    using a PoN to apply denoising, and performing segmentation in order to model
+    and finally call copy-number–altered segments on the tumor case sample. However,
+    you can apply two additional options to further beef up the quality of the results.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tumor-Normal pair analysis
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: The Tumor-only workflow gets you decent, usable results for somatic CNA discovery.
+    But if you have a matched normal available, you can gain additional benefits!
+    For one thing, you can run the workflow, as described earlier on the normal sample,
+    which is helpful for understanding the baseline that you’re working with. In many
+    cases, having the matched normal can also help the denoising process.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Feel free to run through the commands on your own. In the final segmentation
+    results, notice the probable CNAs on chromosome 2 and chromosome 6\. This matched
+    normal is itself from a cell line, albeit derived from healthy tissue instead
+    of a tumor. It’s not uncommon to see some background alterations occur even in
+    normal tissue when it’s been propagated as a cell line.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: This concludes the exercises for this chapter, so once again, remember to stop
+    your VM if you’re taking a break before moving on to the next chapter.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Allelic copy ratio analysis
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'So far, we’ve used only read coverage as evidence for CNAs, but we can also
+    include *allelic copy ratio*: the copy ratio for different alleles at sites with
+    heterozygous SNVs. This can reveal interesting things about the heterozygosity
+    of our case sample, which can have important biological consequences—especially
+    when there is a *loss of heterozygosity*.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: We can detect imbalances in the heterozygosity of segments by looking at the
+    allelic counts (i.e., the read counts for different alleles at each site) in the
+    case sample at sites that are commonly variant in the population. For a diploid
+    organism, we expect to see any heterozygous SNV manifest as two different alleles
+    present in equal proportions. Suppose that we have an A/T variant; we expect to
+    see approximately 50% A and 50% T in the sequence reads (give or take some technical
+    variability). We can detect those sites on the fly when we’re counting the reads
+    in the first step of the workflow. Then, we can use those sites as markers; if
+    we look at those sites in the tumor and find that their allelic ratios are significantly
+    skewed, that gives us additional information about the degree of CNA that affects
+    the segments of which these sites are part.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you’re interested in exploring this additional analysis mode, have a look
+    at the [somatic copy-number documentation](https://oreil.ly/NXTuz) on the GATK
+    website.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Wrap-Up and Next Steps
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Well then, between the germline workflow and these two somatic analysis workflows,
+    we’ve already run a lot of genomics commands. So, does that mean we’re ready to
+    run full-scale genomic analyses?
+  prefs: []
+  type: TYPE_NORMAL
+- en: Hah, no. At this point you can run individual tools one by one—which is going
+    to be useful at various stages of your work, especially for initial testing/evaluation
+    as well as troubleshooting failures—but you also know that the variant discovery
+    Best Practices are composed of multiple tasks involving various tools. Trust us,
+    you don’t want to be running each task manually for each sample or set of samples
+    that you need to process. You’re going to want to chain these tasks into scripts
+    that automate the bulk of the work to cut down on the mindless tedium as well
+    as to reduce the chance of human error. So in [Chapter 8](ch08.xhtml#automating_analysis_execution_with_work),
+    we show you how to write workflow scripts using WDL, which automates calling each
+    step in the overall analysis pipeline. Then, we run them using a workflow management
+    system called Cromwell that is equally comfortable running on your laptop, cluster,
+    or cloud platform.
+  prefs: []
+  type: TYPE_NORMAL

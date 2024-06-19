@@ -1,0 +1,618 @@
+- en: Chapter 7\. WebAssembly
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: While the title of this book is *Multithreaded JavaScript*, modern JavaScript
+    runtimes also support WebAssembly. For the unaware, WebAssembly (often abbreviated
+    as WASM) is a binary-encoded instruction format that runs on a stack-based virtual
+    machine. It’s designed with security in mind and runs in a sandbox where the only
+    things it has access to are memory and functions provided by the host environment.
+    The main motivation behind having such a thing in browsers and other JavaScript
+    runtimes is to run the parts of your program that are performance-sensitive in
+    an environment where execution can happen much faster than JavaScript. Another
+    goal is to provide a compile target for typically compiled languages like C, C++,
+    and Rust. This opens the door for developers of those languages to develop for
+    the web.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Generally, the memory used by WebAssembly modules is represented by `ArrayBuffers`,
+    but it can also be represented by `SharedArrayBuffers`. In addition, there are
+    WebAssembly instructions for atomic operations, similar to the `Atomics` object
+    we have in JavaScript. With `SharedArrayBuffers`, atomic operations, and web workers
+    (or `worker_threads` in Node.js), we have enough to do the full suite of multithreaded
+    programming tasks using WebAssembly.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Before we jump into multithreaded WebAssembly, let’s build a “Hello, World!”
+    example and execute it, to find the strengths and limitations of WebAssembly.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Your First WebAssembly
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: While WebAssembly is a binary format, a plain text format exists to represent
+    it in human readable form. This is comparable to how machine code can by represented
+    in a human-readable assembly language. The language for this WebAssembly text
+    format is simply called WebAssembly text format, but the file extension typically
+    used is *.wat*, so it’s common enough to refer to this language as WAT. It uses
+    *S-expressions* as its primary syntactic separator, which is helpful for both
+    parsing and readability. S-expressions, known primarily from the Lisp family of
+    languages, are nested lists delimited by parentheses, with whitespace between
+    each item in the list.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To get a feel for this format, let’s implement a simple addition function in
+    WAT. Create a file called *ch7-wasm-add/add.wat* and add the contents of [Example 7-1](#ex_ch7_add_wat).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 7-1\. *ch7-wasm-add/add.wat*
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](Images/1.png)](#co_webassembly_CO1-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The first line declares a module. Every WAT file begins with this.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](Images/2.png)](#co_webassembly_CO1-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: We declare a function called `$add`, taking in two 32-bit integers and returning
+    another 32-bit integer.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![3](Images/3.png)](#co_webassembly_CO1-3)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is the start of the function body, in which we have three statements. The
+    first two grab the function parameters and put them on the stack one after another.
+    Recall that WebAssembly is stack-based. That means many operations will operate
+    on the first (if unary) or first two (if binary) items on the stack. The third
+    statement is a binary “add” operation on i32 values, so it grabs the top two values
+    from the stack and adds them together, putting the result at the top of the stack.
+    The return value for a function is the value at the top of the stack once it completes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![4](Images/4.png)](#co_webassembly_CO1-4)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: In order to use a function outside the module in the host environment, it needs
+    to be exported. Here we export the `$add` function, giving it the external name
+    `add`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: We can convert this WAT file to WebAssembly binary by using the `wat2wasm` tool
+    from the WebAssembly Binary Toolkit (WABT). This can be done with the following
+    one-liner in the *ch7-wasm-add* directory.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: Now we have our first WebAssembly file! These files aren’t useful outside a
+    host environment, so let’s write a bit of JavaScript to load the WebAssembly and
+    test the `add` function. Add the contents of [Example 7-2](#ex_ch7_add_wat_js)
+    to *ch7-wasm-add/add.js*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 7-2\. *ch7-wasm-add/add.js*
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: Provided you’ve created the *.wasm* file using the preceding `wat2wasm` command,
+    you should be able to run this in the *ch7-wasm-add* directory.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: You can verify from the output that we are, in fact, adding via our WebAssembly
+    module.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Simple mathematical operations on the stack don’t make any use of linear memory
+    or of concepts that have no meaning in WebAssembly, such as strings. Consider
+    strings in C. Effectively, they’re nothing more than a pointer to the start of
+    an array of bytes, terminated by a null byte. We can’t pass whole arrays by value
+    to WebAssembly functions or return them, but we can pass them by reference. This
+    means that to pass a string as an argument, we need to first allocate the bytes
+    in the linear memory and write to them, then pass the index of the first byte
+    to the WebAssembly function. This can get more complex since we then need ways
+    of managing the available space in the linear memory. We basically need `malloc()`
+    and `free()` implementations operating on the linear memory.^([1](ch07.xhtml#idm45995910670680))
+  prefs: []
+  type: TYPE_NORMAL
+- en: Hand-writing WebAssembly in WAT, while clearly possible, isn’t usually the easiest
+    path to being productive and getting performance gains with it. It was designed
+    to be a compile target for higher-level languages, and that’s where it really
+    shines. [“Compiling C Programs to WebAssembly with Emscripten”](#ch_webassembly_sec_compile)
+    explores that in more detail.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Atomic Operations in WebAssembly
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Although a full treatment of every [WebAssembly instruction](https://oreil.ly/PfxJq)
+    would be out of place in this book, it’s worth pointing out the instructions specific
+    to atomic operations on shared memory since they’re key to multithreaded WebAssembly
+    code, whether compiled from another language or hand-written in WAT.
+  prefs: []
+  type: TYPE_NORMAL
+- en: WebAssembly instructions often start with the type. In the case of atomic operations,
+    the type is always `i32` or `i64`, corresponding to 32-bit and 64-bit integers,
+    respectively. All atomic operations have `.atomic.` next in the instruction name.
+    After that, you’ll find the specific instruction name.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s go over some of the atomic operation instructions. We won’t go over exact
+    syntax, but this should give you an idea of the kinds of operations available
+    at the instruction level:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`[i32|i64].atomic.[load|load8_u|load16_u|load32_u]`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `load` family of instructions is equivalent to `Atomics.load()` in JavaScript.
+    Using one of the suffixed instructions allows you to load smaller numbers of bits,
+    extending the result with zeros.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`[i32|i64].atomic.[store|store8|store16|store32]`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `store` family of instructions is equivalent to `Atomics.store()` in JavaScript.
+    Using one of the suffixed instructions wraps the input value to that number of
+    bits and stores those at the index.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`[i32|i64].atomic.[rmw|rmw8|rmw16|rmw32].[add|sub|and|or|xor|xchg|cmpxchg][|_u]`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `rmw` family of instructions all perform read-modify-write operations, equivalent
+    to `add()`, `sub()`, `and()`, `or()`, `xor()`, `exchange()`, and `compareExchange()`
+    from the `Atomics` object in JavaScript, respectively. The operations are suffixed
+    with a `_u` when they zero-extend, and `rmw` can have a suffix corresponding to
+    the number of bits to be read.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The next two operations have a slightly different naming convention:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`memory.atomic.[wait32|wait64]`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: These are equivalent to `Atomics.wait()` in JavaScript, suffixed according to
+    the number of bits they operate on.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`memory.atomic.notify`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is equivalent to `Atomics.notify()` in JavaScript.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'These instructions are enough to perform the same atomic operations in WebAssembly
+    as we can in JavaScript, but there is an additional operation not available in
+    JavaScript:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`atomic.fence`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This instruction takes no arguments and doesn’t return anything. It’s intended
+    to be used by higher-level languages that have ways of guaranteeing ordering of
+    nonatomic accesses to shared memory.
+  prefs: []
+  type: TYPE_NORMAL
+- en: All of these operations are used with the given WebAssembly module’s *linear
+    memory*, which is the sandbox in which it gets to read and write values. When
+    WebAssembly modules are initialized from JavaScript, they can be initialized with
+    a linear memory provided as an option. This can be backed by a `SharedArrayBuffer`
+    to enable usage across threads.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Although it’s certainly possible to use these instructions in WebAssembly,
+    they suffer from the same drawback that the rest of WebAssembly does: it’s incredibly
+    tedious and painstaking to write. Luckily, we can compile higher-level languages
+    down to WebAssembly.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Compiling C Programs to WebAssembly with Emscripten
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Since long before WebAssembly, [Emscripten](https://emscripten.org) has been
+    the go-to way to compile C and C++ programs for use in JavaScript environments.
+    Today, it supports multithreaded C and C++ code using web workers in browsers
+    and `worker_threads` in Node.js.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In fact, a large corpus of existing multithreaded code in the wild can be compiled
+    with Emscripten without issue. In both Node.js and browsers, Emscripten emulates
+    the system calls used by native code compiled to WebAssembly so that programs
+    written in compiled languages can run without many changes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Indeed, the C code we wrote way back in [Chapter 1](ch01.xhtml#ch_intro) can
+    be compiled without any editing! Let’s give that a try now. We’ll use a Docker
+    image to simplify using Emscripten. For other compiler toolchains, we’d want to
+    make sure that the toolchain aligns with the system, but since WebAssembly and
+    JavaScript are both platform-agnostic, we can just use the Docker image wherever
+    Docker is supported.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'First, make sure [Docker is installed](https://docker.com). Then, in your *ch1-c-threads*
+    directory, run the following command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: There are a few things to discuss with this command. We’re running the `emscripten/emsdk`
+    image, with the current directory mounted, running as the current user. Everything
+    after and including `emcc` is the command we’re running inside the container.
+    For the most part, this looks a lot like what we’d do when using `cc` to compile
+    a C program. The main difference is that the output file is a JavaScript file
+    rather than an executable binary. Don’t worry! A *.wasm* file is also generated.
+    The JS file is used as a bridge to any necessary system calls and to set up the
+    threads because those can’t be instantiated in WebAssembly alone.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The other extra argument is `-s PTHREAD_POOL_SIZE=4`. Since `happycoin-threads.c`
+    uses three threads, we allocate them ahead of time here. There are a few ways
+    to handle thread creation in Emscripten, largely due to not blocking on main browser
+    threads. It’s easiest to preallocate here since we know how many threads we’ll
+    need.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Now we can run our WebAssembly version of multithreaded Happycoin. We’ll run
+    the JavaScript file with Node.js. At time of writing, this requires Node.js v16
+    or higher, since that’s what the output of Emscripten supports.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The output should look a bit like the following:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: The output looks the same as our other Happycoin examples from previous chapters,
+    but the wrapper provided by Emscripten also informs us when the threads have exited.
+    You’ll also need to Ctrl+C to exit the program. For extra fun, see if you can
+    figure out what needs changing in order to make the process exit when done, and
+    avoid those `Pthread` messages.
+  prefs: []
+  type: TYPE_NORMAL
+- en: One thing you may notice when comparing against the native or JavaScript versions
+    of Happycoin is timing. It’s clearly faster than the multithreaded JavaScript
+    version, but also a bit slower than the native multithreaded C version. As always,
+    it’s important to take measurements of your application to ensure that you’re
+    getting the right benefits with the right trade-offs.
+  prefs: []
+  type: TYPE_NORMAL
+- en: While the Happycoin example doesn’t make use of any atomic operations, Emscripten
+    supports the full suite of POSIX thread functionality and GNU Compiler Collection
+    (GCC) built-in atomic operation functions. This means a great multitude of C and
+    C++ programs can compile to WebAssembly using Emscripten.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Other WebAssembly Compilers
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Emscripten isn’t the only way to compile code to WebAssembly. Indeed, WebAssembly
+    was designed primarily as a compile target, rather than as a general-purpose language
+    in its own right. There are myriad tools for compiling well-known languages to
+    WebAssembly, and there are even some languages built with WebAssembly as the main
+    target in mind, rather than machine code. Some are listed here, but it’s by no
+    means [exhaustive](https://oreil.ly/wKfBe). You’ll notice a lot of “at time of
+    writing” here, because this space is relatively new and the best ways of creating
+    multithreaded WebAssembly code are still being developed! At least, at time of
+    writing.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Clang/Clang++
+  prefs: []
+  type: TYPE_NORMAL
+- en: The LLVM C-family compilers can target WebAssembly with the `-target wasm32-unknown-unknown`
+    or `-target wasm64-unknown-unknown` options, respectively. This is actually what
+    Emscripten is now based on, in which POSIX threads and atomic operations work
+    as expected. At time of writing, this is some of the best support for multithreaded
+    WebAssembly. While `clang` and `clang++` support WebAssembly output, the recommended
+    approach is to use Emscripten, to get the full suite of platform support in browsers
+    and Node.js.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Rust
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Rust programming language compiler `rustc` supports WebAssembly output.
+    The Rust website is a [great starting point](https://oreil.ly/ibOs3) on how to
+    use `rustc` in this way. To make use of threads, you can use the [`wasm-bindgen-rayon`
+    crate](https://oreil.ly/Pyuv4), which provides a parallelism API implemented using
+    web workers. At time of writing, Rust’s standard library thread support won’t
+    work.
+  prefs: []
+  type: TYPE_NORMAL
+- en: AssemblyScript
+  prefs: []
+  type: TYPE_NORMAL
+- en: The AssemblyScript compiler takes a subset of TypeScript as input, then generates
+    WebAssembly output. While it does not support spawning threads, it does support
+    atomic operations and using `SharedArrayBuffers`, so as long as you handle the
+    threads themselves on the JavaScript side via web workers or `worker_threads`,
+    you can make full use of multithreaded programming in AssemblyScript. We’ll cover
+    it in more depth in the next section.
+  prefs: []
+  type: TYPE_NORMAL
+- en: There are, of course, many more options, with new ones arriving all the time.
+    It’s worth having a look around the web to see if your compiled language of choice
+    can target WebAssembly, and whether or not it supports atomic operations in WebAssembly.
+  prefs: []
+  type: TYPE_NORMAL
+- en: AssemblyScript
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: '[AssemblyScript](https://assemblyscript.org) is a subset of [TypeScript](https://typescriptlang.org)
+    that compiles to WebAssembly. Rather than compiling an existing langauge and providing
+    implementations of existing system APIs, AssemblyScript was designed as a way
+    to produce WebAssembly code with a much more familiar syntax than WAT. A major
+    selling point of AssemblyScript is that many projects use TypeScript already,
+    so adding some AssemblyScript code to take advantage of WebAssembly doesn’t require
+    as much of a context-switch or even learning an entirely different programming
+    language.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'An AssemblyScript module looks a lot like a TypeScript module. If you’re unfamiliar
+    with TypeScript, it can be thought of as ordinary JavaScript, but with some additional
+    syntax to indicate type information. Here is a basic TypeScript module that performs
+    addition:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You’ll notice this looks almost exactly the same as a plain ECMAScript module,
+    with the exception of type information in the form of `: number` after each of
+    the function arguments and identifying the return value’s type. The TypeScript
+    compiler can use these types to check that any code calling this function is passing
+    in the correct types and assuming the correct type on the return value.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: AssemblyScript looks much the same, except instead of using JavaScript’s `number`
+    type, there are built-in types for each of the WebAssembly types. If we wanted
+    to write the same addition module in TypeScript, and assuming 32-bit integers
+    everywhere for types, it would look something like [Example 7-3](#ex_ch7_as_add).
+    Go ahead and add that to a file called *ch7-wasm-add/add.ts*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 7-3\. *ch7-wasm-add/add.ts*
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Since AssemblyScript files are just TypeScript, they use the *.ts* extension
+    just the same. To compile a given AssemblyScript file to WebAssembly, we can use
+    the `asc` command from the `assemblyscript` module. Try running the following
+    command in the *ch7-wasm-add* directory:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: You can try running the WebAssembly code using the same *add.js* file from [Example 7-2](#ex_ch7_add_wat_js).
+    The output should be the same since the code is the same.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you omit the `--binaryFile add.wasm` you’ll get the module as translated
+    into WAT, as shown in [Example 7-4](#ex_ch7_as_add_wat). You’ll see it’s roughly
+    the same as [Example 7-1](#ex_ch7_add_wat).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 7-4\. The WAT rendition of the AssemblyScript `add` function
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: AssemblyScript doesn’t provide the ability to spawn threads, but threads can
+    be spawned in the JavaScript environment, and `SharedArrayBuffers` can be used
+    for the WebAssembly memory. Most importantly, it supports atomic operations via
+    a global `atomics` object, not particularly different from regular JavaScript’s
+    `Atomics`. The main difference is that rather than operating on a `TypedArray`,
+    these functions operate on the linear memory of the WebAssembly module, with a
+    pointer and an optional offset. See the [AssemblyScript documentation](https://oreil.ly/LhTkW)
+    for details.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To see this in action, let’s create one more implementation of our Happycoin
+    example that we’ve been iterating on since [Chapter 1](ch01.xhtml#ch_intro).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Happycoin in AssemblyScript
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Much like previous versions of our Happycoin example, this approach multiplexes
+    the crunching of numbers over several threads and sends the results back. It’s
+    a glimpse of how multithreaded AssemblyScript can work. In a real-world application,
+    you’d want to take advantage of shared memory and atomic operations, but to keep
+    things simple, we’ll stick with just fanning the work out to the threads.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Let’s begin by creating a directory called *ch7-happycoin-as* and switch to
+    that directory. We’ll initialize a new project and add some necessary dependencies
+    as follows:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: The `assemblyscript` package includes the AssemblyScript compiler, and the `assemblyscript/loader`
+    package gives us handy tools for interacting with the built module.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In the `scripts` object in the newly created *package.json*, we’ll add `"build"`
+    and `"start"` properties to simplify the compilation and running of the program:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: The additional `--exportRuntime` parameter gives us some high-level tools for
+    interacting with values from AssemblyScript. We’ll get into that a bit later.
+  prefs: []
+  type: TYPE_NORMAL
+- en: When invoking Node.js in the `"start"` script, we pass the experimental WASI
+    flag. This enables the [WebAssembly System Interface (WASI)](https://wasi.dev)
+    interface, giving WebAssembly access to system-level functionality that would
+    otherwise be inaccessible. We’ll use this from AssemblyScript to generate random
+    numbers. Because it’s experimental at time of writing, we’ll add the `--no-warnings`
+    flag^([2](ch07.xhtml#idm45995910339912)) to suppress the warning we get for using
+    WASI. The experimental status also means the flag may change in the future, so
+    always be sure to consult the Node.js documentation for the version of Node.js
+    you’re running.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Now, let’s write some AssemblyScript! [Example 7-5](#ex_ch7_as_happycoin) contains
+    an AssemblyScript version of the Happycoin algorithm. Go ahead and add it to a
+    file called *happycoin.ts*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 7-5\. *ch7-happycoin-as/happycoin.ts*
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](Images/1.png)](#co_webassembly_CO2-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The `wasi` module is imported here to ensure that the appropriate WASI-enabled
+    globals are loaded.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](Images/2.png)](#co_webassembly_CO2-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: We initialized a `Uint64Array` for our random numbers, but `crypto.getRandomValues()`
+    only works with `Uint8Array`, so we’ll create one of those here as a view on the
+    same buffer. Also, the `TypedArray` constructors in AssemblyScript aren’t overloaded,
+    so instead there’s a static `wrap()` method available to construct new `TypedArray`
+    instances from `ArrayBuffer` instances.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![3](Images/3.png)](#co_webassembly_CO2-3)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This method is the one we enabled WASI for.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If you’re familiar with TypeScript, you might be thinking this file looks very
+    close to just being a TypeScript port of [“Happycoin: Revisited”](ch03.xhtml#sec_happycoin_revisited).
+    You’d be correct! This is one of the major advantages of AssemblyScript. We’re
+    not writing in a brand-new language, and yet we’re writing code that maps very
+    closely to WebAssembly. Note that the return value of the exported function is
+    of type `Array<u64>`. Exported functions in WebAssembly can’t return arrays of
+    any kind, but they can return an index into the module’s memory (a pointer, really),
+    which is exactly what’s happening here. We could deal with this manually, but
+    as we’ll see, the AssemblyScript loader makes it much easier.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Of course, since AssemblyScript doesn’t provide a way of spawning threads on
+    its own, we’ll need to do that from JavaScript. For this example, we’ll use ECMAScript
+    modules to take advantage of top-level `await`, so go ahead and put the contents
+    of [Example 7-6](#ex_ch7_mjs_happycoin) into a file called *happycoin.mjs*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 7-6\. *ch7-happycoin-as/happycoin.mjs*
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE14]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](Images/1.png)](#manual_co_webassembly_CO3-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: This can’t be done without the `--experimental-wasi-unstable-preview1` flag.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](Images/2.png)](#manual_co_webassembly_CO3-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you’re new to ESM, this might look strange. We don’t get the `__filename`
+    variable available to us like we do in CommonJS modules. Instead the `import.meta.url`
+    property gives us the full path as a file URL string. We need to pass that to
+    the `URL` constructor for it to be usable as an input to the `Worker` constructor.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Adapted from [“Happycoin: Revisited”](ch03.xhtml#sec_happycoin_revisited),
+    we’re again checking whether we’re in the main thread or not, and spawning four
+    worker threads from the main thread. In the main thread, we’re expecting only
+    one message on the default `MessagePort`, containing an array of found Happycoins.
+    We simply log those and a count of all of them once all the worker threads have
+    sent the message.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: On the `else` side, in the worker threads, we initialize a WASI instance to
+    pass to the WebAssembly module, and then instantiate the module using `@assemblyscript/loader`,
+    giving us what we need to handle the array return value we get from the `getHappycoins`
+    function. We call the `getHappycoins()` method exported by the module, which gives
+    us a pointer to an array in the WebAssembly linear memory. The `__getArray` function,
+    provided by the loader, converts that pointer into a JavaScript array, which we
+    can then use as normal. We pass that to the main thread for output.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To run this example, run the following two commands. The first will compile
+    the AssemblyScript to WebAssembly, and the second will run it via the JavaScript
+    we just put together:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE15]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'The output will look roughly the same as with previous Happycoin examples.
+    Here is the output from one local run:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE16]'
+  prefs: []
+  type: TYPE_PRE
+- en: As with all of these solutions, it’s important to evaluate the trade-offs made
+    with proper benchmarks. As an exercise, try timing this example against the other
+    Happycoin implementations in this book. Is it faster or slower? Can you figure
+    out why? What improvements can be made?
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([1](ch07.xhtml#idm45995910670680-marker)) In C and other languages without
+    automatic memory management, memory must be allocated for use with allocation
+    functions like `malloc()` and then freed for later allocation with functions like
+    `free()`. Memory management techniques like garbage collection make it easier
+    to write programs in higher-level languages like JavaScript, but they aren’t a
+    built-in feature of WebAssembly.
+  prefs: []
+  type: TYPE_NORMAL
+- en: ^([2](ch07.xhtml#idm45995910339912-marker)) In general, this isn’t a flag you
+    want to have enabled for a production application. Hopefully by the time you read
+    this, WASI support will no longer be experimental. If that’s the case, adjust
+    these arguments accordingly.
+  prefs: []
+  type: TYPE_NORMAL

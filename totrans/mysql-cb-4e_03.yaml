@@ -1,0 +1,2970 @@
+- en: Chapter 3\. MySQL Replication
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 3.0 Introduction
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: MySQL replication provides a way to setup a copy (replica) server of the active
+    (source) database, then automatically continuously update such a copy applying
+    all changes which source server receives.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Replica is useful in many situations, particularly:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Hot Standby
+  prefs: []
+  type: TYPE_NORMAL
+- en: A server, normally idle, which replaces an active one in case of a failure.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Read scale
+  prefs: []
+  type: TYPE_NORMAL
+- en: Multiple servers, replicating from the same source, can process more parallel
+    read requests than a single machine.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Geographical distribution
+  prefs: []
+  type: TYPE_NORMAL
+- en: When application serves users in different regions having database server, located
+    locally can help to retrieve data faster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Analytics server
+  prefs: []
+  type: TYPE_NORMAL
+- en: Complicated analytics queries may take hours to run, set plenty of locks and
+    use a lot of resources. Running them on the replica minimizes impact on other
+    parts of the application.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Backup server
+  prefs: []
+  type: TYPE_NORMAL
+- en: Taking backups from a live database involves high IO resource usage and locking,
+    which is necessary to avoid data inconsistencies between backup and active data
+    set. Taking backups from the dedicated replica reduces impact on production.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Delayed copy
+  prefs: []
+  type: TYPE_NORMAL
+- en: A replica, applying updates with a delay, configured by the `SOURCE_DELAY` (`MASTER_DELAY`)
+    option, allows to rollback human errors, such as removal of an important table.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Historically source server was called a master and replica server was called
+    a slave. Lately it was discovered that terminology master and slave do not correctly
+    reflect how replication works while the words themselves maybe insulting. In the
+    last few years most of the software vendors are performing switch from the old
+    to the new terminology. For MySQL this change started from version 8.0.22 and
+    is still in progress. Not all option names and commands support new syntax. There
+    are also good change that even if your MySQL version fully supports new syntax,
+    you may find legacy terminology on public forums and books, printed earlier. Therefore
+    in this book we use terms source and replica when discuss replication roles. For
+    the commands and variable names that support new syntax we provide both syntaxes
+    first time, the use new syntax. We use legacy syntax if the change is still in
+    progress.
+  prefs: []
+  type: TYPE_NORMAL
+- en: MySQL Replication requires special activities on both servers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Source server stores all updates in binary log files. These files contain encoded
+    update events. Source server writes to a single binary log file at the moment.
+    Once it reaches `max_binlog_size` the binary log is rotated and a new file is
+    created.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The binary log file supports two formats: `STATEMENT` and `ROW`. In the `STATEMENT`
+    format SQL statements are written as they are and then encoded into binary format.
+    In the `ROW` format SQL statements are not recorded. Instead, actual updates to
+    table rows are stored. The `ROW` binary log format is preferred'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: When using binary log format `ROW` it could be useful, when troubleshooting
+    replication errors, to know the actual statement received by the source server.
+    Use option `binlog_rows_query_log_events` to store the information log event with
+    the original query. Such an event is not participating in replication and could
+    be retrieved for informational purposes only.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Replica server continuously requests binary log events from the source server,
+    then stores them in the special files, called relay log files. It has a separate
+    thread, called IO, or connection thread, which is doing only this job. Another
+    thread, or threads, called SQL or applier thread, read events from the relay logs
+    and apply them to the tables.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Each event in the binary log has its own unique identifier: position. Position
+    is unique per file and resets when a new one is created. Replica may use the binary
+    log file name and position as a unique identifier of the event.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: While binary log position uniquely identifies event in a particular file it
+    cannot be used to identify if particular event was applied on the replica or not.
+    To resolve this problem Global Transaction Identifiers (GTIDs) were introduced.
+    These are unique identifiers, assigned to each transaction. They are unique across
+    all the life of a MySQL installation. They also use mechanism to uniquely identify
+    server, therefore are safe to use even if replication is possible from multiple
+    sources.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Replica stores information about source binary log coordinates in the special
+    repository, defined by a variable `master_info_repository`. Such a repository
+    can be stored either in a table or in a file.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This chapter describes how to setup and use MySQL Replication. It covers all
+    typical replication scenarios, including:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Two servers one-way source-replica setup.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Circular replication
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Multi-source replication
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Semisynchronous replication
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Group replication
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 3.1 Configuring the Basic Replication between One Source and One Replica
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to prepare two servers for the replication.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Add configuration option `log-bin` into the source configuration file, specify
+    unique `server_id` for both servers, add options to support GTIDs and/or non-default
+    binary log format and create a user with `REPLICATION SLAVE` privilege on the
+    source.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: First you need to prepare both servers to be able to handle replication events.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'On the source server:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Enable binary log by adding option `log-bin` into configuration file. Changing
+    this option requires restart. Binary log is enabled by default since version 8.0.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Set unique `server_id`. `server_id` is dynamic variable and could be changed
+    without taking the server offline, but we strongly recommend to set it in the
+    configuration file too, so it would not be overridden after restart.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Create a replication user and grant `REPLICATION SLAVE` to it:'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: In MySQL 8.0 default authentication plugin is `caching_sha2_password` which
+    requires TLS connection or the source public key. Therefore, if you want to use
+    this plugin, you need to enable TLS connection for the replica as described in
+    [Recipe 3.14](#nch-replication-replication-ssl) or use option `SOURCE_PUBLIC_KEY_PATH=1`
+    (`GET_MASTER_PUBLIC_KEY=1`) of the *CHANGE REPLICATION SOURCE* (*CHANGE MASTER*)
+    command.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Alternatively you can use authentication plugin, allowing insecure connections.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: On the replica just set unique `server_id`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Since version 8.0 you can use *SET PERSIST* to save dynamically changed variable
+    permanently:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: See [Persisted System Variables in the MySQL User Reference Manual](https://dev.mysql.com/doc/refman/8.0/en/persisted-system-variables.html)
+    for details.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'At this stage you can tune other options, which affect replication safety and
+    performance, particularly:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`binlog_format`'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Binary log format
+  prefs: []
+  type: TYPE_NORMAL
+- en: GTID support
+  prefs: []
+  type: TYPE_NORMAL
+- en: Support for global transaction identifiers
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`replica_parallel_type` (`slave_parallel_type`) and `replica_parallel_workers`
+    ( `slave_parallel_workers`)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Multi-threaded replica support
+  prefs: []
+  type: TYPE_NORMAL
+- en: Binary log on the replica
+  prefs: []
+  type: TYPE_NORMAL
+- en: Define if and how replica will use binary log.
+  prefs: []
+  type: TYPE_NORMAL
+- en: We will cover these options in the following recipes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 3.2 Position-Based Replication in the New Installation Environment
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to setup a replica of the just installed MySQL server, using position-based
+    configuration.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Prepare source and replica servers as described in [Recipe 3.1](#nch-replication-replication-configuration),
+    then obtain current binary log position using *SHOW MASTER STATUS* command on
+    the source server and point the replica to the appropriate position using *CHANGE
+    REPLICATION SOURCE ... source_log_file='BINARY LOG FILE NAME', source_log_pos=POSITION;*
+    (*CHANGE MASTER ... master_log_file='BINARY LOG FILE NAME', master_log_pos=POSITION;*)
+    command.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: For this recipe we assume that you have two freshly installed servers with no
+    user data in them. There is no write activity on any of the servers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'First, prepare them for the replication use as described at [Recipe 3.1](#nch-replication-replication-configuration).
+    Then, on the source, run command *SHOW MASTER STATUS*:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: Field `File` contains name of the current binary log and field `Position` contains
+    current position. Record values of these fields.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'On the replica run [*CHANGE REPLICATION SOURCE* (*CHANGE MASTER*)](https://dev.mysql.com/doc/refman/8.0/en/change-replication-source-to.html)
+    command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'To start replica use command *START REPLICA* (*START SLAVE*):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'To check if replica is running use *SHOW REPLICA STATUS* (*SHOW SLAVE STATUS*):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: Listing above confirms that both IO (connection) and SQL (applier) replica threads
+    are running and replication state is fine. We will discuss full output of the
+    *SHOW REPLICA STATUS* command in [Recipe 3.15](#nch-replication-replication-troubleshooting)
+  prefs: []
+  type: TYPE_NORMAL
+- en: Now you can enable writes on the source server.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 3.3 Setting Up a Position-Based Replica of a MySQL Installation that is Already
+    in Use
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Setting up a replica for the new installed server is different from the case
+    when the future source already has data. In the latter case you need to be especially
+    careful to do not introduce data inconsistency by specifying wrong starting position.
+    In this recipe we provide instructions on how to setup a replica of the MySQL
+    installation in use.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Prepare source and replica servers as described in [Recipe 3.1](#nch-replication-replication-configuration),
+    stop all writes on the source server, back it up, then obtain current binary log
+    position using *SHOW MASTER STATUS* command that will be used for pointing the
+    replica to the appropriate position using *CHANGE REPLICATION SOURCE ... source_log_file='BINARY
+    LOG FILE NAME', source_log_pos=POSITION;* command.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: As in case of installing a new replica, both servers need to be configured for
+    the replication use as described in [Recipe 3.1](#nch-replication-replication-configuration).
+    Before initiating setup you need to ensure that both servers have unique `server_id`
+    and source server has binary logging enabled. You can create replication user
+    at this moment or you can do it before setting up a replica.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If you have a server which was already running for a while and want to set
+    up a replica of it you need to take backup first, restore it on the replica, then
+    point the replica to the source server. Challenge for this setup is to use correct
+    binary log position: if the server is accepting writes while backup is running
+    position consistently changing. As a result command *SHOW MASTER STATUS* will
+    return wrong result unless you stop all writes while taking backup.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Standard backup tools support special options when taking backup of the future
+    source server for a replica to bypass this issue.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '*mysqldump*, described in [Recipe 6.6](ch06.xhtml#nch-tblmgmt-tblmgmt-copy-mysqldump),
+    has the option `--source-data` (`--master-data`). If set to 1 *CHANGE REPLICATION
+    SOURCE* statement with coordinates at the time of the backup start will be written
+    into resulting dump file and executed when the dump is loaded.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'If you want to have replication position in the resulting dump file, but do
+    not want *CHANGE REPLICATION SOURCE* command to be automatically executed, set
+    option `--source-data` to 2: in this case the statement will be written as a comment.
+    You may later execute it manually.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tools, which make online binary backups, such as [Percona XtraBackup](https://www.percona.com/doc/percona-xtrabackup/8.0/index.html)
+    or [MySQL Enterprise Backup](https://dev.mysql.com/doc/mysql-enterprise-backup/8.0/en/),
+    store binary log coordinates in special metadata files. Consult documentation
+    of your backup tool to find out how to safely backup source server.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: There several kinds of backups for MySQL. Tools that perform online backups,
+    do not require you to stop MySQL server. Logical backups result in a file with
+    set of commands, that allow to restore data. Binary backups copy physical database
+    files. Binary backups are usually much faster than logical. Restore of binary
+    backups is dramatically faster if compare with restore of the logical backups.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The simplest and fastest binary backup utility is *cp* that requires MySQL server
+    to be stopped. Online backup tools allows you to copy binary data while server
+    is running and preferable solution for large data sets.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Logical backup solutions, however, are compatible with higher differences between
+    versions and could be used to recover data. They are also handy when you need
+    to migrate small part of data, such as a table or even part of the table.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Once you have a backup restore it on the replica. For *mysqldump* use *mysql*
+    client to load the dump:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: Once backup is restored start replication using *START REPLICA* command.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 3.4 Setting Up GTID-Based Replication
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to setup a replica using global transaction identifiers (GTIDs).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Add options `gtid_mode=ON` and `enforce_gtid_consistency=ON` into both source
+    and replica configuration files, then point the replica to the source server using
+    *CHANGE REPLICATION SOURCE ... SOURCE_AUTO_POSITION=1* command.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Position-based replication is easy to setup, but is error-prone. What if you
+    mix up and specify a position in the future? In this case some transactions will
+    be missed. Or, what will happen if you specify a position in the past? In this
+    case the same transaction will be applied twice. You will end up with duplicated,
+    missed or corrupted rows.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To solve this issue Global Transaction Identifiers, or GTIDs, were introduced
+    to uniquely identify each transaction on the server. GTID consists of two parts:
+    unique ID of the server where this transaction were executed first time and unique
+    ID of the transaction on this server. The source server ID is usually the value
+    of the `server_uuid` global variable and transaction ID is a number, starting
+    from 1.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: Transactions, executed by the server, are stored in GTID sets and their GTIDs
+    are visible in the *SHOW MASTER STATUS* output as well as value of `gtid_executed`
+    variable. The set contains unique ID of the originating server and range of transaction
+    numbers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the example below `467ccf91-0341-11eb-a2ae-0242dc638c6c` is the source server
+    unique ID and `1-299` is a range of transaction numbers, which were executed on
+    this server.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'GTID sets can contain ranges, individual transactions and groups of them, separated
+    by a colon symbol. GTIDs with different source ids are separated by a comma:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: Normally GTIDs are automatically assigned and you do not need to care about
+    their values.
+  prefs: []
+  type: TYPE_NORMAL
+- en: However, in order to use GTIDs you need to add additional preparation steps
+    for your servers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Two configuration options are required to enable GTIDs: `gtid_mode=ON` and
+    `enforce-gtid-consistency=ON`. They must be enabled on both servers before starting
+    replication.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If you are setting up a new replica of a source that is running with GTIDs
+    enabled, just adding these options into the configuration file and restarting
+    the servers is enough. Once done you can enable replication using *CHANGE REPLICATION
+    SOURCE ... SOURCE_AUTO_POSITION=1* command and start it:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'However, if replication was already running using position-based setup you
+    need to perform additional steps:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Stop all updates, making both servers read only:'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: 'Wait until replica catches up with all updates from the source server: values
+    of `File` and `Position` from the *SHOW MASTER STATUS* output on the source server
+    should match values of `Relay_Source_Log_File` and `Exec_Source_Log_Pos` of the
+    *SHOW REPLICA STATUS*, taken on the replica.'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_IND
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Do not rely on the `Seconds_Behind_Source` value, because it is inaccurate.
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: 'For example, in the following output on the source server:'
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: '[PRE14]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: binary log position is 7090\.
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: '[PRE15]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: 'On the replica, instead, position `Read_Source_Log_Pos` that read by the IO
+    thread, is same as on the source server while value position of the latest executed
+    event `Exec_Source_Log_Pos` is 7308: somewhere earlier in the binary log file.
+    Value of `Seconds_Behind_Source` is 0 is normal, because MySQL server can execute
+    thousands of updates per second. Still this does not mean that the replica fully
+    catches up the source server.'
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: 'Once the replica has caught up, stop both servers, enable `gtid_mode=ON` and
+    `enforce-gtid-consistency=ON` options, start them and enable replication:'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: '[PRE16]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: You may omit replication source connection options if they were already known
+    to the replica before you started switching replication from position-based to
+    GTID-based.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: You are not required to enable binary logging on the replica in order to use
+    GTIDs. But if you are going to write to replica outside of the replication its
+    transactions would not have own GTID assigned. GTIDs will be used only for the
+    replicated events.
+  prefs: []
+  type: TYPE_NORMAL
+- en: See Also
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: For additional information about setting up MySQL replication with GTIDs, see
+    [MySQL User Reference Manual](https://dev.mysql.com/doc/refman/8.0/en/replication-gtids-howto.html).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 3.5 Configuring a Binary Log Format
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to use a binary log format that is the most suitable for your application.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Decide which format best suites your needs and set it using configuration option
+    `binlog_format`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Default MySQL binary log format is `ROW` since version 5.7.7\. This is the safest
+    possible format, fitting most applications. It stores encoded table row, modified
+    by the binary log event.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'However, binary log format `ROW` may generate more disk and network traffic
+    than `STATEMENT` format. This happens, because it stores into binary log file
+    two copies of the modified row: before changes and after the changes. If a table
+    has many columns, values for all of them will be logged two times even if only
+    one column was modified.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you want binary log to store only changed column and column which could be
+    used to identify changed rows (normally Primary Key) you can use configuration
+    option `binlog_row_image=minimal`. This will work perfectly if tables on the source
+    server and its replica are identical, but may cause issues if number of columns,
+    their data types or primary key definitions do not match.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To store full row, except `TEXT` or `BLOB` columns which were not changed by
+    the statement and are not required to uniquely identify modified row use option
+    `binlog_row_image=noblob`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If row format still generates too much traffic you may switch it to the `STATEMENT`.
+    In this case statements, modifying rows, will be recorded, then executed by the
+    replica. To use binary log format `STATEMENT` set option `binlog_format=STATEMENT`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`STATEMENT` format is not recommended safe to use, because some statements
+    can produce different updates on different servers, even if data originally was
+    identical. These statements are called as nondeterministic. In order to deal with
+    this downside MySQL has a special binary log format: `MIXED` that normally logs
+    events in the `STATEMENT` format and automatically switches to `ROW` if a statement
+    is nondeterministic.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: If binary log is enabled on replica it should use either the same binary log
+    format as its source server or `MIXED` unless you disabled binary logging of the
+    replicated events using option `log_replica_updates=OFF` (`log_slave_updates=OFF`).
+    This is required, because replica does not convert binary log format and simply
+    copies received events into its own binary log file. If formats do not match replication
+    will stop with an error.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Binary log format can be changed dynamically on the global or session level.
+    To change format on the global level run:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE17]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'To change format on the global level and store it permanently use:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE18]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Note that this will not change binary logging format for the existent connections.
+    To change format on the session level execute:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE19]'
+  prefs: []
+  type: TYPE_PRE
+- en: While format `STATEMENT` usually generates less traffic than `ROW` this is not
+    always the case. For example, complicated statements with long `WHERE` or `IN`
+    clauses that modify just a few rows, generate a bigger binary log event with format
+    `STATEMENT`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Another issue with the `STATEMENT` format is that the replica executes receieved
+    events the same way they were running on the source server. Therefore, if a statement
+    is not effective it will run slow on replica too. For example, statements on large
+    tables which have `WHERE` clause which cannot be resolved using indexes, usually
+    are slow. In this case switching to `ROW` format may improve performance.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Normally `ROW` events use primary key to find the row on the replica that needs
+    to be updated. If a table has no primary key `ROW` format can work extremely slow.
+    Older versions of MySQL even could update wrong row, because of, now fixed, bugs.
+    Auto-generated primary key which is used by the InnoDB storage engine is no help
+    here, because it may generate different values on the source and replica servers
+    for the same row. Therefore it is mandatory to define primary key for tables when
+    use binary log format `ROW`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 3.6 Using Replication Filters
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to replicate only events for specific databases or tables.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use replication filters on the source, replica, or both sides.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: MySQL can filter updates to the specific databases or tables. You can setup
+    such filters on the source server to prevent them from being recorded in the binary
+    log or on the replica server, so replication would not execute them.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Filtering on the source server
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Replication filters can cause data loss if setup incorrectly. Study this recipe
+    very carefully and always test how they work for your setup before deploying on
+    production.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To log only updates to a specific database use configuration option `binlog-do-db=db_name`.
+    There is no corresponding variable for this option, therefore changing binary
+    log filter requires restart. To log updates for two or more specific databases
+    specify option `binlog-do-db` as many times as needed:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE20]'
+  prefs: []
+  type: TYPE_PRE
+- en: Binary log filters behave differently for `ROW` and `STATEMENT` binary log formats.
+    For the statement-based logging only the default database is taken into account.
+    If you are using fully qualified table names, such as `mydatabase.mytable` they
+    will be logged based on the default database value and not on the database part
+    of the update.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Thus, for the configuration file snippet above the following three updates
+    will be logged in the binary log:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE21]'
+  prefs:
+  - PREF_UL
+  type: TYPE_PRE
+- en: '[PRE22]'
+  prefs:
+  - PREF_UL
+  type: TYPE_PRE
+- en: '[PRE23]'
+  prefs:
+  - PREF_UL
+  type: TYPE_PRE
+- en: 'However, this update on the cookbook database would not be logged:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE24]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'When binary log format `ROW` is used the default database is ignored for fully
+    qualified table names. Thus, all these updates will be logged:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE25]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'However, this statement will not be logged:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE26]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'For multiple table updates only updates to tables belonging to databases specified
+    by filters are logged. In the following examples only updates to table `cookbook.limbs`
+    are logged:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE27]'
+  prefs: []
+  type: TYPE_PRE
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: DDL statements, such as `ALTER TABLE` are always replicated in the `STATEMENT`
+    format. Therefore filtering rules for this format applies to them no matter the
+    value of the variable `binlog_format`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you want to log updates to all databases on your server and skip only a few
+    of them use `binlog-ignore-db` filters. Specify filter multiple times to ignore
+    multiple databases.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE28]'
+  prefs: []
+  type: TYPE_PRE
+- en: '`binlog-ignore-db` filters work similarly to `binlog-do-db` filters. In case
+    of `STATEMENT` binary logging they honor default database and ignore it if `ROW`
+    binary log format is used. If you did not specify default database and use `STATEMENT`
+    binary log format all updates will be logged.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you use binary log format `MIXED` filtering rules will be applied depending
+    if the update is stored in the `STATEMENT` or `ROW` format.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To find out which binary log filters are currently in use run *SHOW MASTER
+    STATUS* command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE29]'
+  prefs: []
+  type: TYPE_PRE
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Binary log files are often used not only for the replication, but also for
+    point-in-time recovery (PITR) from failure. In this case filtered updates cannot
+    be restored, because they are not stored anywhere. If you want to use binary logs
+    for PITR and still filter some databases: log everything on the source server
+    and filter on the replica.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Filtering on the replica
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: Replica has more options to filter events. You can filter either specific databases
+    or tables. You can also use wildcards.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Filtering on the database level works in same fashion as on the source server.
+    It is controlled by options `replicate-do-db` and `replicate-ignore-db`. If you
+    want to filter multiple databases specify these option as many times as you need.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To filter specific tables use options `replicate-do-table` and `replicate-ignore-table`.
+    They take fully qualified table name as an argument.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE30]'
+  prefs: []
+  type: TYPE_PRE
+- en: But most flexible and safe syntax for replication filters is `replicate-wild-do-table`
+    and `replicate-wild-ignore-table`. As the name suggests they accept wildcards
+    in the arguments. Wildcard syntax is the same as used for the `LIKE` clause. Refer
+    to [Recipe 7.10](ch07.xhtml#nch-strings-strings-pat-sql) for details on the `LIKE`
+    clause syntax.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Symbol `_` replaces exactly one single character. Thus `replicate-wild-ignore-table=cookbook.standings_`
+    filters tables `cookbook.standings1` and `cookbook.standings2`, but does not filter
+    `cookbook.standings12` and `cookbook.standings`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Symbol `%` replaces zero or more characters. Thus `replicate-wild-do-table=cookbook.movies%`
+    instructs replica to apply updates to tables `cookbook.movies`, `cookbook.movies_actors`
+    and `cookbook.movies_actors_link`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If a table name itself contains a wildcard character which you do not want to
+    replace you need to escape it. Thus option `replicate-wild-ignore-table=cookbook.trip_l_g`
+    will filter tables `cookbook.trip_leg`, `cookbook.trip_log`, but also `cookbook.tripslag`
+    while `replicate-wild-ignore-table=cookbook.trip\_l_g` will only filter updates
+    to tables `cookbook.trip_leg` and `cookbook.trip_log`. Note, if you specify this
+    option on the command line you may need to double escape wildcard characters depending
+    of the `SHELL` version you use.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Table-level fitlers are independent from the default database regardless of
+    the binary log format. Therefore it is safer to use them. If you want to filter
+    all tables in the specific database or databases use wildcards:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE31]'
+  prefs: []
+  type: TYPE_PRE
+- en: However, unlike database filters, `replicate-wild-do-table` and `replicate-wild-ignore-table`
+    cannot filter stored routines or events. If you need to filter them you have to
+    use database-level filters.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Replication filters can be set for the specific replication channel ([Recipe
+    3.10](#nch-replication-replication-multisource)). To specify per-channel filter
+    prefix database, table name or wildcard expression with the channel name, followed
+    by a colon:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE32]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'You can specify replication filters not only via configuration options, but
+    also using *CHANGE REPLICATION FILTER* command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE33]'
+  prefs: []
+  type: TYPE_PRE
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: You need to stop replication using *STOP REPLICA* (*STOP SLAVE*) command each
+    time when change replication parameters.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To find out which replication filters are currently applied use *SHOW REPLICA
+    STATUS\G* command or query tables `replication_applier_filters` and `replication_applier_global_filters`
+    in Performance Schema.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE34]'
+  prefs: []
+  type: TYPE_PRE
+- en: See Also
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: For additional information about replication filters, see [How Servers Evaluate
+    Replication Filtering Rules](https://dev.mysql.com/doc/refman/8.0/en/replication-rules.html).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 3.7 Rewriting a Database on the Replica
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to replicate to a database on replica that has different name from
+    the one used on the source server.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use option `replicate-rewrite-db` on the replica server.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: MySQL allows rewriting database name on the fly if use replication filter `replicate-rewrite-db`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You can set such a filter in the configuration file, command line:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE35]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'or via *CHANGE REPLICATION FILTER* command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE36]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Or, for the multiple-channel replica:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE37]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'or via *CHANGE REPLICATION FILTER* command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE38]'
+  prefs: []
+  type: TYPE_PRE
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Mind double brackets for the filter value and quotes for the channel name.
+  prefs: []
+  type: TYPE_NORMAL
+- en: MySQL does not support `RENAME DATABASE` operation. Therefore to rename the
+    database you need to create database with the different name first, then restore
+    data of the original database into this new database.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE39]'
+  prefs: []
+  type: TYPE_PRE
+- en: You need to take dump with the command *mysqldump* of the single database. If
+    you are dumping with option `--databases` also specify option `--no-create-db`,
+    so resulting file would not contain *CREATE DATABASE* statement.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 3.8 Using Multithreaded Replica
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Replica is installed on better hardware than the source, network connection
+    between servers is good, but replication lag is increasing.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use multiple replication applier threads.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: MySQL server is multi-threaded. It applies incoming updates in highly concurrent
+    manner. By default it uses all hardware CPU cores when processing application
+    requests. However, replica by default uses single thread to apply incoming events
+    from the source server. As a result it uses less resources to process replicated
+    events and may delay even on decent hardware.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To resolve this issue use multiple applier threads. To do so set variable `replica_parallel_workers`
+    to a value, greater than 1\. This specifies number of parallel threads that replica
+    will use to apply events. It makes sense to set value of this variable up to number
+    of virtual CPU cores. Variable has no immediate effect: you have to restart replication
+    to apply the change.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE40]'
+  prefs: []
+  type: TYPE_PRE
+- en: Not all replication events can be applied in parallel. What if the binary log
+    contains two statements, updating the same row?
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE41]'
+  prefs: []
+  type: TYPE_PRE
+- en: Depending on the order of events table limbs will have either eitght or ten
+    arms for the squid. If these two statements are executed in different order on
+    the source and replica they will end up with different data.
+  prefs: []
+  type: TYPE_NORMAL
+- en: MySQL uses one of special algorithms for dependency tracking. Current algorithm
+    is set by variables `replica_parallel_type` on the replica and `binlog_transaction_dependency_tracking`
+    on the source.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Default value of the `replica_parallel_type` variable was `DATABASE` before
+    8.0.27 and is `LOGICAL_CLOCK` since this version. With this value, updates belonging
+    to different databases can be applied in parallel while updates to the same database
+    are applied sequentially. This value does not correlate with `binlog_transaction_dependency_tracking`
+    on the source.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Parallelization on the database level does not perform much better for setups
+    which update less databases than number of CPU cores on the replica. To resolve
+    this issue `replica_parallel_type=LOGICAL_CLOCK` has been introduced. For this
+    type, transactions belonging to the same binary log group commit on the source
+    are applied in parallel.
+  prefs: []
+  type: TYPE_NORMAL
+- en: After changing variable `replica_parallel_type` you need to restart the replica.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Value of variable `binlog_transaction_dependency_tracking` on the **source**
+    server defines which transactions belong to the same commit group. Default is
+    `COMMIT_ORDER` which is generated from the source’s timestamps. With this value
+    transactions, committed nearly at the same time on the source server, will be
+    executed in parallel on replica. This mode works perfectly if the source actively
+    executes many small transactions. However, if the source server does not commit
+    often it can happen that replica will execute sequentially even those transactions
+    that cannot interfer with each other and practically executed on the source in
+    parallel, just were committed in different times.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To resolve this issue `binlog_transaction_dependency_tracking` modes `WRITESET`
+    and `WRITESET_SESSION` were introduced. In these modes MySQL decides if transactions
+    are depend on each other using hashing algorithm, specified by variable `transaction_write_set_extraction`
+    and can be any of `XXHASH64`(default) or `MURMUR32`. This means that if transactions
+    modify set of rows, independent from each other, they could be executed in parallel,
+    no matter how much time passed between commits on each of them.
+  prefs: []
+  type: TYPE_NORMAL
+- en: With `binlog_transaction_dependency_tracking` mode, set to `WRITESET` even transactions
+    originally executed within the same session could be applied in parallel. This
+    may cause issues when replica sees changes in different order than the source
+    in some periods of time. It maybe acceptable or not depending on your application
+    needs. To avoid such a situation you may enable option `replica_preserve_commit_order`
+    (`slave_preserve_commit_order`) that instructs replica to apply binary log events
+    in the same order as they were originally executed on the source server. Another
+    solutions is to set `binlog_transaction_dependency_tracking` to `WRITESET_SESSION`.
+    This mode ensures that transactions originated from the same session are never
+    applied in parallel.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Variable `binlog_transaction_dependency_tracking` is dynamic and you can modify
+    it without stopping the server. You can also set it on the session level for the
+    specific session only.
+  prefs: []
+  type: TYPE_NORMAL
+- en: See Also
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: For additional information about multithreaded replica, see [Improving the Parallel
+    Applier with Writeset-based Dependency Tracking](https://mysqlhighavailability.com/improving-the-parallel-applier-with-writeset-based-dependency-tracking/).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 3.9 Setting Up Circular Replication
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to setup a chain of servers, which replicate from each other.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Make each server in the chain a source and a replica of its peers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Sometimes you may need to write to several MySQL servers and want updates to
+    be visible on each of them. With MySQL replication this is possible. It supports
+    such popular setups as two-server, a chain of servers (`A -> B -> C -> D -> ...`
+    , circular, [star](https://en.wikipedia.org/wiki/Star_network) as well as any
+    creative setup you can imagine. For our example of the circular replication you
+    just need to setup every server as a source and replica of each other.
+  prefs: []
+  type: TYPE_NORMAL
+- en: You need to be very careful when use such a replication. Because updates are
+    incoming from any server they can conflict with each other.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Imagine two nodes insert a row with `id=42` at the same time. First, each node
+    inserts a row, then recieves exactly same event from the binary log. Replication
+    will stop with duplicate key error.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If then you try to delete a row with `id=42` on both nodes you will receive
+    an error again! Because at the time when `DELETE` statement will be received by
+    the replication channel row already will be deleted.
+  prefs: []
+  type: TYPE_NORMAL
+- en: But the worst can happen if you update a row with same `ID`. Imagine if `node1`
+    sets value to `42` and `node2` sets value to `25`. After replication events are
+    applied `node1` will have a row with value `25` and `node2` with value `42`. Different
+    from what they initally had after local update!
+  prefs: []
+  type: TYPE_NORMAL
+- en: Still there can be very valid reasons to use circular replication. For example,
+    you may want to use one of nodes mostly for purposes of one application and another
+    one for another application. You can have options and hardware, most suitable
+    for both. Or you may have servers in different geographical locations (e.g. countries)
+    and want to store local data closer to users. Or you can use your servers mostly
+    for reads, but still need to update them. And, finally, you may setup a hot standby
+    server which technically allows writes, but practically receives them only when
+    the main source server dies.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In this recipe we will discuss how to setup a chain of three servers. You can
+    modify this recipe for two or more servers. Then we will discuss safety considerations,
+    required to use replication chains.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Setting up circle replication of three servers
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: Prepare servers to use in the circular replication
+  prefs: []
+  type: TYPE_NORMAL
+- en: Follow instructions in [Recipe 3.1](#nch-replication-replication-configuration)
+    for the source server
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Make sure option `log_replica_updates` is enabled. Otherwise, if your replication
+    chain includes more than two servers updates would apply only on the neighboring
+    ones.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Ensure that option `replicate-same-server-id` is disabled. Otherwise you may
+    end up in a situation when the same update will be applying in loops forever.
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Point nodes to each other
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Run on each server *CHANGE REPLICATION SOURCE* command as described in [Recipe
+    3.2](#nch-replication-replication-position-new) or in [Recipe 3.4](#nch-replication-replication-gtid).
+    Specify correct connection values. For example, if you want to have a circle of
+    servers `hostA -> hostB -> hostC -> hostA`, you need to point `hostB` to `hostA`,
+    `hostA` to `hostC`, and `hostC` to `hostB`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE42]'
+  prefs: []
+  type: TYPE_PRE
+- en: Start replication
+  prefs: []
+  type: TYPE_NORMAL
+- en: Start replication using *START REPLICA* command.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Safety considerations when using replication chains
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: When writing to multiple servers, replicating to each other, you need to logically
+    separate objects to which you are going to write. You can do it on different levels.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Business Logic
+  prefs: []
+  type: TYPE_NORMAL
+- en: Make sure at the application level that you do not update same rows on multiple
+    servers at the same time.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Server
+  prefs: []
+  type: TYPE_NORMAL
+- en: Write to only one server at a time. This is good solution for creating a Hot
+    Standby servers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Databases and Tables
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In your applicaiton: assign specific set of tables to each server. For example,
+    write only to tables `movies`, `movies_actors`, `movies_actors_link` on the `nodeA`;
+    to tables `trip_leg` and `trip_log` on the `nodeB` and to tables `weatherdata`
+    and `weekday` on the `nodeC`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Rows
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you still need to write to the same table on all the servers separate rows
+    which each node can update. If you use integer primary key with `AUTO_INCREMENT`
+    option you can do it by setting option `auto_increment_increment` to the number
+    of the servers and setting `auto_increment_offset` to number of the server in
+    chain, starting from one. For example, on our three-servers setup set `auto_increment_increment`
+    to 3 and `auto_increment_offset` to 1 on the `nodeA`, to 2 on the `nodeB` and
+    to 3 on the `nodeC`. We discuss how to tune `auto_increment_increment` and `auto_increment_offset`
+    in [Recipe 15.14](ch15.xhtml#nch-sequences-seq-increment_increment)
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you do not use `AUTO_INCREMENT` you need to create a rule at the application
+    level, so identifier will follow its own unique pattern on the each node.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 3.10 Using Multisource Replication
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want a replica to apply events from two or more source servers that are
+    independent from each other.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Create multiple replication channels by running command *CHANGE REPLICATION
+    SOURCE ... FOR CHANNEL ‘my source’;* for each of source servers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You may want to replicate from multiple servers to one. For example, if separate
+    source servers are updated by different applications and you want to use replica
+    for backups or for analytics. To achieve this you need to use multi-source replica.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Prepare servers for the replication
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Prepare source and replica servers as described in [Recipe 3.1](#nch-replication-replication-configuration).
+    For the replica server add additional step: configure `master_info_repository`
+    and `relay_log_info_repository` to use tables:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE43]'
+  prefs: []
+  type: TYPE_PRE
+- en: Backup data on the source servers
+  prefs: []
+  type: TYPE_NORMAL
+- en: Make full backup or backup only databases which you want to replicate. E.g.,
+    if you want to replicate database `cookbook` from one server and database `production`
+    from the another one backup only these databases.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you are going to use position-based replication use *mysqldump* with option
+    `--source-data=2` which instructs the tool to log `CHANGE REPLICATION SOURCE`
+    command, but comment it out.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE44]'
+  prefs: []
+  type: TYPE_PRE
+- en: For the GTID-based replication use option `--set-gtid-purged=COMMENTED` instead.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE45]'
+  prefs: []
+  type: TYPE_PRE
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: You can use position-based and GTID-based replication for different channels.
+    You can use different binary log formats on the source servers as well but in
+    this case you need to setbinary log format on the replica to `MIXED`, so it is
+    able to store updates in any format.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Restore data on the replica
+  prefs: []
+  type: TYPE_NORMAL
+- en: Restore data, collected from the source servers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE46]'
+  prefs: []
+  type: TYPE_PRE
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Ensure data on source servers do not have databases with the same name. If they
+    have you need to rename one of the databases and use `replicate-rewrite-db` filter,
+    which will rewrite database name while applying replication events. See [Recipe
+    3.7](#nch-replication-replication-db-rewrite) for details.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Configure replication channels
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'For the position-based replication locate in the dump file `CHANGE REPLICATION
+    SOURCE` command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE47]'
+  prefs: []
+  type: TYPE_PRE
+- en: and use resulting coordinates to setup replication. Use `FOR CHANNEL` clause
+    of the `CHANGE REPLICATION SOURCE` command to specify which channel to use.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE48]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'For the GTID-based replication first locate `SET @@GLOBAL.GTID_PURGED` statement:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE49]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Do this for all channels which will use GTID-based replication:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE50]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Then combine them into single set: `''9113f6b1-0751-11eb-9e7d-0242dc638c6c:1-385,910c760a-0751-11eb-9da8-0242dc638c6c:1-385''`,
+    run *RESET MASTER* to reset GTID execution history and set `GTID_PURGED` to the
+    set you just compiled:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE51]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Then use `CHANGE REPLICATION SOURCE` command to setup new channel:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE52]'
+  prefs: []
+  type: TYPE_PRE
+- en: Start replication
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Start replication using *START REPLICA* command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE53]'
+  prefs: []
+  type: TYPE_PRE
+- en: Confirm replication is running
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Run *SHOW REPLICA STATUS* and check records for all channels:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE54]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Or query Performance Schema:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE55]'
+  prefs: []
+  type: TYPE_PRE
+- en: 3.11 Using a Semisynchronous Replication Plugin
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to ensure that at least one replica has the update before the client
+    recieves success for the *COMMIT* operation.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use semisynchronous replication plugin.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: MySQL replication is asynchronous. This means that the source server can accept
+    writes very fast. All it needs is to store data in the tables and write information
+    about changes into binary log file. However, it does not have any idea if any
+    of replicas recieved updates and, if recieved, applied them.
+  prefs: []
+  type: TYPE_NORMAL
+- en: We cannot guarantee if the asynchronous replica applies updates, but we can
+    set it up to be sure that updates are received and stored in the relay log file.
+    This does not guarantee that the update will be applied or, if applied, it will
+    result in the same values as on the source server, but guarantees that at least
+    two servers will have record of the update which could be applied, say, in case
+    of a disaster recovery. To achieve this use semisynchronous replication plugin.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The semisynchronous replication plugin should be installed on both source and
+    replica server.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'On the source server run:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE56]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'On the replica run:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE57]'
+  prefs: []
+  type: TYPE_PRE
+- en: Once installed, you can enable semisynchronous replication. On the source set
+    global variable `rpl_semi_sync_source_enabled` to 1\. On the replica use variable
+    `rpl_semi_sync_replica_enabled`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Semiynchronous replication works only with the default replication channel.
+    You cannot use it together with multi-source replication.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You can control semisynchronous replication behavior with help of variables,
+    as seen in [Table 3-1](#semisync_variables):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 3-1\. Variables, controlling behavior of the semisynchronous replication
+    plugin
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Variable | What it controls | Default value |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `rpl_semi_sync_source_timeout` | How many milliseconds to wait for response
+    from the replica. If this value is exceeded, replication silently converts to
+    the asynchronous. | 10000 |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `rpl_semi_sync_source_wait_for_replica_count` | From which number of replicas
+    the source server need to receive acknowlegement before committing transaction.
+    | 1 |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `rpl_semi_sync_source_wait_no_replica` | What will happen if number of connected
+    replicas fail below `rpl_semi_sync_source_wait_for_replica_count`. As long as
+    these servers later reconnect and acknowledge the transaction, semisynchronous
+    remains functional. If this variable is `OFF`, replication is converted to asynchronous
+    as soon as number of replicas drops below `rpl_semi_sync_source_wait_for_replica_count`
+    | ON |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `rpl_semi_sync_source_wait_point` | At which moment to expect acknowledgement
+    from the replica that it recieved transaction. This variable supports two possible
+    values. In case of `AFTER_SYNC` the source writes each transaction into the binary
+    log, then syncs it to the disk. The source waits acknowledgement from the replica
+    about recieved changes, then commits the transaction. In casel of `AFTER_COMMIT`
+    the source commits the transaction, then waits acknowledgement from the replica
+    and upon success returns to the client. | `AFTER_SYNC` |'
+  prefs: []
+  type: TYPE_TB
+- en: To find out status of the semisynchronous replication use variables `Rpl_semi_sync_*`.
+    Source server has plenty of them.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE58]'
+  prefs: []
+  type: TYPE_PRE
+- en: The most improtant is `Rpl_semi_sync_source_clients` which shows if the semisynchronous
+    is currently in use and how many semisynchronous replicas are connected. In case
+    if `Rpl_semi_sync_source_clients` is zero, no semisynchronous replica is connected
+    and asynchronous replication is used.
+  prefs: []
+  type: TYPE_NORMAL
+- en: On the replica server only variable `Rpl_semi_sync_replica_status` (`Rpl_semi_sync_slave_status`)
+    is available and can have values either `ON` or `OFF`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'If no replica accepts the write in `rpl_semi_sync_source_timeout` milliseconds,
+    replication will switch to the asynchronous without any message or a warning for
+    the client. Only way to figure out that the replication mode switched to asynchronous
+    is to examine value of the variable `Rpl_semi_sync_source_clients` or to check
+    error log file for messages like:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE59]'
+  prefs: []
+  type: TYPE_PRE
+- en: We discuss error log file at [Recipe 23.2](ch23.xhtml#nch-monitoring-monitoring-sources)
+  prefs: []
+  type: TYPE_NORMAL
+- en: 3.12 Using Group Replication
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to apply updates either on all the nodes or nowhere.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use Group Replication.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Starting from version 5.7.17 MySQL supports fully synchronous replication with
+    help of the Group Replication plugin. If the plugin is in use, MySQL servers,
+    called nodes, create a group that commits a transaction together or, if one of
+    members fails to apply transaction, rolls it back. This way the update is either
+    replicated to all group members or nowhere. High availability is ensured.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You can have up to nine servers in the group. More than nine is not supported.
+    There is a very good reason for this limitation: higher number of servers implies
+    higher replication delay. In case of synchronous replication, all updates are
+    applied to all the nodes before transaction completes. Each update transferred
+    to each node, waits when it is applied and only then commits. Thus replication
+    delay depends on the speed of the slowest member and network transfer rate.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: While it is technically possible to have less than three servers in the Group
+    Replication setup, smaller number does not provide proper high availability. This
+    is because [Paxos](https://en.wikipedia.org/wiki/Paxos_(computer_science)) algorithm,
+    used by the [Group Communication Engine](https://dev.mysql.com/doc/refman/8.0/en/group-replication-plugin-architecture.html)
+    requires `2F + 1` nodes to create a quorum where `F` is any natural number. In
+    other words, in case of a disaster, the number of active nodes should be greater
+    than the number of disconnected nodes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Group Replication has limitations. First, and the most important one, it supports
+    only storage engine InnoDB. You need to disable other storage engines before enabling
+    the plugin. Each replicated table must have primary key. You should put servers
+    into the local network. While having Group Replication across Internet is possible,
+    it may lead to longer time for applying transactions and disconnecting nodes from
+    the group due to network timeouts. Statements *LOCK TABLE* and *GET_LOCK* are
+    not taken into account for the certification process that ensures if the transaction
+    should be applied or rolled back on all nodes, that means they are local to the
+    node and error prone. You may find full list of limitations in the [Group Replication
+    Limitations](https://dev.mysql.com/doc/refman/8.0/en/group-replication-limitations.html)
+    user reference manual.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To enable Group Replication you need to prepare all the participating servers
+    as described in [Recipe 3.1](#nch-replication-replication-configuration) as they
+    are going to act as both source and replica, and perform additional preparations.
+    Do not start repl
+  prefs: []
+  type: TYPE_NORMAL
+- en: Prepare configuration file
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: '[PRE60]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: Start servers. Do not enable replication yet.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Choose a node which will be the first node in the group.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Create replication user only on the first member as described in [Recipe 3.1](#nch-replication-replication-configuration)
+    and additionally grant `BACKUP_ADMIN` to it.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: '[PRE61]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: You do not need to create replication user on other group members, because *CREATE
+    USER* statement will be replicated.
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: 'Setup replication on the first member to use this user:'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: '[PRE62]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: Channel name `group_replication_recovery` is the special built-in name of the
+    Group Replication channel.
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_IND
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: If you do not want replication credentials to be stored as plain text in the
+    replication repository skip this step and provide credentials later when run *START
+    GROUP_REPLICATION*. See also [Recipe 3.13](#nch-replication-replication-security)
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: Bootstrap the node.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: '[PRE63]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: Check Group Replication status by selecting from `performance_schema.replication_group_members`.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: '[PRE64]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: And wait when the first member state becames `ONLINE`.
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: Start replication on the second and the third nodes.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: '[PRE65]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: 'Once you confirm that all members are in state `ONLINE` you can use Group Replication.
+    Query table `performance_schema.replication_group_members` to get this information.
+    Healthy setup will output something like this:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE66]'
+  prefs: []
+  type: TYPE_PRE
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Command *SHOW REPLICA STATUS* does not work with Group Replication.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you want to start Group Replication with existent data restore it on the
+    first node before bootstraping it. Data will be copied when other nodes join the
+    group.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Finally, enable option `group_replication_start_on_boot=on` in the node configuration
+    files, so replication would be enabled after the node restart.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'In this recipe we started Group Replication in the single-primary mode. This
+    mode allows writes only on one member of the group. This is the safest and recommended
+    option. However, if you want to write on multiple nodes, you may switch to multi-primary
+    node by using function *group_replication_switch_to_multi_primary_mode*:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE67]'
+  prefs: []
+  type: TYPE_PRE
+- en: For more details check [Changing a Group’s Mode User Manual](https://dev.mysql.com/doc/refman/8.0/en/group-replication-changing-group-mode.html).
+  prefs: []
+  type: TYPE_NORMAL
+- en: See Also
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: For additional information about group replication, see [Group Replication in
+    the User Reference Manual](https://dev.mysql.com/doc/refman/8.0/en/group-replication.html).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 3.13 Storing Replication Credentials Securely
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: By default replication credentials are visible in the replication info repository
+    if specified as part of *CHANGE REPLICATION SOURCE* command. You want to hide
+    them from the occasional access by not authorized users.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use options `USER` and `PASSWORD` of the *START REPLICA* command.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: When you specify replication user credentials using *CHANGE REPLICATION SOURCE*
+    command they are stored in plain text, unencrypted, regardless of the `master_info_repository`
+    option.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Thus, if `master_info_repository=''TABLE''`, which is default since version
+    8.0, any user with read access to the `mysql` database can query table `slave_master_info`
+    and read the password:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE68]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Or, if `master_info_repository=''FILE''`, any operating system user who can
+    access the file, by default located in the MySQL data directory, can get replication
+    credentials:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE69]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'If this is not desirable behavior you may specify replication credentials as
+    part of the *START REPLICA* or *START GROUP_REPLICATION* command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE70]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'However, if you previously specified replication credentials as part of the
+    *CHANGE MASTER* command, they will remain visible in the master info repository.
+    To clear previously entered user and password run *CHANGE MASTER* command with
+    empty arguments for `MASTER_USER` and `MASTER_PASSWORD`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE71]'
+  prefs: []
+  type: TYPE_PRE
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Once you cleared replication credentials from the spurce info repository they
+    are not stored anywhere and you will need to provide them each time when restart
+    replication.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 3.14 Using TLS (SSL) for Replication
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to transfer data between source and replica securely.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Setup TLS ([Transport Layer Security](https://en.wikipedia.org/wiki/Transport_Layer_Security))
+    connections for the replication channel.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Connection between source and replica servers is technically similar to any
+    other client connections to the MySQL server. Therefore encrypting it via TLS
+    requires preparations, similar to encrypting client connections as described in
+    [Recipe 24.10](ch24.xhtml#nch-security-security-ssl).
+  prefs: []
+  type: TYPE_NORMAL
+- en: To create encrypted replication setup follow these steps.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Obtain or create TLS keys and certificates as described at [Recipe 24.10](ch24.xhtml#nch-security-security-ssl).
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'Ensure that the source server has TLS configuration parameters under [mysqld]
+    section:'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_IND
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: While MySQL uses modern safer TLS protocol in the latest versions its configuration
+    options still use abbreviation SSL. MySQL User Reference Manual also often refers
+    TLS as SSL.
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: '[PRE72]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: 'You may check if TLS enabled if check value of the system variable `have_ssl`:'
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: '[PRE73]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: 'If insecure replication is running, stop the replica IO thread:'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: '[PRE74]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: 'On the replica server put paths to TLS client key and certificate under `[client]`
+    of the configuration file:'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: '[PRE75]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: 'and specify option `SOURCE_SSL=1` for the *CHANGE REPLICATION SOURCE* command:'
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: '[PRE76]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: 'Alternatively you can specify paths to the client key and certificate as part
+    of the *CHANGE REPLICATION SOURCE* command:'
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: '[PRE77]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: Note
+  prefs:
+  - PREF_IND
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: We intentionally omitted other parameters of the *CHANGE REPLICATION SOURCE*
+    command, such as `SOURCE_HOST` for brevity. But you need to use them as described
+    in [Recipe 3.2](#nch-replication-replication-position-new) or [Recipe 3.4](#nch-replication-replication-gtid)
+  prefs:
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: 'Start replication:'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: '[PRE78]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: '*CHANGE REPLICATION SOURCE* command supports other TLS modifiers, compatible
+    with regular client connection encryption options. For example, you can specify
+    a gipher to use with clause `SOURCE_SSL_CIPHER` or enforce source server certificate
+    verification with clause `SOURCE_SSL_VERIFY_SERVER_CERT`.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: See Also
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: For additional information about securing connections between the source and
+    replica servers, see [Setting Up Replication to Use Encrypted Connections](https://dev.mysql.com/doc/refman/8.0/en/replication-solutions-encrypted-connections.html).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 3.15 Replication Troubleshooting
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Replication is not working and you want to fix it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use *SHOW REPLICA STATUS* command, query replication tables in Performance Schema,
+    and check the error log file to undertstand why the replication failed, then fix
+    it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Replication is managed by two kinds of threads: IO and SQL (or connection and
+    applier). IO, or connection, thread is responsible for connecting to the source
+    server, retrieving updates and storing them in the relay log file. There is always
+    one IO thread per replication channel. SQL, or applier, thread reads data from
+    the relay log file and applies changes to the tables. One replication channel
+    may have multiple SQL threads. Connection and applier threads are totally independent
+    and their errors are reported by different replication diagnostic instruments.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'There are two main instruments to diagnose replication errors: *SHOW REPLICA
+    STATUS* command and replication tables in Performance Schema. *SHOW REPLICA STATUS*
+    existed since very beginning while replication tables in the Performance Schema
+    were added in version 5.7\. You will get very similar information by using these
+    two instruments and which to use depends on your preferences. In our opinion *SHOW
+    REPLICA STATUS* is good for manual review in the command line while it is much
+    easier to write monitoring alerts, querying Performance Schema rather than parse
+    *SHOW REPLICA STATUS* output.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: SHOW REPLICA STATUS
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: '*SHOW REPLICA STATUS* contains all the information about IO and SQL threads
+    configuration, status and errors. All data is printed in the single row. However,
+    this row is formatted with spaces and newlines. You may examine it comfortably
+    by using `\G` modifier of the *mysql* client. For multi-source replica *SHOW REPLICA
+    STATUS* prints information about each channel in the separate row.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE79]'
+  prefs: []
+  type: TYPE_PRE
+- en: We intentionally skipped part of the output for brevity. We will not describe
+    each field, but only those required for handling stopped replication (see [Table 3-2](#nch-replication-replication-troubleshooting-show_slave_status-details)).
+    If you are curious what other fields mean consult [SHOW REPLICA STATUS Statement](https://dev.mysql.com/doc/refman/8.0/en/show-replica-status.html)
+    User Reference Manual.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 3-2\. Meaning of fields of the *SHOW REPLICA STATUS*, required to understand
+    and fix an error
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Field | Description | Subsystem |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `Replica_IO_State` (`Slave_IO_State`) | Status of the IO thread. Contains
+    information on what the connection thread is doing when running, empty if IO thread
+    is stopped and `Connecting` if connection is not yet established. | IO thread
+    status |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `Source_Host` (`Master_Host`) | Host of the source server. | IO thread configuration
+    |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `Source_User` (`Master_User`) | Replication user. | IO thread configuration
+    |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `Source_Port` (`Master_Port`) | Port of the source server | IO thread configuration
+    |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `Source_Log_File` (`Master_Log_File`) | Binary log on the source server from
+    which IO thread is currently reading. | IO thread status |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `Read_Source_Log_Pos` (`Read_Master_Log_Pos`) | Position in the binary log
+    file on the source server from which IO thread is reading. | IO thread status
+    |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `Relay_Log_File` | Current relay log file: the file the SQL thread is currently
+    executing from. | IO thread status |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `Relay_Log_Pos` | The position in the relay log file the SQL thread has executed
+    up to. | IO thread status |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `Relay_Source_Log_File` (`Relay_Master_Log_File`) | Binary log on the source
+    server from which SQL thread is executing events. | SQL thead status |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `Replica_IO_Running` (`Slave_IO_Running`) | If IO thread is running. Use
+    this field to quickly identify health of the connection thread. | IO thread status.
+    |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `Replica_SQL_Running` (`Slave_SQL_Running`) | If SQL thread is running. Use
+    to quickly identify health of the applier thread. | SQL thread status |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `Replicate_*` | Replication filters. | SQL thread configuration |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `Exec_Source_Log_Pos` (`Exec_Master_Log_Pos`) | Position of the binary log
+    file on the source up to which SQL thread executed events. | SQL thread state
+    |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `Until_Condition` | Until conditions if any. | SQL thread configuration |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `Source_SSL_*` (`Master_SSL_*`) | SSL options for connecting to the source
+    server. | IO thread configuration |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `Seconds_Behind_Source` (`Seconds_Behind_Master`) | Estimated delay between
+    source server and replica. | SQL thread status |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `Last_IO_Errno` | Last error number of the IO thread. Cleared once resolved.
+    | IO thread status |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `Last_IO_Error` | Latest error on the IO thread. Cleared once resolved. |
+    IO thread status |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `Last_Errno`, `Last_SQL_Errno` | Number of the last error, received by SQL
+    thread. Creared once resolved. | SQL thead status |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `Last_Error`, `Last_SQL_Error` | Last error of the SQL thread. Cleared once
+    resolved. | SQL thread status |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `Replica_SQL_Running_State` (`Slave_SQL_Running_State`) | Status of the SQL
+    thread. Empty if stopped. | SQL thread status |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `Last_IO_Error_Timestamp` | Time when last IO error happened. Cleared once
+    resolved. | IO thread status |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `Last_SQL_Error_Timestamp` | Time when last SQL error happened. Cleared once
+    resolved. | SQL thread state |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `Retrieved_Gtid_Set` | GTIDs, retrieved by the connection thread. | IO thread
+    status |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `Executed_Gtid_Set` | GTIDs, executed by the SQL thread. | SQL thread state.
+    |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `Channel_Name` | Name of the replication channel. | IO and SQL threads configuration
+    |'
+  prefs: []
+  type: TYPE_TB
+- en: We will refer to this table when discuss how to deal with specific IO and SQL
+    threads errors.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Replication tables in performance schema
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'Alternative diagnostic solution: tables in Performance Schema, unlike *SHOW
+    REPLICA STATUS*, do not store all the information in the single place, but have
+    it in separate spaces.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Information about IO thread configuration is stored in the table `replication_connection_configuration`
+    and information about its status is in the table `replication_connection_status`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Information about SQL threads is stored in six tables as shown in [Table 3-3](#nch-replication-replication-troubleshooting-P_S-applier)
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 3-3\. Tables with information, specific to SQL thread(s)
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Table Name | Description |'
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `replication_applier_configuration` | SQL thread configuration. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `replication_applier_global_filters` | Global replication filters: filters,
+    applicable for all channels. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `replication_applier_filters` | Replication filters, specific to particular
+    channels. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `replication_applier_status` | Status for the SQL thread, global. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `replication_applier_status_by_worker` | For multi-threaded replica: status
+    of each SQL thread. |'
+  prefs: []
+  type: TYPE_TB
+- en: '| `replication_applier_status_by_coordinator` | For multi-threaded replica:
+    status of the SQL thread as seen by the coordinator. |'
+  prefs: []
+  type: TYPE_TB
+- en: Finally, you will find Group Replication network configuration and status in
+    `replication_group_members` table and statistics of the Group Replication members
+    in table `replication_group_member_stats`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Troubleshooting IO thread
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: You can find if replication IO thread is having issues by checking value of
+    the `Replica_IO_Running` field of the *SHOW REPLICA STATUS*. If value is not `Yes`
+    connection thread, likely, experiences issues. Reason why this happens could be
+    found in the `Last_IO_Errno` and `Last_IO_Error` fields.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE80]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Like in the example above replica cannot connect to the source server, because
+    access denied for the user `''repl''@''localhost''`. IO thread is still running
+    and will retry connection attempt in 60 seconds (`retry-time: 60`). Reason for
+    such a failure is clear: either user does not exist on the source server or it
+    does not have enough privileges. You need to connect to the source server and
+    fix the user account. Once it is fixed next connection attempt will succeed.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Alernatively you may query table `replication_connection_status` in Performance
+    Schema:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE81]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'In this example field `LAST_ERROR_MESSAGE` contains the reason why the IO thread
+    failed to connect: user account on the source server uses authentication plugin
+    `caching_sha2_password` which requires secure connection. To fix this error you
+    need to stop replication, then run *CHANGE REPLICATION SOURCE* with parameters
+    either `SOURCE_SSL=1` or `GET_SOURCE_PUBLIC_KEY=1`. In the latter case traffic
+    between replica and source server will stay insecure and only password exchange
+    communication will be secured. See [Recipe 3.14](#nch-replication-replication-ssl)
+    for details.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Trobuleshooting SQL thread
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'To find out why applier thread had stopped check `Replica_SQL_Running`, `Last_SQL_Errno`
+    and `Last_SQL_Error` fields:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE82]'
+  prefs: []
+  type: TYPE_PRE
+- en: In the listing above error message shows that *CREATE DATABASE* command failed,
+    because such a database already exists on the replica.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Same information could be found in the table `replication_applier_status_by_worker`
+    in Performance Schema:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE83]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'There are few ways to resolve this issue. First, you may simply drop the database
+    on the replica and restart SQL thread:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE84]'
+  prefs: []
+  type: TYPE_PRE
+- en: Disable binary log if it is enabled on the replica.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In case if you want to keep database on the replica: for example, in a case
+    if it supposed to have extra tables which do not exist on the source server, you
+    may skip replicated event.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If you use position-based replication use variable `sql_replica_skip_counter`
+    (`sql_slave_skip_counter`):'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE85]'
+  prefs: []
+  type: TYPE_PRE
+- en: In this example we skipped one event from the binary log, then restarted replication.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'For GTID-based replication setting `sql_replica_skip_counter` would not work,
+    because it does not include GTID information. Instead, you need to generate empty
+    transaction with GTID of the transaction which replica could not execute. To find
+    out failed GTID check `Retrieved_Gtid_Set` and `Executed_Gtid_Set` fields of the
+    *SHOW REPLICA STATUS*:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE86]'
+  prefs: []
+  type: TYPE_PRE
+- en: In this example `Retrieved_Gtid_Set` contains transactions `de7e85f9-1060-11eb-8b8f-98af65266957:1-5`
+    while `Executed_Gtid_Set` only transactions `de7e85f9-1060-11eb-8b8f-98af65266957:1-4`.
+    It is clear that transcation `de7e85f9-1060-11eb-8b8f-98af65266957:5` was not
+    executed. Transactions with UUID `de8d356e-1060-11eb-a568-98af65266957` are local
+    and not executed by the replication applier thread.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You may also find failing transaction if query `APPLYING_TRANSACTION` field
+    of the `replication_applier_status_by_worker` table:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE87]'
+  prefs: []
+  type: TYPE_PRE
+- en: Once failing transaction found inject empty transaction with same GTID and restart
+    the SQL thread.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE88]'
+  prefs: []
+  type: TYPE_PRE
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: While skipping binary log event or transaction helps to restart replication
+    at the moment, it may cause bigger issue and lead to data inconsistency between
+    source and replica and, as a result, to future errors. Always analyze why error
+    happened in the first place and try to fix the reason, not simply skip the event.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'While *SHOW REPLICA STATUS* and table `replication_applier_status_by_worker`
+    both store error messages if you use multi-threaded replica the table can have
+    better information about what happened. Like in this example error message does
+    not give the full understanding of the reason for the failure:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE89]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'It reports that worker 8 failed, but does not tell why. Query on `replication_applier_status_by_worker`
+    returns this information:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE90]'
+  prefs: []
+  type: TYPE_PRE
+- en: Now it is clear that a specific table does not exist. You may analyze why this
+    is the case and correct the error.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Troubleshooting Group Replication
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: '*SHOW REPLICA STATUS* is not available for Group Replication. Therefore you
+    need to use Performance Schema to troubleshoot issues with it. Performance Schema
+    has two special tables for Group Replication only: `replication_group_members`,
+    showing details of all members and `replication_group_member_stats`, displaying
+    statistics for them. However, these tables do not have information about IO and
+    SQL thread errors. These details are available in tables which we discussed for
+    the standard asynchronous replication.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Let’s have a closer look to the Group Replication troubleshooting options.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Quick way to identify if something is wrong with Group replication is a `replication_group_members`
+    table.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE91]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'In the listing above only `PRIMARY` member is in `MEMBER_STATE: ONLINE` that
+    means it is healthy. Both `SECONDARY` members are in `RECOVERING` state and are
+    having troubles to join the group.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Failing member will stay in the `RECOVERING` state for some time, while Group
+    Replication tries to recover itself and, if the error cannot be automatically
+    recovered, leave the group and stay in the `ERROR` state.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE92]'
+  prefs: []
+  type: TYPE_PRE
+- en: Both listings were taken on the same secondary member of the group, but after
+    it left the group it reports only itself as a Group Replication member and does
+    not display information about other members.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To find reason of the failure you need to examine tables `replication_connection_status`
+    and `replication_applier_status_by_worker`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'In our example member `e9514d63-16ae-11eb-8f6e-98af65266957` stopped with SQL
+    error. You will find error details in the `replication_applier_status_by_worker`
+    table:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE93]'
+  prefs: []
+  type: TYPE_PRE
+- en: Error message says that the definition of the table in the transaction `de5b65cb-16ae-11eb-826c-98af65266957:15`
+    is not compatible with Group Replication plugin. To find out why check [Group
+    Replication Requirements and Limitations](https://dev.mysql.com/doc/refman/8.0/en/group-replication-requirements-and-limitations.html),
+    identify the table used in the transaction and fix the error.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Error message in the `replication_applier_status_by_worker` table does not have
+    any hint on which table was used in the transaction. But error log file may have.
+    Open error log file, search for the `LAST_ERROR_TIMESTAMP` and `LAST_ERROR_NUMBER`
+    to identify the error and check if previous or next rows have more information.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE94]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'In this example error message on the previous row contains the table name:
+    `al_winner`, and the reason why it is not compatible with Group Replication: the
+    table has not primary key.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: To fix the error you need to fix table definition on the `PRIMARY` and failing
+    `SECONDARY` node.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'First, login to the `PRIMARY` node, and add surrogate primary key:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE95]'
+  prefs: []
+  type: TYPE_PRE
+- en: You need to disable binary logging, because otherwise this change will be replicated
+    to the secondary members and replication will stop with the duplicate column name
+    error.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Then run same command on the secondary to fix the table definition and restart
+    Group Replication.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE96]'
+  prefs: []
+  type: TYPE_PRE
+- en: You need to disable `super_read_only` first which is set by the Group Replication
+    plugin if nodes are running in single-primary mode.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Once the error is fixed the node joins the group and reports its state as `ONLINE`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE97]'
+  prefs: []
+  type: TYPE_PRE
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'You can find what the failing transaction is doing by running mysqlbinlog command
+    with option `verbose`:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE98]'
+  prefs: []
+  type: TYPE_PRE
+- en: Option `verbose` required to decode row events.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'We fixed error on one node, but the third node did not join the group. After
+    examining content of the table `performance_schema.replication_connection_status`
+    we found that replication connection options were not setup correctly:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE99]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'To fix this we need to run correct *CHANGE REPLICATION SOURCE* command:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE100]'
+  prefs: []
+  type: TYPE_PRE
+- en: Once fixed the node will fail with the same SQL error as the previous one, that
+    has to be fixed the way we described above. Finally, after SQL error is recovered,
+    the node will join the cluster and will be reported as `ONLINE`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE101]'
+  prefs: []
+  type: TYPE_PRE
+- en: To check performance of the Group Replication query table `performance_schema.replication_group_member_stats`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE102]'
+  prefs: []
+  type: TYPE_PRE
+- en: Important fields are `COUNT_TRANSACTIONS_REMOTE_IN_APPLIER_QUEUE` that show
+    how many transactions are waiting in the queue on the secondary node to apply,
+    and `TRANSACTIONS_COMMITTED_ALL_MEMBERS` which show that transactions were applied
+    on all members. For more details consult [User Reference Manual](https://dev.mysql.com/doc/refman/8.0/en/performance-schema-replication-group-member-stats-table.html).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 3.16 Using Processlist to Understand Replication Performance
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Replica is behind the source server and lag is increasing. You want to undertsand
+    what is going on.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Examine status of the SQL threads using replication tables in Performance Schema
+    as well as regular MySQL performance instrumentation.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Replica may fall behind the source if SQL threads are applying updates slower
+    than the source server. This may happen because updates on the source are running
+    concurrently, while on the replica less threads are used to process the same workload.
+    This difference may happen even on replicas with the same or higher number of
+    CPU cores than the the source either because you set up less `replica_parallel_workers`
+    than active threads on the source server, or because they are not used fully due
+    to safety measures used to prevent replica from applying updates in the wrong
+    order.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To understand how many parallel workers are active you may query table `replication_applier_status_by_worker`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE103]'
+  prefs: []
+  type: TYPE_PRE
+- en: In the listing above you may notice that only three threads are currently applying
+    a transaction while others are idle. This is not stable information and you need
+    to run the same query several times to find out if this is a tendency.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table `threads` in Performance Schema contains a list of all threads currently
+    running on the MySQL server, including background ones. It has a field `name`
+    which value is `thread/sql/replica_worker` (`thread/sql/slave_worker`) in case
+    of the replication SQL thread. You can query it and find more details on what
+    each of the SQL thread workers is doing.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE104]'
+  prefs: []
+  type: TYPE_PRE
+- en: In the listing above thread 54 is waiting for a transaction commit, threads
+    55 and 56 are applying a batch of row changes, while other threads are waiting
+    for an event from the Coordinator.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Since the source server applies changes in high number of threads we may notice
+    that the replication lag is increasing.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE105]'
+  prefs: []
+  type: TYPE_PRE
+- en: One of the resolutions for such issues is to set option `binlog_transaction_dependency_tracking`
+    on the source server to `WRITESET_SESSION` or `WRITESET`. These options are discussed
+    in [Recipe 3.8](#nch-replication-replication-multithreaded) and allow to have
+    higher parallelization on the replica. Note that changes would not take immediate
+    effect, because replica will have to apply binary log events, recorded with default
+    `binlog_transaction_dependency_tracking` value `COMMIT_ORDER`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Still, after a while, you may notice that all SQL thread workers became active
+    and replica lag started decreasing.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE106]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Another common reason for the replication lag is a local command, affecting
+    tables, updated by the replication. You may notice that this is the case if query
+    table `replication_applier_status_by_worker` and compare value of the `APPLYING_TRANSACTION_START_APPLY_TIMESTAMP`
+    field with current time:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE107]'
+  prefs: []
+  type: TYPE_PRE
+- en: In the listing above transaction execution time is similar for all threads and
+    around five minutes. That is ridiculously long!
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To find out why transactions are executing for such a long time query table
+    `threads` in the Performance Schema:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE108]'
+  prefs: []
+  type: TYPE_PRE
+- en: It is clear that the replication SQL threads are not doing any useful job and
+    just waiting for a global read lock.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To find out which thread is holding a global read lock try querying table `threads`
+    in the Performance Schema, but this time filter out replica threads:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE109]'
+  prefs: []
+  type: TYPE_PRE
+- en: In our example offending thread is the thread executed *FLUSH TABLES WITH READ
+    LOCK*. This is a common safety lock, performed by backup programs. Since we know
+    the reason of the replica stall, we can either wait until this job finishes or
+    kill the thread. Once done, replica will continue executing updates.
+  prefs: []
+  type: TYPE_NORMAL
+- en: See Also
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Troubleshooting performance is a long topic and further detail is outside the
+    scope of this book. For additional information about troubleshooting, see [MySQL
+    Troubleshooting](https://www.oreilly.com/library/view/mysql-troubleshooting/9781449317836/).
+  prefs: []
+  type: TYPE_NORMAL
+- en: 3.17 Setting Up Automated Replication
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You want to setup replication, but do not want to configure it manually.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Use MySQL Admin API, available in MySQL Shell ([Chapter 2](ch02.xhtml#nch-mysqlshell)).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: MySQL Shell provides MySQL Admin API that allows you to automate standard replication
+    administrative tasks, such as creating a ReplicaSet of a source server with one
+    or more replicas. Or create InnoDB Cluster, using Group Replication.
+  prefs: []
+  type: TYPE_NORMAL
+- en: InnoDB ReplicaSet
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: If you want to automate replication setup use MySQL Admin API inside MySQL Shell
+    and InnoDB ReplicaSet. InnoDB ReplicaSet allows you to create a single-primary
+    replication topology with as many secondary read-only servers as you wish. You
+    may later promote one of the secondary servers to primary. Multiple-primary setups,
+    replication filters and automatic failovers are not supported.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'First you need to prepare the servers. Ensure that:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: MySQL is of version 8.0 or newer
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: GTID options `gtid_mode` and `enforce_gtid_consistency` are enabled
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Binary log format is `ROW`
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'Default storage engine is InnoDB: set option `default_storage_engine=InnoDB`'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'Parallel-replication related options:'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: '[PRE110]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: '>'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: If you are using Ubuntu and want to setup ReplicaSet on the local machine edit
+    `/etc/hosts` file and either remove loopback address `127.0.1.1` or replace it
+    with `127.0.0.1`. Loopback addresses, other than `127.0.0.1` are not supported
+    by MySQL Shell.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Once servers are prepared for the replication you can start configuring them
+    with MySQL Shell:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE111]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Command *dba.configureReplicaSetInstance* takes two parameters: URI to connect
+    to the server and configuration options. Option `clusterAdmin` instructs to create
+    a replication user. Then you may provide a password when prompted.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Repeat configuration step for all servers in the ReplicaSet. Specify same replication
+    username and password.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Once all instances are configured, create a ReplicaSet:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE112]'
+  prefs: []
+  type: TYPE_PRE
+- en: Command *dba.createReplicaSet* creates named ReplicaSet and returns ReplicaSet
+    object. Save it into a variable to perform further management.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Internally it creates a database `mysql_innodb_cluster_metadata` with tables,
+    describing ReplicaSet setup in the instance MySQL Shell connected to. Same time
+    this first instance is set up as a PRIMARY ReplicaSet member. You may check it
+    if run command *rs.status()*:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE113]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Once PRIMARY instance set up add as many secondary instances as desired:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE114]'
+  prefs: []
+  type: TYPE_PRE
+- en: Each secondary instance performs initial data copy from the PRIMARY member.
+    It can copy data using either `clone` plugin or incremental recovery from the
+    binary logs. For the server which already has data method `clone` is preferrable.
+    But you may need to manually restart the server to finish the installation. If
+    you have chosen incremental recovery ensure that no binary log, containing data,
+    is purged. Otherwise replication setup will fail.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Once all secondary members are added ReplicaSet is ready and can be used for
+    writes and reads. You can check its status by running command *rs.status()*. It
+    supports option `extended`, controlling verbosity of the output. Still it does
+    not show all the information about replication health. If you want to have all
+    the details use *SHOW REPLICA STATUS* command or query Performance Schema.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you want to change which server is a PRIMARY use *rs.setPrimaryInstance*
+    command. Thus, *rs.setPrimaryInstance(“127.0.0.1:13002”)* switches PRIMARY server
+    from the server, running on the port 13000 to the server, listening port 13002.
+  prefs: []
+  type: TYPE_NORMAL
+- en: If you disconnected from a server, participating in the ReplicaSet or destroyed
+    `ReplicaSet` object, reconnect to one of ReplicaSet members and run command *rs=dba.getReplicaSet()*
+    to re-create ReplicaSet object.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: If you want to manage ReplicaSet with MySQL Shell do not modify replication
+    setup directly by running *CHANGE REPLICATION SOURCE* command. All management
+    should happen via Admin API in MySQL Shell.
+  prefs: []
+  type: TYPE_NORMAL
+- en: InnoDB Cluster
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: To automate Group Replication create [MySQL InnoDB Cluster](https://dev.mysql.com/doc/refman/8.0/en/mysql-innodb-cluster-introduction.html).
+    InnoDB Cluster is a complete high availability solution that allows you to easily
+    configure and administer a group of at least three MySQL Servers.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Before setting up InnoDB Cluster prepare the servers. Each of the servers in
+    the group should have:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Unique server id
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: GTID enabled
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Option `disabled_storage_engines` set to `"MyISAM,BLACKHOLE,FEDERATED,ARCHIVE,MEMORY"`
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Option `log_replica_updates` enabled
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: User account with administrative privileges
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: 'Parallel-replication related options:'
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: '[PRE115]'
+  prefs:
+  - PREF_IND
+  type: TYPE_PRE
+- en: You may set other options ([Recipe 3.12](#nch-replication-replication-synchronous)),
+    required for the group replication, but they can also be configured by the MySQL
+    Shell.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Once you setup and started MySQL instances connect MySQL Shell to the one you
+    want to make PRIMARY and configure them. You need to use an account (in our case
+    `root`) with administrative privileges to start theconfiguration process.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE116]'
+  prefs: []
+  type: TYPE_PRE
+- en: Repeat configuration for other instances in the cluster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: If an instance is manually configured for Group Replication MySQL Shell would
+    not be able to update its options and would not ensure that the group replication
+    configuration persist after restart. Always run *dba.configureInstance* before
+    setting up InnoDB Cluster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'After instances are configured create a cluster:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE117]'
+  prefs: []
+  type: TYPE_PRE
+- en: 'Then add instances to it: *cluster.addInstance(''root@127.0.0.1:33368'', {localAddress:
+    “:34368"})*. When MySQL Shell asks you to select a recovery method choose “Clone”.
+    Then, depending if your server supports *RESTART* command either wait when it
+    is back online or start the node manually. In case of success you will see a message,
+    similar to:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE118]'
+  prefs: []
+  type: TYPE_PRE
+- en: Add other instances to the cluster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: MySQL Shell constructs a local address which Group nodes use to communicate
+    with each other by using the system variable `report_host` for the host address
+    and formula `(current port of the instance) * 10 + 1` for the port number. If
+    the auto-generated value exceeds 65535 the instance cannot be added to the cluster.
+    Therefore, if you use non-standard ports, specify the custom value for the option
+    `localAddress`.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'After instances are added InnoDB Cluster is ready to use. To examine its status
+    use *cluster.status()* command which supports `extended` key, controlling verbosity
+    of the output. Default is 0: only basic information printed. With option 2 and
+    3 you may examine which transactions are received and applied on each member.
+    Command *cluster.describe()* gives a short overview of the cluster topology.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE119]'
+  prefs: []
+  type: TYPE_PRE
+- en: If you destroyed the Cluster object, for example, by closing the session, reconnect
+    to one of the cluster members and re-create it by running command *cluster = dba.getCluster()*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Both InnoDB ReplicaSet and InnoDB Cluster support software router [MySQL Router](https://dev.mysql.com/doc/mysql-router/8.0/en/)
+    which you can use for load balancing. We skipped this part, because this is outside
+    of the scope of the book. For the information on how to setup MySQL Router together
+    with InnoDB ReplicaSet and InnoDB Cluster consult the User Reference Manual.
+  prefs: []
+  type: TYPE_NORMAL
+- en: See Also
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: For additional information about replication automation, see [MySQL Shell User
+    Reference Manual](https://dev.mysql.com/doc/mysql-shell/8.0/en/).
+  prefs: []
+  type: TYPE_NORMAL

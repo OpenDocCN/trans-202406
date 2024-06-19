@@ -1,0 +1,507 @@
+- en: Chapter 9\. Linkerd Route-Based Policy
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: In [Chapter 8](ch08.html#LUAR_server_policy), we discussed implementing a Linkerd
+    Server-based policy to enhance the security of the emojivoto application. This
+    policy ensures that Linkerd effectively safeguards the application’s workload,
+    preventing unauthorized workloads from making requests. Suppose we want to go
+    further, though? For example, consider a situation where you have a sensitive
+    application. You need to be certain that only specific ServiceAccounts are allowed
+    to make changes, and only certain others have access to read.
+  prefs: []
+  type: TYPE_NORMAL
+- en: That’s where Linkerd’s route-based policy mechanism comes in. In this chapter,
+    we’ll take a closer look at what route-based policy can do and how to use it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Route-Based Policy Overview
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Route-based policy gives Linkerd a way to express policy that depends not only
+    on which workloads are in play, but also on which specific requests are being
+    made. These specific HTTP requests are identified by using Gateway API HTTPRoute
+    resources to specify matches against the HTTP path, method, headers, etc.—almost
+    anything except the body can be used. Requests are still authenticated using mTLS
+    identities.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Gateway API HTTPRoute resources work by associating one or more *parents* with
+    one or more *rules*. When using Gateway API for ingress, the parents of an HTTPRoute
+    will be Gateway resources; however, this doesn’t make much sense when using Gateway
+    API to configure a service mesh. When using HTTPRoutes with Linkerd, the parents
+    will be Services instead, and the HTTPRoute will only apply to traffic that is
+    directed to the parent Service *and* that matches a rule specified by the HTTPRoute.
+  prefs: []
+  type: TYPE_NORMAL
+- en: HTTPRoutes, Gateway API, and You
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Linkerd 2.13 supports the HTTPRoute object, but it actually uses a copy in the
+    `policy.linkerd.io/v1` API group, rather than the official `gateway.networking.k8s.io/v1beta1`
+    HTTPRoute. This sidesteps issues around Gateway API conformance.
+  prefs: []
+  type: TYPE_NORMAL
+- en: When Linkerd 2.13 shipped, it wasn’t possible for a service mesh to be conformant
+    to the Gateway API standard. By Linkerd 2.14, Gateway API had defined the `Mesh`
+    *conformance profile*, which specifies what it means for a service mesh to be
+    conformant with Gateway API. Linkerd 2.14 and higher are conformant with the `Mesh`
+    profile and support the `gateway.networking.k8s.io/v1beta1` HTTPRoute (as well
+    as the older copy that Linkerd 2.13 supported). The end result is that some tools
+    that rely on the HTTPRoute object aren’t fully compatible with Linkerd 2.13, but
+    they’re happier with Linkerd 2.14 and higher.
+  prefs: []
+  type: TYPE_NORMAL
+- en: (If you want to know more about all of this stuff, check out the [Gateway API
+    introduction](https://oreil.ly/n0mtd) and read about Gateway API and the GAMMA
+    initiative.)
+  prefs: []
+  type: TYPE_NORMAL
+- en: Route-based policy is the most detailed and granular level of policy in Linkerd,
+    and using it requires a significant amount of planning and a significant amount
+    of YAML. When you’re ready to secure your environments to this degree, you need
+    to be aware of the cost in terms of engineering time and effort. We also *strongly*
+    recommend that when building any kind of policy you use multiple environments—at
+    least one for building and testing policy, and another for enforcing it. Ideally,
+    you’ll integrate policy creation, auditing, and promotion into your standard application
+    development lifecycle.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The booksapp Sample Application
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: We’ll be using the [booksapp sample application](https://oreil.ly/qf8il) to
+    show how you can use route-based policy to restrict calls based not just on the
+    workload, but also on the specific endpoints being accessed.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As shown in [Figure 9-1](#books-app-connections), the app is very similar to
+    emojivoto.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![luar 0901](assets/luar_0901.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 9-1\. booksapp interapplication connections
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: In booksapp, two of our backing services (`books` and `authors`) need to talk
+    to each other—but they shouldn’t all have unrestricted access to each other. For
+    example, the `authors` workload should have access to read from the `books` workload,
+    so that it can show the books each author has written. The UI for `authors` also
+    allows you to add a new book for the author you’re looking at, so `authors` needs
+    to be able to POST new books to `books`. However, it mustn’t be able to modify
+    or delete books.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Ultimately, we want to allow only the following requests, and no others:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Infrastructure:'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: The `kubelet` needs to be able to run health checks for all our workloads.
+  prefs:
+  - PREF_IND
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Linkerd Viz needs to be able to scrape metrics from all workloads.
+  prefs:
+  - PREF_IND
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Core application functionality:'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`webapp` needs to be able to read, create, delete, and update both `authors`
+    and `books`.'
+  prefs:
+  - PREF_IND
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`authors` needs to be able to read and create `books`.'
+  prefs:
+  - PREF_IND
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`books` needs to be able to read and create `authors`.'
+  prefs:
+  - PREF_IND
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Traffic generator:'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '`traffic` needs to have full access to `webapp`.'
+  prefs:
+  - PREF_IND
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: This can be seen in [Figure 9-2](#books-policy-overview).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![luar 0902](assets/luar_0902.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 9-2\. booksapp application policy overview
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Installing booksapp
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The setup is fairly simple. We’ll pull down the latest version of the booksapp
+    application, add the Linkerd proxy, and apply it to our cluster, as shown in [Example 9-1](#EX11-setup).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 9-1\. Setup
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: Configuring booksapp Policy
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'At this point, booksapp is running with no restrictions: everything can access
+    everything else. This is often the simplest place to start when working with policy;
+    once you know that the application is working, you can start tightening things
+    up.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'We’ll work through our booksapp policy in steps:'
+  prefs: []
+  type: TYPE_NORMAL
+- en: At the start, we’ll work on the low-level infrastructure, switching to default
+    deny and allowing Linkerd Viz to still work. We’ll use Server-based policy for
+    this; it doesn’t require the granularity of route-based policy, so we’ll avoid
+    the complexity.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: We’ll next configure minimal route-based policy to allow read-only access to
+    the application.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: We’ll then allow writes to the `authors` workload, then the `books` workload.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Finally, we’ll allow access from the traffic generator to the `webapp`.
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: The advantage of doing things in this order is that it should quickly make it
+    possible to see at least part of the application working, and we can do incremental
+    testing. This is usually a very good idea when doing complex configuration, and
+    (as we’ve said before) route-based policy is very complex.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Infrastructure Policy
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The first step is infrastructure policy. We’ll switch the `booksapp` namespace
+    to default deny using a Server-based policy. In turn, this will require us to
+    explicitly permit Linkerd Viz to keep working. All of this is shown in [Example 9-2](#EX-infra-policy).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 9-2\. books-infra-policy.yaml
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  prefs: []
+  type: TYPE_PRE
+- en: This is similar to what we did in [Chapter 8](ch08.html#LUAR_server_policy)
+    to allow Linkerd Viz. Let’s go ahead and apply the infrastructure policy YAML,
+    then switch the `booksapp` namespace to default deny, as shown in [Example 9-3](#EX-apply-infra-policy).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 9-3\. Setting up infrastructure policy
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  prefs: []
+  type: TYPE_PRE
+- en: What About Health Checks?
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The astute observer will notice that while our Pods have readiness and liveness
+    probes configured, they’re still starting and staying ready even though we haven’t
+    carved out any explicit authorizations for the `kubelet` to probe our Pods. That’s
+    because Linkerd will, by default, look for liveness and readiness probes for your
+    applications and create a default HTTPRoute that will allow that traffic—but it
+    will only do this *as long as you haven’t created HTTPRoutes yourself*.
+  prefs: []
+  type: TYPE_NORMAL
+- en: As soon as you begin creating your own HTTPRoutes for your application, Linkerd
+    will delete its default routes, which means that you’ll need to ensure that you
+    create routes for your liveness and readiness probes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: At this point, with the `booksapp` namespace switched to default deny and only
+    Viz authorized, our application won’t work at all. Let’s continue with getting
+    our app running.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Read-Only Access
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The next thing we’ll do is use route-based policy to allow read-only access
+    to the application. We’ll be able to use a web browser to look up books and authors,
+    but we won’t be able to change anything.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Everything we’re doing from this point forward is just applying YAML, so we’ll
+    just show the YAML that you need to apply. We’ll do this from the inside out,
+    so our first step is to permit the `books` workload to fetch `/authors.json` and
+    `/authors/` from the `authors` workload. This requires four resources.
+  prefs: []
+  type: TYPE_NORMAL
+- en: First up, we need to define a Server for the `authors` workload in the `books`
+    namespace, as shown in [Example 9-4](#EX-route-authors-server). This will allow
+    us to use an HTTPRoute to configure policy for specific requests being made to
+    the `authors` workload.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 9-4\. `authors` Server
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  prefs: []
+  type: TYPE_PRE
+- en: Next, we’ll create an HTTPRoute specifying the two requests that we want to
+    allow, as shown in [Example 9-5](#EX-route-authors-httproute).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 9-5\. `authors` HTTPRoute
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  prefs: []
+  type: TYPE_PRE
+- en: Which HTTPRoute?
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: We’ve used `policy.linkerd.io` HTTPRoutes to accommodate readers with older
+    versions of Linkerd. If you’re using Linkerd 2.14 or newer, though, feel free
+    to switch to `gateway.network⁠ing.k8s.io/v1beta1` HTTPRoutes!
+  prefs: []
+  type: TYPE_NORMAL
+- en: Finally, we can specify an AuthorizationPolicy/MeshTLSAuthentication pair, where
+    the `targetRef` of the AuthorizationPolicy is the HTTPRoute we just defined, to
+    define which identities are allowed to use this HTTPRoute, as shown in [Example 9-6](#EX-route-authors-auth).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 9-6\. `authors` AuthorizationPolicy and MeshTLSAuthentication
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  prefs: []
+  type: TYPE_PRE
+- en: Once these resources are applied, the `books` workload will be able to talk
+    to the `authors` workload. However, we’ve just broken health checks for the `authors`
+    workload, as we noted earlier. As soon as we attached our HTTPRoute to the `authors`
+    Server, the probe routes generated by Linkerd went away.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To allow those probe requests, we’ll use a separate HTTPRoute, which will allow
+    us to use a NetworkAuthorization to permit unauthenticated probe requests from
+    anywhere in our cluster. We definitely don’t want to permit any other requests
+    to use that NetworkAuthorization, so we really do need a separate HTTPRoute for
+    the probes! This is shown in [Example 9-7](#EX-route-authors-probes).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 9-7\. Re-permitting `authors` health probes
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE6]'
+  prefs: []
+  type: TYPE_PRE
+- en: What’s in a CIDR?
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The `probe-authn` NetworkAuthorization is unnecessarily broad; it should really
+    be limited just to the Pod CIDR range for your cluster. We can’t predict that,
+    so you should feel free to replace the CIDR ranges in the `probe-authn` NetworkAuthentication
+    resource with the appropriate values for your cluster.
+  prefs: []
+  type: TYPE_NORMAL
+- en: At this point, the `books` workload should be able to read from the `authors`
+    workload, and probes to the `authors` workload should work as well. Now we need
+    to repeat all of this to permit the `authors` workload to talk to `books`, as
+    shown in [Example 9-8](#EX-route-books-from-authors).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 9-8\. Allowing `authors` to read from `books`
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE7]'
+  prefs: []
+  type: TYPE_PRE
+- en: Finally, we need to permit `webapp` to talk to both `authors` and `books`. We
+    can use our existing HTTPRoutes here, and we don’t need another Server. All we
+    need to do is add new AuthorizationPolicy and MeshTLSAuthentication resources,
+    as shown in [Example 9-9](#EX-route-allow-webapp).
+  prefs: []
+  type: TYPE_NORMAL
+- en: What’s in an Identity?
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: We could also do this by adding another identity to our existing `authors` and
+    `books` MeshTLSAuthentications. However, the fine granularity available with route-based
+    policy is a major point in its favor, and using a separate AuthorizationPolicy
+    and MeshTLSAu⁠thentication helps preserve that.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 9-9\. Permitting web access
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE8]'
+  prefs: []
+  type: TYPE_PRE
+- en: At this point, we should be able to use a web browser to view the booksapp GUI,
+    and we should be able to read everything, but modify nothing.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Enabling Write Access
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The booksapp application is supposed to allow updating both books and authors,
+    so our next task will be to allow writes to the `authors` workload. Once this
+    is done, we’ll be able to make changes to our authors (including updates, additions,
+    and deletions), but we still won’t be able to change any books.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The way booksapp is built, both `webapp` and `books` need to be able to write
+    to `authors`. We’ll start by creating an HTTPRoute, shown in [Example 9-10](#EX-author-modify-route),
+    that describes the kinds of modification requests we want to allow.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 9-10\. Modification requests to `authors`
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  prefs: []
+  type: TYPE_PRE
+- en: This HTTPRoute is attached to our existing `authors` Server, because it describes
+    requests being made to the `authors` workload. Given that HTTPRoute, we want to
+    allow both `books` and `webapp` to make those requests, as shown in [Example 9-11](#EX-author-modify-policy).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 9-11\. Permitting modifications
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  prefs: []
+  type: TYPE_PRE
+- en: Here we’re using the technique of listing multiple identities in the same MeshTLSAu⁠thentication,
+    since `webapp` and `books` need *exactly* the same permissions in this example.
+  prefs: []
+  type: TYPE_NORMAL
+- en: After all of this is done, we have the policy setup shown in [Figure 9-3](#books-author-policies).
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![luar 0903](assets/luar_0903.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 9-3\. `books` after setting up policy for `authors`
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Allowing Writes to books
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: We’ll finish up our booksapp functionality by allowing writes to the `books`
+    workload, as shown in [Example 9-12](#EX-books-modify-policy). This is exactly
+    parallel to allowing writes to `authors` and will finally permit booksapp to fully
+    function.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 9-12\. Modification requests to `books`
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  prefs: []
+  type: TYPE_PRE
+- en: Reenabling the Traffic Generator
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Finally, we’ll add permission for the `traffic` workload, which generates some
+    load at all times, to access the `webapp` workload. The booksapp application doesn’t
+    actually need the traffic generator, but it’s very useful for debugging and demos!
+    So let’s get it running again.
+  prefs: []
+  type: TYPE_NORMAL
+- en: We’ll start with a Server for `webapp` (which we haven’t needed before), so
+    that we can write policies allowing requests to it. This is shown in [Example 9-13](#EX-route-webapp-server).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 9-13\. A Server for `webapp`
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  prefs: []
+  type: TYPE_PRE
+- en: Given this Server, it’s straightforward to permit `traffic` to access it. We’ll
+    take the lazy way out and write a Server-based policy here, as shown in [Example 9-14](#EX-route-traffic-policy),
+    since we really do want `traffic` to be able to do basically everything.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 9-14\. Permitting the traffic generator
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  prefs: []
+  type: TYPE_PRE
+- en: Summary
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Linkerd’s route-based policy mechanism is the most complex part of Linkerd,
+    enough so that there are actually a number of powerful tools, both open source
+    and commercial, for creating and debugging policies in Linkerd. The Tap component
+    of Linkerd Viz is the simplest, most readily available tool here; likewise, the
+    `linkerd diagnostics` command that we discussed in [Chapter 6](ch06.html#LUAR_cli)
+    has a lot to offer. On the commercial side, we would be remiss if we didn’t mention
+    the policy tools available in Buoyant Enterprise for Linkerd.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Overall, policy in Linkerd is a powerful and extensible tool for managing traffic
+    in your cluster, and route-based policy in particular is at once a very powerful
+    mechanism and a very focused tool. It’s a great way to further refine policy that
+    you’ve already established with the Server-based mechanism.
+  prefs: []
+  type: TYPE_NORMAL

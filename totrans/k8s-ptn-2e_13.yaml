@@ -1,0 +1,403 @@
+- en: Chapter 10\. Singleton Service
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The *Singleton Service* pattern ensures that only one instance o an application
+    is active at a time and yet is highly available. This pattern can be implemented
+    from within the application or delegated fully to Kubernetes.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Problem
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: One of the main capabilities provided by Kubernetes is the ability to easily
+    and transparently scale applications. Pods can scale imperatively with a single
+    command such as `kubectl scale`, or declaratively through a controller definition
+    such as ReplicaSet, or even dynamically based on the application load, as we describe
+    in [Chapter 29, “Elastic Scale”](ch29.html#ElasticScale). By running multiple
+    instances of the same service (not a Kubernetes Service but a component of a distributed
+    application represented by a Pod), the system usually increases throughput and
+    availability. The availability increases because if one instance of a service
+    becomes unhealthy, the request dispatcher forwards future requests to other healthy
+    instances. In Kubernetes, multiple instances are the replicas of a Pod, and the
+    Service resource is responsible for the request distribution and load balancing.
+  prefs: []
+  type: TYPE_NORMAL
+- en: However, in some cases, only one instance of a service is allowed to run at
+    a time. For example, if there is a periodically executed task in a service and
+    multiple instances of the same service, every instance will trigger the task at
+    the scheduled intervals, leading to duplicates rather than having only one task
+    fired as expected. Another example is a service that performs polling on specific
+    resources (a filesystem or database) and we want to ensure that only a single
+    instance and maybe even a single thread performs the polling and processing. A
+    third case occurs when we have to consume messages from a messages broker in an
+    order-preserving manner with a single-threaded consumer that is also a singleton
+    service.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In all these and similar situations, we need some control over how many instances
+    \ of a service are active at a time (usually only one is required), while still
+    ensuring high availability, regardless of how many instances have been started
+    and kept running.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Solution
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: 'Running multiple replicas of the same Pod creates an *active-active* topology,
+    where all instances of a service are active. What we need is an *active-passive*
+    topology, where only one instance is active and all the other instances are passive.
+    Fundamentally, this can be achieved at two possible levels: out-of-application
+    and in-application locking.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Out-of-Application Locking
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: As the name suggests, this mechanism relies on a managing process that is outside
+    of the application to ensure that only a single instance of the application is
+    running. The application implementation itself is not aware of this constraint
+    and is run as a singleton instance. From this perspective, it is similar to having
+    a Java class that is instantiated only once by the managing runtime (such as the
+    Spring Framework). The class implementation is not aware that it is run as a singleton,
+    nor that it contains any code constructs to prevent instantiating multiple instances.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Figure 10-1](#img-out-of-app-locking) shows how to implement out-of-application
+    locking with the help of a StatefulSet or ReplicaSet controller with one replica.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Out-of-application locking mechanism](assets/kup2_1001.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 10-1\. Out-of-application locking mechanism
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The way to achieve this in Kubernetes is to start a single Pod. This activity
+    alone does not ensure the singleton Pod is highly available. What we have to do
+    is also back the Pod with a controller such as a ReplicaSet that turns the singleton
+    Pod into a highly available singleton. This topology is not exactly *active-passive*
+    (there is no passive instance), but it has the same effect, as Kubernetes ensures
+    that one instance of the Pod is running at all times. In addition, the single
+    Pod instance is highly available, thanks to the controller performing health checks
+    as described in [Chapter 4, “Health Probe”](ch04.html#HealthProbe), and healing
+    the Pod in case of failures.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The main thing to keep an eye on with this approach is the replica count, which
+    should not be changed accidentally. In this section, you will see how we can voluntarily
+    decrease the replica count through PodDisruptionBudget, but there is no platform-level
+    mechanism to prevent an increase of the replica count.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'It’s not entirely true that only one instance is running at all times, especially
+    when things go wrong. Kubernetes primitives such as ReplicaSet favor availability
+    over consistency—a deliberate decision for achieving highly available and scalable
+    distributed systems. That means a ReplicaSet applies “at least” rather than “at
+    most” semantics for its replicas. If we configure a ReplicaSet to be a singleton
+    with `replicas: 1`, the controller makes sure at least one instance is always
+    running, but occasionally it can be more instances.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The most popular corner case here occurs when a node with a controller-managed
+    Pod becomes unhealthy and disconnects from the rest of the Kubernetes cluster.
+    In this scenario, a ReplicaSet controller starts another Pod instance on a healthy
+    node (assuming there is enough capacity), without ensuring the Pod on the disconnected
+    node is shut down. Similarly, when changing the number of replicas or relocating
+    Pods to different nodes, the number of Pods can temporarily go above the desired
+    number. That temporary increase is done with the intention of ensuring high availability
+    and avoiding disruption, as needed for stateless and scalable applications.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Singletons can be resilient and recover, but by definition, they are not highly
+    available. Singletons typically favor consistency over availability. The Kubernetes
+    resource that also favors consistency over availability and provides the desired
+    strict singleton guarantees is the StatefulSet. If ReplicaSets do not provide
+    the desired guarantees for your application, and you have strict singleton requirements,
+    StatefulSets might be the answer. StatefulSets are intended for stateful applications
+    and offer many features, including stronger singleton guarantees, but they come
+    with increased complexity as well. We discuss concerns around singletons and cover
+    StatefulSets in more detail in [Chapter 12, “Stateful Service”](ch12.html#StatefulService).
+  prefs: []
+  type: TYPE_NORMAL
+- en: Typically, singleton applications running in Pods on Kubernetes open outgoing
+    connections to message brokers, relational databases, file servers, or other systems
+    running on other Pods or external systems. However, occasionally, your singleton
+    Pod may need to accept incoming connections, and the way to enable that on Kubernetes
+    is through the Service resource.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'We cover Kubernetes Services in depth in [Chapter 13, “Service Discovery”](ch13.html#ServiceDiscovery),
+    but let’s discuss briefly the part that applies to singletons here. A regular
+    Service (with `type: ClusterIP`) creates a virtual IP and performs load balancing
+    among all the Pod instances that its selector matches. However, a singleton Pod
+    managed through a StatefulSet has only one Pod and a stable network identity.
+    In such a case, it is better to create a *headless Service* (by setting both `type:
+    ClusterIP` and `clusterIP: None`). It is called *headless* because such a Service
+    doesn’t have a virtual IP address, kube-proxy doesn’t handle these Services, and
+    the platform performs no proxying.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: However, such a Service is still useful because a headless Service with selectors
+    creates endpoint records in the API Server and generates DNS A records for the
+    matching Pod(s). With that, a DNS lookup for the Service does not return its virtual
+    IP but instead the IP address(es) of the backing Pod(s). That enables direct access
+    to the singleton Pod via the Service DNS record, and without going through the
+    Service virtual IP. For example, if we create a headless Service with the name
+    `my-singleton`, we can use it as `my-singleton.default.svc.cluster.local` to access
+    the Pod’s IP address directly.
+  prefs: []
+  type: TYPE_NORMAL
+- en: To sum up, for nonstrict singletons with at least one instance requirement,
+    defining a ReplicaSet with one replica would suffice. This configuration favors
+    availability and ensures there is at least one available instance, and possibly
+    more in some corner cases. For a strict singleton with an At-Most-One requirement
+    and better performant service discovery, a StatefulSet and a headless Service
+    would be preferred. Using StatefulSet will favor consistency and ensure there
+    is an At-Most-One instance and occasionally none in some corner cases. You can
+    find a complete example of this in [Chapter 12, “Stateful Service”](ch12.html#StatefulService),
+    where you have to change the number of replicas to one to make it a singleton.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In-Application Locking
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: In a distributed environment, one way to control the service instance count
+    is through a distributed lock, as shown in [Figure 10-2](#img-in-app-locking).
+    Whenever a service instance or a component inside the instance is activated, it
+    can try to acquire a lock, and if it succeeds, the service becomes active. Any
+    subsequent service instance that fails to acquire the lock waits and continuously
+    tries to get the lock in case the currently active service releases it.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Many existing distributed frameworks use this mechanism for achieving high availability
+    and resiliency. For example, the message broker Apache ActiveMQ can run in a highly
+    available *active-passive* topology, where the data source provides the shared
+    lock. The first broker instance that starts up acquires the lock and becomes active,
+    and any other subsequently started instances become passive and wait for the lock
+    to be released. This strategy ensures there is a single active broker instance
+    that is also resilient to failures.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![In-application locking mechanism](assets/kup2_1002.png)'
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 10-2\. In-application locking mechanism
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'We can compare this strategy to a classic Singleton, as it is known in the
+    object-oriented world: a *Singleton* is an object instance stored in a static
+    class variable. In this instance, the class is aware of being a singleton, and
+    it is written in a way that does not allow instantiation of multiple instances
+    for the same process. In distributed systems, this would mean the containerized
+    application itself has to be written in a way that does not allow more than one
+    active instance at a time, regardless of the number of Pod instances that are
+    started. To achieve this in a distributed environment, first we need a distributed
+    lock implementation such as the one provided by Apache ZooKeeper, HashiCorp’s
+    Consul, Redis, or etcd.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: The typical implementation with ZooKeeper uses ephemeral nodes, which exist
+    as long as there is a client session and are deleted as soon as the session ends.
+    The first service instance that starts up initiates a session in the ZooKeeper
+    server and creates an ephemeral node to become active. All other service instances
+    from the same cluster become passive and have to wait for the ephemeral node to
+    be released. This is how a ZooKeeper-based implementation makes sure there is
+    only one active service instance in the whole cluster, ensuring an active-passive
+    failover behavior.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In the Kubernetes world, instead of managing a ZooKeeper cluster only for the
+    locking feature, a better option would be to use etcd capabilities exposed through
+    the Kubernetes API and running on the main nodes. etcd is a distributed key-value
+    store that uses the Raft protocol to maintain its replicated state and provides
+    the necessary building blocks for implementing leader election. For example, Kubernetes
+    offers the Lease object, which is used for node heartbeats and component-level
+    leader election. For every node, there is a Lease object with a matching name,
+    and the Kubelet on every node keeps running a heart beat by updating the Lease
+    object’s `renewTime` field. This information is used by the Kubernetes control
+    plane to determine the availability of the nodes. Kubernetes Leases are also used
+    in highly available cluster deployment scenarios for ensuring only single control
+    plane components such as kube-controller-manager and kube-scheduler are active
+    at a time and other instances remain on standby.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Another example is in Apache Camel, which has a Kubernetes connector that also
+    provides leader election and singleton capabilities. This connector goes a step
+    further, and rather than accessing the etcd API directly, it uses Kubernetes APIs
+    to leverage ConfigMaps as a distributed lock. It relies on Kubernetes optimistic
+    locking guarantees for editing resources such as ConfigMaps, where only one Pod
+    can update a ConfigMap at a time. The Camel implementation uses this guarantee
+    to ensure only one Camel route instance is active, and any other instance has
+    to wait and acquire the lock before activating. It is a custom implementation
+    of a lock but achieves the same goal: when there are multiple Pods with the same
+    Camel application, only one of them becomes the active singleton, and the others
+    wait in passive mode.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: A more generic implementation of the *Singleton Service* pattern is provided
+    by the Dapr project. Dapr’s Distributed Lock building block provides APIs (HTTP
+    and gRPC) with swappable implementations for mutually exclusive access to shared
+    resources. The idea is that each application determines the resources the lock
+    grants access to. Then, multiple instances of the same application use a named
+    lock to exclusively access the shared resource. At any given moment, only one
+    instance of an application can hold a named lock. All other instances of the application
+    are unable to acquire the lock and therefore are not allowed to access the shared
+    resource until the lock is released through unlock or the lock times out. Thanks
+    to its lease-based locking mechanism, if an application acquires a lock, encounters
+    an exception, and cannot free the lock, the lock is automatically released after
+    a period of time using a lease. This prevents resource deadlocks in the event
+    of application failures. Behind this generic distributed lock API, Dapr will be
+    configured to use some kind of storage and lock implementation. This API can be
+    used by applications to implement access to shared resources or in-application
+    singletons.
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'An implementation with Dapr, ZooKeeper, etcd, or any other distributed lock
+    implementation would be similar to the one described: only one instance of the
+    application becomes the leader and activates itself, and other instances are passive
+    and wait for the lock. This ensures that even if multiple Pod replicas are started
+    and all are healthy, up, and running, only one service is active and performs
+    the business functionality as a singleton, and other instances wait to acquire
+    the lock in case the leader fails or shuts down.'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Pod Disruption Budget
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: While singleton service and leader election try to limit the maximum number
+    of instances a service is running at a time, the PodDisruptionBudget functionality
+    of Kubernetes provides a complementary and somewhat opposite functionality—limiting
+    the number of instances that are simultaneously down for maintenance.
+  prefs: []
+  type: TYPE_NORMAL
+- en: At its core, PodDisruptionBudget ensures a certain number or percentage of Pods
+    will not voluntarily be evicted from a node at any one point in time. *Voluntarily*
+    here means an eviction that can be delayed for a particular time—for example,
+    when it is triggered by draining a node for maintenance or upgrade (`kubectl drain`),
+    or a cluster scaling down, rather than a node becoming unhealthy, which cannot
+    be predicted or controlled.
+  prefs: []
+  type: TYPE_NORMAL
+- en: The PodDisruptionBudget in [Example 10-1](#ex-pod-disruption-budget) applies
+    to Pods that match its selector and ensures two Pods must be available all the
+    time.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Example 10-1\. PodDisruptionBudget
+  prefs:
+  - PREF_H5
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  prefs: []
+  type: TYPE_PRE
+- en: '[![1](assets/1.png)](#co_singleton_service_CO1-1)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: Selector to count available Pods.
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](assets/2.png)](#co_singleton_service_CO1-2)'
+  prefs: []
+  type: TYPE_NORMAL
+- en: At least two Pods have to be available. You can also specify a percentage, like
+    80%, to configure that only 20% of the matching Pods might be evicted.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In addition to `.spec.minAvailable`, there is also the option to use `.spec.maxUnavailable`,
+    which specifies the number of Pods from that set that can be unavailable after
+    the eviction. Similar to `.spec.minAvailable`, it can be either an absolute number
+    or a percentage, but it has a few additional limitations. You can specify only
+    either `.spec.minAvailable` or `.spec.maxUnavailable` in a single PodDisruptionBudget,
+    and then it can be used only to control the eviction of Pods that have an associated
+    controller such as ReplicaSet or StatefulSet. For Pods not managed by a controller
+    (also referred to as *bare* or *naked* Pods), other limitations around PodDisruptionBudget
+    should be considered.
+  prefs: []
+  type: TYPE_NORMAL
+- en: PodDisruptionBudget is useful for quorum-based applications that require a minimum
+    number of replicas running at all times to ensure a quorum. Or maybe when an application
+    is serving critical traffic that should never go below a certain percentage of
+    the total number of instances.
+  prefs: []
+  type: TYPE_NORMAL
+- en: PodDisruptionBudget is useful in the context of singletons too. For example,
+    setting `maxUnavailable` to `0` or setting `minAvailable` to `100%` will prevent
+    any voluntary eviction. Setting voluntary eviction to zero for a workload will
+    turn it into an unevictable Pod and will prevent draining the node forever. This
+    can be used as a step in the process where a cluster operator has to contact the
+    singleton workload owner for downtime before accidentally evicting a not highly
+    available Pod. StatefulSet, combined with PodDisruptionBudget, and headless Service
+    are Kubernetes primitives that control and help with the instance count at runtime
+    and are worth mentioning in this chapter.
+  prefs: []
+  type: TYPE_NORMAL
+- en: Discussion
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: If your use case requires strong singleton guarantees, you cannot rely on the
+    out-of-application locking mechanisms of ReplicaSets. Kubernetes ReplicaSets are
+    designed to preserve the availability of their Pods rather than to ensure At-Most-One
+    semantics for Pods. As a consequence, there are many failure scenarios that have
+    two copies of a Pod running concurrently for a short period (efor example, when
+    a node that runs the singleton Pod is partitioned from the rest of the cluster—such
+    as when replacing a deleted Pod instance with a new one). If that is not acceptable,
+    use StatefulSets or investigate the in-application locking options that provide
+    you more control over the leader election process with stronger guarantees. The
+    latter also mitigates the risk of accidentally scaling Pods by changing the number
+    of replicas. You can combine this with PodDisruptionBudget and prevent voluntary
+    eviction and disruption of your singleton workloads.
+  prefs: []
+  type: TYPE_NORMAL
+- en: In other scenarios, only a part of a containerized application should be a singleton.
+    For example, there might be a containerized application that provides an HTTP
+    endpoint that is safe to scale to multiple instances, but also a polling component
+    that must be a singleton. Using the out-of-application locking approach would
+    prevent scaling the whole service. In such a situation, we either have to split
+    the singleton component in its deployment unit to keep it a singleton (good in
+    theory but not always practical or worth the overhead) or use the in-application
+    locking mechanism and lock only the component that has to be a singleton. This
+    would allow us to scale the whole application transparently, have HTTP endpoints
+    scaled, and have other parts as *active-passive* singletons.
+  prefs: []
+  type: TYPE_NORMAL
+- en: More Information
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: '[Singleton Service Example](https://oreil.ly/aGoPv)'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[Leases](https://oreil.ly/tb9aX)'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[Specifying a Disruption Budget for Your Application](https://oreil.ly/W1ABD)'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[Leader Election in Go Client](https://oreil.ly/NU1aN)'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[Dapr: Distributed Lock Overview](https://oreil.ly/ES8Ve)'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[Creating Clustered Singleton Services on Kubernetes](https://oreil.ly/K8zI1)'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[Akka: Kubernetes Lease](https://oreil.ly/tho5T)'
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
