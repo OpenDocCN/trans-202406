@@ -1,0 +1,464 @@
+<html><head></head><body><section data-pdf-bookmark="Chapter 5. Ingress and Linkerd" data-type="chapter" epub:type="chapter" class="preface"><div class="preface" id="LUAR_ingress_and_linkerd">
+<h1 class="calibre7"><span class="calibre">Chapter 5. </span>Ingress and Linkerd</h1>
+
+
+<p class="author1">Whenever you work with Kubernetes,<a data-primary="ingress and Linkerd" data-secondary="about fixing the ingress problem" data-type="indexterm" id="ch05-ing" class="calibre4"/> you always have to find a way for your
+users <em class="hyperlink">outside</em> your cluster to be able to make requests of (some of) the
+services running <em class="hyperlink">inside</em> your cluster. This is the <em class="hyperlink">ingress problem</em> (see <a data-type="xref" href="#ingress-problem" class="calibre4">Figure 5-1</a>): the
+cluster wants to protect everything inside from the big scary Internet, but
+that’s where your legitimate users are.</p>
+
+<figure class="calibre23"><div class="figure" id="ingress-problem">
+<img alt="luar 0501" src="assets/luar_0501.png" class="calibre24"/>
+<h6 class="calibre25"><span class="calibre">Figure 5-1. </span>The ingress problem</h6>
+</div></figure>
+
+<p class="author1">There’s an entire class of applications out there,<a data-primary="ingress and Linkerd" data-secondary="ingress controllers" data-type="indexterm" id="ch05-ingcon" class="calibre4"/> unsurprisingly called
+<em class="hyperlink">ingress controllers</em>, whose sole purpose is solving the ingress problem.
+Linkerd does not include an ingress controller; instead, it allows you to mesh
+whatever ingress controller you like, as long as certain rules are followed.
+In this chapter, you’ll learn how to make Linkerd and the ingress controller
+of your choice play nicely with each other.</p>
+
+<p class="author1">There are a lot of different ingress controllers, which approach the ingress
+problem in fascinatingly different ways. However, there are some common threads
+across all of them, shown in <a data-type="xref" href="#ingress-controller-architecture" class="calibre4">Figure 5-2</a>.</p>
+
+<figure class="calibre23"><div class="figure" id="ingress-controller-architecture">
+<img alt="luar 0502" src="assets/luar_0502.png" class="calibre24"/>
+<h6 class="calibre25"><span class="calibre">Figure 5-2. </span>Ingress controller high-level architecture</h6>
+</div></figure>
+
+<p class="author1">These common threads include:<a data-primary="LoadBalancer Service" data-secondary="ingress controllers" data-type="indexterm" id="id885" class="calibre4"/><a data-primary="security" data-secondary="ingress controllers" data-type="indexterm" id="id886" class="calibre4"/><a data-primary="ingress and Linkerd" data-secondary="ingress controllers" data-tertiary="security" data-type="indexterm" id="id887" class="calibre4"/></p>
+
+<ul class="printings">
+<li class="calibre6">
+<p class="author1">They are all designed to live right at the edge of a cluster (usually behind
+a Kubernetes Service of type <code class="calibre9">LoadBalancer</code>), exposed directly to the Internet
+so that their clients can reach them. Security is always a major concern for
+an ingress controller.</p>
+</li>
+<li class="calibre6">
+<p class="author1">They always have a way to control which requests from outside get routed to
+which services inside. This is another critical security issue: installing
+an ingress controller cannot mean that all the services in your cluster are
+open to the Internet.</p>
+
+<p class="author1">All the popular ingress controllers<a data-primary="OSI model" data-secondary="documentation URL" data-type="indexterm" id="id888" class="calibre4"/><a data-primary="resources online" data-secondary="OSI model" data-type="indexterm" id="id889" class="calibre4"/><a data-primary="OSI model" data-secondary="layer 7 (application)" data-type="indexterm" id="id890" class="calibre4"/> support sophisticated routing controls at
+<a href="https://oreil.ly/S-sjB" class="calibre4">OSI layer 7</a>, typically focusing on HTTP and gRPC. Many also support more limited control
+for routing OSI layer 4 connections:</p>
+<div class="preface">
+<ul class="printings">
+<li class="calibre6">
+<p class="author1">At OSI layer 7 (the application layer), the ingress controller might have capabilities like “route an
+HTTP request where the hostname is <code class="calibre9">foo.example.com</code> and the <code class="calibre9">path</code> starts
+with <code class="calibre9">/bar/</code> to the Service named <code class="calibre9">bar-service</code>.”</p>
+</li>
+<li class="calibre6">
+<p class="author1">At OSI layer 4 (the transport layer), its <a data-primary="OSI model" data-secondary="layer 4 (transport)" data-type="indexterm" id="id891" class="calibre4"/>capabilities are more likely to be along the lines of “route TCP
+connections arriving on port 1234 to the Service named <code class="calibre9">bar-service</code>.”</p>
+</li>
+</ul>
+</div>
+
+<p class="author1">Depending on which ingress controller is in use, the actual way the user
+configures routing can vary significantly.</p>
+</li>
+<li class="calibre6">
+<p class="author1">Ingress controllers can always <a data-primary="TLS (Transport Layer Security)" data-secondary="ingress controllers" data-type="indexterm" id="id892" class="calibre4"/><a data-primary="mTLS (mutual TLS)" data-secondary="ingress controllers" data-type="indexterm" id="id893" class="calibre4"/>terminate and originate TLS connections
+(again, mostly focusing on HTTPS) to handle security at the edge of
+the cluster. This doesn’t extend Linkerd’s mTLS out to the ingress
+controller’s clients; rather, it creates two separate domains in which TLS is
+operating and requires the ingress controller to translate between them, as shown in <a data-type="xref" href="#ingress-controller-tls" class="calibre4">Figure 5-3</a>.</p>
+
+<figure class="calibre23"><div class="figure" id="ingress-controller-tls">
+<img alt="luar 0503" src="assets/luar_0503.png" class="calibre24"/>
+<h6 class="calibre25"><span class="calibre">Figure 5-3. </span>Ingress controllers and TLS</h6>
+</div></figure>
+
+<p class="author1">Keeping the two TLS worlds separate usually ends up making sense because the<a data-primary="certificates" data-secondary="ingress controllers" data-type="indexterm" id="id894" class="calibre4"/><a data-primary="X.509 certificates" data-secondary="ingress controllers" data-type="indexterm" id="id895" class="calibre4"/>
+ingress controller needs to be presenting users with certificates that match
+what the user is expecting, but when its proxy interacts with Linkerd, it
+needs to present a properly crafted workload identity. These are not the same
+thing and shouldn’t be conflated. Allowing the ingress controller to manage
+TLS with its client while allowing Linkerd to manage mTLS within the cluster
+is a powerful combination.</p>
+</li>
+<li class="calibre6">
+<p class="author1">Finally, many ingress controllers<a data-primary="authentication" data-secondary="ingress controllers" data-type="indexterm" id="id896" class="calibre4"/> offer capabilities like end user
+authentication, circuit breaking, rate limiting, etc. <a data-primary="API gateways" data-type="indexterm" id="id897" class="calibre4"/>These ingress
+controllers may also be called <em class="hyperlink">API gateways</em>. An example of how one might
+handle end user authentication is shown in <a data-type="xref" href="#api-gateway-extauth" class="calibre4">Figure 5-4</a>.</p>
+
+<figure class="calibre23"><div class="figure" id="api-gateway-extauth">
+<img alt="luar 0504" src="assets/luar_0504.png" class="calibre24"/>
+<h6 class="calibre25"><span class="calibre">Figure 5-4. </span>An API gateway providing end user authentication</h6>
+</div></figure>
+
+<p class="author1">API gateways have enormous latitude over what exactly happens to a user
+request, allowing very sophisticated capabilities indeed—though this
+is obviously out of scope for this book.<a data-startref="ch05-ing" data-type="indexterm" id="id898" class="calibre4"/><a data-startref="ch05-ingcon" data-type="indexterm" id="id899" class="calibre4"/></p>
+</li>
+</ul>
+
+
+
+
+
+
+<section class="preface" data-pdf-bookmark="Ingress Controllers with Linkerd" data-type="sect1"><div class="preface" id="id316">
+<h1 class="calibre8">Ingress Controllers with Linkerd</h1>
+
+<p class="author1">Linkerd doesn’t have a lot of constraints in terms of which ingress controller
+you use; almost any of them will work, usually without much trouble. From
+Linkerd’s point of view, the ingress is just another meshed workload, and from
+the ingress controller’s point of view, Linkerd is mostly invisible.</p>
+<div data-type="note" epub:type="note" class="calibre16"><h1 class="calibre26">Ingress Controllers in Other Meshes</h1>
+<p class="author1">Some meshes take a very different approach here: they ship with an ingress
+controller that is tightly integrated with the mesh. Linkerd takes a very
+ingress-agnostic approach because it tends to increase flexibility, lessen
+operational complexity, and make it easier to adopt the ingress controller and
+the service mesh at different times.</p>
+</div>
+</div></section>
+
+
+
+
+
+
+<section data-pdf-bookmark="The Ingress Controller Is Just Another Meshed Workload" data-type="sect1" class="preface"><div class="preface" id="id40">
+<h1 class="calibre8">The Ingress Controller Is Just Another Meshed Workload</h1>
+
+<p class="author1">From Linkerd’s point of view,<a data-primary="ingress and Linkerd" data-secondary="ingress controllers" data-tertiary="just another meshed workload" data-type="indexterm" id="ch05-mshwk" class="calibre4"/> the ingress controller is mostly just a workload
+in the mesh, as shown in <a data-type="xref" href="#ingress-is-just-a-workload" class="calibre4">Figure 5-5</a>. The fact that clients outside the cluster can talk to the ingress
+controller is really not something that Linkerd worries about: you still need
+to inject a sidecar into the ingress controller, and all the usual Linkerd
+features like mTLS and metrics just work.</p>
+
+<figure class="calibre23"><div class="figure" id="ingress-is-just-a-workload">
+<img alt="luar 0505" src="assets/luar_0505.png" class="calibre24"/>
+<h6 class="calibre25"><span class="calibre">Figure 5-5. </span>The ingress controller is just another workload</h6>
+</div></figure>
+
+<p class="author1">The single way that the ingress controller<a data-primary="skip ports" data-secondary="ingress controller incoming ports" data-type="indexterm" id="ch05-skp" class="calibre4"/><a data-primary="ports" data-secondary="opaque and skip ports" data-tertiary="ingress controller incoming ports" data-type="indexterm" id="ch05-skp2" class="calibre4"/> will almost always need special
+handling is that you’ll almost always want to tell Linkerd to skip the ingress
+controller’s incoming ports. This is because the ingress controller may need
+access to the client’s IP address for routing or authorization purposes, but
+if Linkerd is handling the connection, then the only IP address the ingress
+controller will ever see is that of the Linkerd proxy. See <a data-type="xref" href="#ingress-skip-incoming" class="calibre4">Figure 5-6</a>.</p>
+
+<figure class="calibre23"><div class="figure" id="ingress-skip-incoming">
+<img alt="luar 0506" src="assets/luar_0506.png" class="calibre24"/>
+<h6 class="calibre25"><span class="calibre">Figure 5-6. </span>Skipping incoming traffic for the ingress controller</h6>
+</div></figure>
+<div class="calibre16" data-type="note" epub:type="note"><h1 class="calibre26">Ingress Controllers Are Designed for the Edge</h1>
+<p class="author1">Remember that part of the job of an ingress controller is to sit at the edge
+of the cluster, <a data-primary="security" data-secondary="ingress controllers" data-type="indexterm" id="id900" class="calibre4"/><a data-primary="ingress and Linkerd" data-secondary="ingress controllers" data-tertiary="security" data-type="indexterm" id="id901" class="calibre4"/>so it already has to be designed to safely handle connections
+directly from the Internet. Telling Linkerd not to handle the incoming
+connections for the ingress controller shouldn’t be any problem from a
+security point of view.</p>
+</div>
+
+<p class="author1">You’ll use the <code class="calibre9">config.linkerd.io/skip-inbound-ports</code> annotation that we covered in
+<a data-type="xref" href="ch04.html#LUAR_meshing_workloads" class="calibre4">Chapter 4</a> to skip the incoming ports. Pay attention to the
+port numbers—you need to skip the port(s) on which the ingress controller
+Pod is actually listening, which will often <em class="hyperlink">not</em> be the port that the client
+uses! For example, if you associate your ingress controller with a Service
+like this one:</p>
+
+<pre data-code-language="yaml" data-type="programlisting" class="calibre36"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">Service</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">myservice</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">type</code><code class="p">:</code><code class="w"> </code><code class="calibre9">LoadBalancer</code><code class="w"/>
+<code class="w">  </code><code class="nt">ports</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">http</code><code class="w"/>
+<code class="w">    </code><code class="nt">port</code><code class="p">:</code><code class="w"> </code><code class="calibre9">80</code><code class="w"/>
+<code class="w">    </code><code class="nt">protocol</code><code class="p">:</code><code class="w"> </code><code class="calibre9">TCP</code><code class="w"/>
+<code class="w">    </code><code class="nt">targetPort</code><code class="p">:</code><code class="w"> </code><code class="calibre9">8080</code><code class="w"/></pre>
+
+<p class="author1">You’ll need to skip inbound port 8080; trying to skip inbound port 80
+would have no effect whatsoever. So, the correct annotation would be:<a data-startref="ch05-mshwk" data-type="indexterm" id="id902" class="calibre4"/><a data-startref="ch05-skp2" data-type="indexterm" id="id903" class="calibre4"/></p>
+
+<pre data-code-language="yaml" data-type="programlisting" class="calibre36"><code class="nt">config.linkerd.io/skip-inbound-ports</code><code class="p">:</code><code class="w"> </code><code class="calibre9">8080</code><code class="w"/></pre>
+</div></section>
+
+
+
+
+
+
+<section data-pdf-bookmark="Linkerd Is (Mostly) Invisible" data-type="sect1" class="preface"><div class="preface" id="id134">
+<h1 class="calibre8">Linkerd Is (Mostly) Invisible</h1>
+
+<p class="author1">From the point of view of the ingress controller,<a data-primary="ingress and Linkerd" data-secondary="Linkerd mostly invisible" data-type="indexterm" id="ch05-inv" class="calibre4"/> Linkerd is basically
+invisible. This is by design: adding Linkerd to a running application is meant
+to just work, after all! But there are two things to be aware of to make sure
+that everything is working as smoothly as possible: the ingress controller
+should use cleartext within the cluster, and it should route to Services
+rather than endpoints.</p>
+
+
+
+
+
+
+
+
+<section data-pdf-bookmark="Use Cleartext Within the Cluster" data-type="sect2" class="preface"><div class="preface" id="id41">
+<h2 class="calibre27">Use Cleartext Within the Cluster</h2>
+
+<p class="author1">We know: this is probably<a data-primary="ingress and Linkerd" data-secondary="Linkerd mostly invisible" data-tertiary="cleartext used within cluster" data-type="indexterm" id="id904" class="calibre4"/><a data-primary="cleartext used within cluster" data-type="indexterm" id="id905" class="calibre4"/> the only time in years you’ve seen anyone recommend
+using cleartext instead of TLS. To be clear, we’re <em class="hyperlink">not</em> talking about the
+connection from the client to the ingress controller! (Definitely use HTTPS
+for that.) Here, we’re talking about the connections made from the ingress
+controller to meshed workloads in the cluster, as shown in
+<a data-type="xref" href="#use-cleartext-inside-the-cluster" class="calibre4">Figure 5-7</a>.</p>
+
+<figure class="calibre23"><div class="figure" id="use-cleartext-inside-the-cluster">
+<img alt="luar 0507" src="assets/luar_0507.png" class="calibre24"/>
+<h6 class="calibre25"><span class="calibre">Figure 5-7. </span>Let Linkerd handle mTLS inside the cluster</h6>
+</div></figure>
+
+<p class="author1">For those connections, you should use cleartext. If the ingress controller
+originates TLS to the workload, Linkerd can’t do anything more than
+per-connection proxying; you miss out on per-request load balancing, proper
+request metrics, and a lot of other really useful things that Linkerd brings
+to the table. Using cleartext connections allows all the advanced
+functionality and is still safe because Linkerd’s mTLS will protect the
+connection.</p>
+</div></section>
+
+
+
+
+
+
+
+
+<section data-pdf-bookmark="Route to Services, Not Endpoints" data-type="sect2" class="preface"><div class="preface" id="id42">
+<h2 class="calibre27">Route to Services, Not Endpoints</h2>
+
+<p class="author1">This is an area where Kubernetes<a data-primary="ingress and Linkerd" data-secondary="Linkerd mostly invisible" data-tertiary="routing to Services not endpoints" data-type="indexterm" id="ch05-servep" class="calibre4"/><a data-primary="Services" data-secondary="definition" data-tertiary="three distinct parts" data-type="indexterm" id="id906" class="calibre4"/> nomenclature and concepts are particularly
+challenging. A Kubernetes Service actually has three entirely distinct parts,
+and all three are relevant for this point:<a data-primary="IP addresses" data-secondary="DNS names" data-type="indexterm" id="id907" class="calibre4"/><a data-primary="DNS services and Services" data-type="indexterm" id="id908" class="calibre4"/><a data-primary="Pods" data-secondary="IP addresses" data-tertiary="Services and" data-type="indexterm" id="id909" class="calibre4"/></p>
+
+<ul class="printings">
+<li class="calibre6">
+<p class="author1">The Service causes a name to appear in the cluster’s DNS service.</p>
+</li>
+<li class="calibre6">
+<p class="author1">That DNS name is associated with a single IP address for the Service itself.</p>
+</li>
+<li class="calibre6">
+<p class="author1">The Service is also associated with a set of Pods, and each Pod has an IP
+address that is different from every other Pod’s <em class="hyperlink">and</em> from the Service’s IP
+address.</p>
+</li>
+</ul>
+
+<p class="author1">Collectively, the IP addresses<a data-primary="IP addresses" data-secondary="Pod IP addresses as endpoints of Service" data-type="indexterm" id="id910" class="calibre4"/><a data-primary="Pods" data-secondary="IP addresses" data-tertiary="as endpoints of Service" data-tertiary-sortas="endpoints of Service" data-type="indexterm" id="id911" class="calibre4"/><a data-primary="endpoints of a Service" data-type="indexterm" id="id912" class="calibre4"/><a data-primary="Services" data-secondary="Pod IP addresses as endpoints of Service" data-type="indexterm" id="id913" class="calibre4"/> of the Pods are called the <em class="hyperlink">endpoints</em> of the
+Service. (Kubernetes also has resources called Endpoints and EndpointSlices,
+but we’re just talking about the set of Pod IP addresses for the moment.)</p>
+
+<p class="author1">These parts are shown in <a data-type="xref" href="#k8s-service-architecture-2" class="calibre4">Figure 5-8</a>. Again, all three are
+relevant when considering service mesh routing.</p>
+
+<figure class="calibre23"><div class="figure" id="k8s-service-architecture-2">
+<img alt="luar 0508" src="assets/luar_0508.png" class="calibre24"/>
+<h6 class="calibre25"><span class="calibre">Figure 5-8. </span>The three distinct parts of a Kubernetes Service</h6>
+</div></figure>
+
+<p class="author1">It matters which IP address the ingress controller uses for its connections<a data-primary="LoadBalancer Service" data-secondary="connections made to Service IP address" data-type="indexterm" id="id914" class="calibre4"/><a data-primary="IP addresses" data-secondary="Service IP address load balanced" data-type="indexterm" id="id915" class="calibre4"/> because
+normally Linkerd will only load balance connections made to the Service’s IP
+address, <em class="hyperlink">not</em> connections made directly to an endpoint’s IP address, as shown
+in <a data-type="xref" href="#linkerd-mesh-routing" class="calibre4">Figure 5-9</a>.</p>
+
+<figure class="calibre23"><div class="figure" id="linkerd-mesh-routing">
+<img alt="luar 0509" src="assets/luar_0509.png" class="calibre24"/>
+<h6 class="calibre25"><span class="calibre">Figure 5-9. </span>How Linkerd chooses where to route</h6>
+</div></figure>
+
+<p class="author1">Linkerd handles routing this way to maximize choice for the application
+designer: it’s easy to have the ingress controller simply hand off all
+load balancing decisions to Linkerd (by routing to the Service IP), and it’s
+still possible to have the ingress controller do its own load balancing (by
+routing directly to endpoint IPs).</p>
+
+<p class="author1">In most common cases, having the ingress controller route to the Service IP is
+the simplest way to take full advantage of Linkerd.</p>
+<div data-type="note" epub:type="note" class="calibre16"><h1 class="calibre26">Gateway API and Service Routing</h1>
+<p class="author1">Gateway API introduces a wrinkle<a data-primary="Gateway API" data-secondary="Service routing and" data-type="indexterm" id="id916" class="calibre4"/><a data-primary="GAMMA initiative" data-secondary="Service routing" data-type="indexterm" id="id917" class="calibre4"/><a data-primary="APIs" data-secondary="Gateway API" data-tertiary="Service routing and" data-type="indexterm" id="id918" class="calibre4"/> into this recommendation: it will need to
+support cloud gateway controllers that aren’t really running in the cluster
+and therefore can’t have a Linkerd proxy running next to them. At the same
+time, these cloud gateway controllers can be extremely latency-sensitive, so
+they’re less likely to support Service routing.</p>
+
+<p class="author1">This is an area of active work within the GAMMA initiative and Gateway API as
+a whole.</p>
+</div>
+
+<p class="author1">Depending on which ingress controller you’re using, you might need to
+specifically configure the ingress controller to do this—or you might find
+that it is not possible to configure your ingress controller to route to the
+Service IP. For these ingress controllers, you’ll need to use Linkerd’s
+<em class="hyperlink">ingress mode</em>.<a data-startref="ch05-inv" data-type="indexterm" id="id919" class="calibre4"/><a data-startref="ch05-servep" data-type="indexterm" id="id920" class="calibre4"/></p>
+</div></section>
+
+
+
+
+
+
+
+
+<section data-pdf-bookmark="Ingress Mode" data-type="sect2" class="preface"><div class="preface" id="id43">
+<h2 class="calibre27">Ingress Mode</h2>
+
+<p class="author1">When ingress mode is active and<a data-primary="ingress and Linkerd" data-secondary="Linkerd mostly invisible" data-tertiary="ingress mode" data-type="indexterm" id="id921" class="calibre4"/><a data-primary="IP addresses" data-secondary="ingress mode" data-type="indexterm" id="id922" class="calibre4"/><a data-primary="Services" data-secondary="ingress mode" data-type="indexterm" id="id923" class="calibre4"/><a data-primary="DNS services and Services" data-secondary="ingress mode" data-type="indexterm" id="id924" class="calibre4"/><a data-primary="namespaces" data-secondary="ingress mode" data-type="indexterm" id="id925" class="calibre4"/><a data-primary="endpoints of a Service" data-secondary="ingress mode" data-type="indexterm" id="id926" class="calibre4"/><a data-primary="l5d-dst-override header" data-type="indexterm" id="id927" class="calibre4"/><a data-primary="Pods" data-secondary="IP addresses" data-tertiary="ingress mode routing" data-type="indexterm" id="id928" class="calibre4"/><a data-primary="ingress and Linkerd" data-secondary="Ingress mode" data-type="indexterm" id="id929" class="calibre4"/> Linkerd receives a request to an endpoint IP
+with the <code class="calibre9">l5d-dst-override</code> header set to a fully qualified Service DNS name,
+Linkerd will route the request as if it had gone to the Service IP address for
+the service named by the <code class="calibre9">l5d-dst-override</code> header, as shown in
+<a data-type="xref" href="#ingress-mode-routing" class="calibre4">Figure 5-10</a>.</p>
+
+<p class="author1">For example, given a Service <code class="calibre9">my-service</code> in namespace <code class="calibre9">my-ns</code>, if you send a
+request directly to one of the endpoint IPs for <code class="calibre9">my-service</code> but set its
+<code class="calibre9">l5d-dst-override</code> header as shown here, then Linkerd
+will treat the connection as if it had been made to the Service IP for
+<code class="calibre9">my-service</code>:</p>
+
+<pre data-code-language="bash" data-type="programlisting" class="calibre36">l5d-dst-override:<code class="w"> </code>my-service.my-ns.svc.cluster.local<code class="w"/></pre>
+
+<figure class="calibre23"><div class="figure" id="ingress-mode-routing">
+<img alt="luar 0510" src="assets/luar_0510.png" class="calibre24"/>
+<h6 class="calibre25"><span class="calibre">Figure 5-10. </span>Linkerd ingress mode routing</h6>
+</div></figure>
+<div data-type="warning" epub:type="warning" class="calibre18"><h1 class="calibre35">The Ingress Controller Must Inject l5d-dst-override</h1>
+<p class="author1">To effectively use ingress mode,<a data-primary="ingress and Linkerd" data-secondary="ingress controllers" data-tertiary="injecting header to every request" data-type="indexterm" id="id930" class="calibre4"/><a data-primary="l5d-dst-override header" data-type="indexterm" id="id931" class="calibre4"/><a data-primary="l5d-dst-override header" data-secondary="injected to every request" data-type="indexterm" id="id932" class="calibre4"/> the ingress controller must inject the
+<code class="calibre9">l5d-dst-override</code> header into every request. An ingress controller that cannot
+inject this header is not compatible with Linkerd ingress mode. Linkerd cannot
+create the <code class="calibre9">l5d-dst-override</code> header itself, because in general, it’s not
+possible to determine the name of a Service from one of its endpoint IP
+addresses. This is because a given Pod can be part of multiple Services.</p>
+
+<p class="author1">If possible, it’s usually better to configure the ingress controller to route
+to Services than to use ingress mode.</p>
+</div>
+
+<p class="author1">To use ingress mode, inject the proxy with:</p>
+
+<pre data-code-language="yaml" data-type="programlisting" class="calibre36"><code class="nt">linkerd.io/inject</code><code class="p">:</code><code class="w"> </code><code class="calibre9">ingress</code><code class="w"/></pre>
+
+<p class="author1">rather than:</p>
+
+<pre class="calibre36" data-code-language="yaml" data-type="programlisting"><code class="nt">linkerd.io/inject</code><code class="p">:</code><code class="w"> </code><code class="calibre9">enabled</code><code class="w"/></pre>
+</div></section>
+</div></section>
+
+
+
+
+
+
+<section class="preface" data-pdf-bookmark="Specific Ingress Controller Examples" data-type="sect1"><div class="preface" id="id135">
+<h1 class="calibre8">Specific Ingress Controller Examples</h1>
+
+<p class="author1">Here are some specific examples<a data-primary="ingress and Linkerd" data-secondary="ingress controllers examples" data-type="indexterm" id="ch05-ex" class="calibre4"/><a data-primary="ingress and Linkerd" data-secondary="documentation URL" data-type="indexterm" id="id933" class="calibre4"/><a data-primary="Linkerd" data-secondary="documentation URL" data-tertiary="ingress" data-type="indexterm" id="id934" class="calibre4"/><a data-primary="documentation for Linkerd online" data-secondary="ingress" data-type="indexterm" id="id935" class="calibre4"/><a data-primary="resources online" data-secondary="Linkerd documentation" data-tertiary="ingress" data-type="indexterm" id="id936" class="calibre4"/> of configuring different ingress controllers
+for use with Linkerd. This is <em class="hyperlink">not</em> an exhaustive list by any means—it’s
+just a convenient set to show a fairly wide range of possibilities. The
+<a href="https://oreil.ly/Nl7MR" class="calibre4">Linkerd ingress documentation</a> has more on this topic.</p>
+
+<p class="author1">For our examples here, we’ll take a look at Emissary-ingress, NGINX, and Envoy
+Gateway.</p>
+
+
+
+
+
+
+
+
+<section data-pdf-bookmark="Emissary-ingress" data-type="sect2" class="preface"><div class="preface" id="id44">
+<h2 class="calibre27">Emissary-ingress</h2>
+
+<p class="author1"><a href="https://oreil.ly/vHmjZ" class="calibre4">Emissary-ingress</a> is an<a data-primary="ingress and Linkerd" data-secondary="ingress controllers examples" data-tertiary="Emissary-ingress" data-type="indexterm" id="id937" class="calibre4"/><a data-primary="Emissary-ingress" data-type="indexterm" id="id938" class="calibre4"/><a data-primary="API gateways" data-secondary="Emissary-ingress" data-type="indexterm" id="id939" class="calibre4"/> open source, Kubernetes-native API gateway that’s
+been around since 2017. It’s built on the Envoy proxy, focuses on operational
+simplicity and self-service configuration, and has been a CNCF incubating
+project since 2021. It defines its own native configuration CRDs but can also
+use Ingress resources or Gateway API. (Full disclosure: Flynn is
+the original author of Emissary.)</p>
+
+<p class="author1">There’s really not too much to dig into as far as setting up Emissary with
+Linkerd; it basically just works. Emissary defaults to routing to Services, so
+really the only thing to consider when adding Emissary to the Linkerd mesh is
+to skip Emissary’s incoming ports if you need Emissary to know client IP
+addresses. And you’ll want to make sure that Emissary isn’t originating TLS to
+the workloads.</p>
+</div></section>
+
+
+
+
+
+
+
+
+<section data-pdf-bookmark="NGINX" data-type="sect2" class="preface"><div class="preface" id="id45">
+<h2 class="calibre27">NGINX</h2>
+
+<p class="author1">NGINX is an open source API gateway<a data-primary="ingress and Linkerd" data-secondary="ingress controllers examples" data-tertiary="NGINX" data-type="indexterm" id="id940" class="calibre4"/><a data-primary="NGINX" data-type="indexterm" id="id941" class="calibre4"/><a data-primary="API gateways" data-secondary="NGINX" data-type="indexterm" id="id942" class="calibre4"/><a data-primary="ingress and Linkerd" data-secondary="ingress controllers examples" data-tertiary="Kubernetes ingress controller" data-type="indexterm" id="id943" class="calibre4"/><a data-primary="Kubernetes ingress controller" data-type="indexterm" id="id944" class="calibre4"/> and web server that was around long before Kubernetes
+came along. Though it’s not a CNCF project itself, it served as the core of
+the <a href="https://oreil.ly/m-O2N" class="calibre4"><code class="calibre9">ingress-nginx</code> Kubernetes ingress controller</a>, which was one of the first
+ingress controllers using the Ingress resource, and it has been sufficiently
+popular for long enough that people generally mean <code class="calibre9">ingress-nginx</code> when they
+talk about running NGINX for Kubernetes.</p>
+
+<p class="author1">By default, <code class="calibre9">ingress-nginx</code> will route to endpoint IPs, not Service IPs. To
+tell it to route to Service IPs instead, you’ll need to include an
+<code class="calibre9">ingress-nginx</code> annotation on your Ingress resources:</p>
+
+<pre data-code-language="yaml" data-type="programlisting" class="calibre36"><code class="nt">nginx.ingress.kubernetes.io/service-upstream</code><code class="p">:</code><code class="w"> </code><code class="s">"true"</code><code class="w"/></pre>
+
+<p class="author1">Installing and meshing <code class="calibre9">ingress-nginx</code> after that should be painless. Remember
+to look at skipping incoming ports, too!</p>
+</div></section>
+
+
+
+
+
+
+
+
+<section class="preface" data-pdf-bookmark="Envoy Gateway" data-type="sect2"><div class="preface" id="id46">
+<h2 class="calibre27">Envoy Gateway</h2>
+
+<p class="author1"><a data-primary="ingress and Linkerd" data-secondary="ingress controllers examples" data-tertiary="Envoy Gateway" data-type="indexterm" id="id945" class="calibre4"/><a data-primary="Envoy Gateway" data-type="indexterm" id="id946" class="calibre4"/><a data-primary="API gateways" data-secondary="Envoy Gateway" data-type="indexterm" id="id947" class="calibre4"/><a data-primary="Gateway API" data-secondary="Envoy Gateway" data-type="indexterm" id="id948" class="calibre4"/><a data-primary="APIs" data-secondary="Gateway API" data-tertiary="Envoy Gateway" data-type="indexterm" id="id949" class="calibre4"/>As of this writing, Envoy Gateway has recently reached version 1.0. It provides an interesting opportunity to explore using Gateway API to manage both the ingress and the mesh in a Linkerd cluster.</p>
+
+<p class="author1">Gateway API has the interesting characteristic that, by design, the user doesn’t directly install the Pods that handle data (the data plane). Instead, the user installs a Gateway API control plane that understands how to watch Gateway resources. Then, when the user creates the Gateway, the Gateway API control plane creates the data plane Pods.</p>
+
+<p class="author1">Envoy Gateway, as a Gateway API control plane, interprets this design characteristic to mean that whenever it sees a change to its Gateway resource, it actually deletes and re-creates the data plane Pods. This makes it a touch challenging to manage injecting the Envoy Gateway data plane into the mesh! The most effective way to handle this is to apply the <code class="calibre9">linkerd.io/inject</code> annotation to the <code class="calibre9">envoy-gateway-system</code> namespace, which is where the data plane Deployment will be created.</p>
+
+<p class="author1">Also, Envoy Gateway always routes to endpoint IP addresses in version 1.0. Until this is resolved in a future release of Envoy Gateway, it limits Linkerd’s ability to do advanced routing when using Envoy Gateway. (It’s possible to mesh Envoy Gateway in ingress mode and then configure HTTPRoutes to inject the <code class="calibre9">l5d-dst-override</code> header, but it’s a bit manual at present.)</p>
+
+<p class="author1">Since Linkerd always gets to manage security though (including encryption and policy), Envoy Gateway with Linkerd is still a practical and interesting combination. Just pay attention to the incoming ports, as with the other ingress controllers!<a data-startref="ch05-ex" data-type="indexterm" id="id950" class="calibre4"/></p>
+</div></section>
+</div></section>
+
+
+
+
+
+
+<section data-pdf-bookmark="Summary" data-type="sect1" class="preface"><div class="preface" id="id317">
+<h1 class="calibre8">Summary</h1>
+
+<p class="author1">One of Linkerd’s strengths is its ability to work with a wide variety of
+ingress controllers. As long as a given ingress controller can accept the
+Linkerd sidecar and route to Services, it should work seamlessly with Linkerd.
+This leaves you free to choose whatever ingress controller works well for your
+team and your application and be confident that it’ll get along with Linkerd.</p>
+</div></section>
+</div></section></body></html>

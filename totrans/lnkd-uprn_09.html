@@ -1,0 +1,958 @@
+<html><head></head><body><section data-pdf-bookmark="Chapter 9. Linkerd Route-Based Policy" data-type="chapter" epub:type="chapter" class="preface"><div class="preface" id="LUAR_route_policy">
+<h1 class="calibre7"><span class="calibre">Chapter 9. </span>Linkerd Route-Based Policy</h1>
+
+
+<p class="author1">In <a data-type="xref" href="ch08.html#LUAR_server_policy" class="calibre4">Chapter 8</a>, we discussed implementing a Linkerd
+Server-based policy to enhance the security of the emojivoto application. This
+policy ensures that Linkerd effectively safeguards the application’s workload,
+preventing unauthorized workloads from making requests. Suppose we want to go
+further, though? For example, consider a situation where you have a sensitive
+application. You need to be certain that only specific ServiceAccounts are
+allowed to make changes, and only certain others have access to read.</p>
+
+<p class="author1">That’s where Linkerd’s route-based policy mechanism comes in. In this chapter, we’ll take a closer look at
+what route-based policy can do and how to use it.</p>
+
+
+
+
+
+
+<section data-pdf-bookmark="Route-Based Policy Overview" data-type="sect1" class="preface"><div class="preface" id="id73">
+<h1 class="calibre8">Route-Based Policy Overview</h1>
+
+<p class="author1">Route-based policy gives Linkerd<a data-primary="policy" data-secondary="route-based policy overview" data-type="indexterm" id="id1312" class="calibre4"/><a data-primary="Gateway API" data-secondary="HTTPRoute resource" data-tertiary="route-based policy" data-type="indexterm" id="id1313" class="calibre4"/><a data-primary="HTTPRoute resource" data-secondary="route-based policy" data-type="indexterm" id="id1314" class="calibre4"/><a data-primary="APIs" data-secondary="Gateway API" data-tertiary="HTTPRoute and route-based policy" data-type="indexterm" id="id1315" class="calibre4"/> a way to express policy that depends not only
+on which workloads are in play, but also on which specific requests are being
+made. These specific HTTP requests are identified by using Gateway API
+HTTPRoute resources to specify matches against the HTTP path, method, headers,
+etc.—almost anything except the body can be used. Requests are still
+authenticated using mTLS identities.</p>
+
+<p class="author1">Gateway API HTTPRoute resources work by associating one or more <em class="hyperlink">parents</em> with
+one or more <em class="hyperlink">rules</em>. When using Gateway API for ingress, the parents of an
+HTTPRoute will be Gateway resources; however, this doesn’t make much sense
+when using Gateway API to configure a service mesh. When using HTTPRoutes with
+Linkerd, the parents will be Services instead, and the HTTPRoute will only
+apply to traffic that is directed to the parent Service <em class="hyperlink">and</em> that matches a
+rule specified by the HTTPRoute.</p>
+<div data-type="note" epub:type="note" class="calibre16"><h1 class="calibre26">HTTPRoutes, Gateway API, and You</h1>
+<p class="author1">Linkerd 2.13 supports the HTTPRoute object, but it actually uses a copy in the
+<code class="calibre9">policy.linkerd.io/v1</code> API group, rather than the official
+<code class="calibre9">gateway.networking.k8s.io/v1beta1</code> HTTPRoute. This sidesteps issues around
+Gateway API conformance.</p>
+
+<p class="author1">When Linkerd 2.13 shipped, it wasn’t possible for a service mesh to be conformant to the Gateway API standard. By Linkerd 2.14, Gateway API had defined<a data-primary="Mesh conformance profile" data-type="indexterm" id="id1316" class="calibre4"/><a data-primary="Gateway API" data-secondary="HTTPRoute resource" data-tertiary="Mesh conformance profile" data-type="indexterm" id="id1317" class="calibre4"/><a data-primary="HTTPRoute resource" data-secondary="route-based policy" data-tertiary="Mesh conformance profile" data-type="indexterm" id="id1318" class="calibre4"/><a data-primary="service meshes" data-secondary="Mesh conformance profile for Gateway API" data-type="indexterm" id="id1319" class="calibre4"/><a data-primary="APIs" data-secondary="Gateway API" data-tertiary="HTTPRoute and Mesh conformance profile" data-type="indexterm" id="id1320" class="calibre4"/> the <code class="calibre9">Mesh</code> <em class="hyperlink">conformance profile</em>,
+which specifies what it means for a service mesh to be conformant with Gateway
+API. Linkerd 2.14 and higher are conformant with the <code class="calibre9">Mesh</code> profile and support
+the <code class="calibre9">gateway.networking.k8s.io/v1beta1</code> HTTPRoute (as well as the older copy
+that Linkerd 2.13 supported). The end result is that some tools that rely on
+the HTTPRoute object aren’t fully compatible with Linkerd 2.13, but they’re
+happier with Linkerd 2.14 and higher.</p>
+
+<p class="author1">(If you want to know more about all of this stuff,<a data-primary="Gateway API" data-secondary="documentation URL" data-type="indexterm" id="id1321" class="calibre4"/><a data-primary="GAMMA initiative" data-secondary="documentation URL" data-type="indexterm" id="id1322" class="calibre4"/><a data-primary="resources online" data-secondary="Gateway API documentation" data-type="indexterm" id="id1323" class="calibre4"/><a data-primary="APIs" data-secondary="Gateway API" data-tertiary="documentation URL" data-type="indexterm" id="id1324" class="calibre4"/> check out
+the <a href="https://oreil.ly/n0mtd" class="calibre4">Gateway API introduction</a> and read about Gateway API and the GAMMA
+initiative.)</p>
+</div>
+
+<p class="author1">Route-based policy is the most detailed<a data-primary="policy" data-secondary="route-based policy overview" data-tertiary="planning, engineering, and effort involved" data-type="indexterm" id="id1325" class="calibre4"/> and granular level of policy in
+Linkerd, and using it requires a significant amount of planning and a
+significant amount of YAML. When you’re ready to secure your environments to
+this degree, you need to be aware of the cost in terms of engineering time
+and effort. We also <em class="hyperlink">strongly</em> recommend that when building any kind of policy
+you use multiple environments—at least one for building and testing policy,
+and another for enforcing it. Ideally, you’ll integrate policy creation,
+auditing, and promotion into your standard application development lifecycle.</p>
+</div></section>
+
+
+
+
+
+
+<section data-pdf-bookmark="The booksapp Sample Application" data-type="sect1" class="preface"><div class="preface" id="id157">
+<h1 class="calibre8">The booksapp Sample Application</h1>
+
+<p class="author1">We’ll be using the <a href="https://oreil.ly/qf8il" class="calibre4">booksapp sample
+application</a> to show<a data-primary="policy" data-secondary="route-based with booksapp application" data-type="indexterm" id="id1326" class="calibre4"/><a data-primary="resources online" data-secondary="booksapp application" data-type="indexterm" id="id1327" class="calibre4"/><a data-primary="booksapp application" data-secondary="route-based policy" data-type="indexterm" id="id1328" class="calibre4"/> how you can use route-based policy to
+restrict calls based not just on the workload, but also on the specific
+endpoints being accessed.</p>
+
+<p class="author1">As shown in <a data-type="xref" href="#books-app-connections" class="calibre4">Figure 9-1</a>, the app is very similar to emojivoto.</p>
+
+<figure class="calibre23"><div class="figure" id="books-app-connections">
+<img alt="luar 0901" src="assets/luar_0901.png" class="calibre24"/>
+<h6 class="calibre25"><span class="calibre">Figure 9-1. </span>booksapp interapplication connections</h6>
+</div></figure>
+
+<p class="author1">In booksapp, two of our backing services (<code class="calibre9">books</code> and <code class="calibre9">authors</code>) need to
+talk to each other—but they shouldn’t all have unrestricted access to each
+other. For example, the <code class="calibre9">authors</code> workload should have access to read from the
+<code class="calibre9">books</code> workload, so that it can show the books each author has written. The
+UI for <code class="calibre9">authors</code> also allows you to add a new book for the author you’re
+looking at, so <code class="calibre9">authors</code> needs to be able to POST new books to <code class="calibre9">books</code>.
+However, it mustn’t be able to modify or delete books.</p>
+
+<p class="author1">Ultimately, we want to allow only the following requests, and no others:</p>
+
+<ul class="printings">
+<li class="calibre6">
+<p class="author1">Infrastructure:</p>
+
+<ul class="printings">
+<li class="calibre6">
+<p class="author1">The <code class="calibre9">kubelet</code> needs to be able to run health checks for all our workloads.</p>
+</li>
+<li class="calibre6">
+<p class="author1">Linkerd Viz needs to be able to scrape metrics from all workloads.</p>
+</li>
+</ul>
+</li>
+<li class="calibre6">
+<p class="author1">Core application functionality:</p>
+
+<ul class="printings">
+<li class="calibre6">
+<p class="author1"><code class="calibre9">webapp</code> needs to be able to read, create, delete, and update both <code class="calibre9">authors</code> and <code class="calibre9">books</code>.</p>
+</li>
+<li class="calibre6">
+<p class="author1"><code class="calibre9">authors</code> needs to be able to read and create <code class="calibre9">books</code>.</p>
+</li>
+<li class="calibre6">
+<p class="author1"><code class="calibre9">books</code> needs to be able to read and create <code class="calibre9">authors</code>.</p>
+</li>
+</ul>
+</li>
+<li class="calibre6">
+<p class="author1">Traffic generator:</p>
+
+<ul class="printings">
+<li class="calibre6">
+<p class="author1"><code class="calibre9">traffic</code> needs to have full access to <code class="calibre9">webapp</code>.</p>
+</li>
+</ul>
+</li>
+</ul>
+
+<p class="author1">This can be seen in <a data-type="xref" href="#books-policy-overview" class="calibre4">Figure 9-2</a>.</p>
+
+<figure class="calibre23"><div class="figure" id="books-policy-overview">
+<img alt="luar 0902" src="assets/luar_0902.png" class="calibre24"/>
+<h6 class="calibre25"><span class="calibre">Figure 9-2. </span>booksapp application policy overview</h6>
+</div></figure>
+
+
+
+
+
+
+
+
+<section data-pdf-bookmark="Installing booksapp" data-type="sect2" class="preface"><div class="preface" id="id158">
+<h2 class="calibre27">Installing booksapp</h2>
+
+<p class="author1">The setup is fairly simple. <a data-primary="policy" data-secondary="route-based with booksapp application" data-tertiary="installing booksapp" data-type="indexterm" id="id1329" class="calibre4"/><a data-primary="booksapp application" data-secondary="installing booksapp" data-type="indexterm" id="id1330" class="calibre4"/>We’ll pull down the latest version of the booksapp
+application, add the Linkerd proxy, and apply it to our cluster, as shown in
+<a data-type="xref" href="#EX11-setup" class="calibre4">Example 9-1</a>.</p>
+<div data-type="example" id="EX11-setup" class="calibre40">
+<h5 class="calibre41"><span class="calibre">Example 9-1. </span>Setup</h5>
+
+<pre data-code-language="bash" data-type="programlisting" class="calibre42"><code class="c"># Install booksapp...</code>
+$<code class="w"> </code>kubectl<code class="w"> </code>create<code class="w"> </code>ns<code class="w"> </code>booksapp<code class="w"> </code><code class="o">&amp;&amp;</code><code class="w"> </code><code class="se">\</code>
+<code class="w">  </code>curl<code class="w"> </code>--proto<code class="w"> </code><code class="s">'=https'</code><code class="w"> </code>--tlsv1.2<code class="w"> </code>-sSfL<code class="w"> </code>https://run.linkerd.io/booksapp.yml<code class="w"> </code><code class="se">\</code>
+<code class="w">  </code><code class="p">|</code><code class="w"> </code>linkerd<code class="w"> </code>inject<code class="w"> </code>-<code class="w"> </code><code class="se">\</code>
+<code class="w">  </code><code class="p">|</code><code class="w"> </code>kubectl<code class="w"> </code>-n<code class="w"> </code>booksapp<code class="w"> </code>apply<code class="w"> </code>-f<code class="w"> </code>-<code class="w"/>
+
+<code class="c"># Wait for Pods to be running...</code>
+$<code class="w"> </code>kubectl<code class="w"> </code>rollout<code class="w"> </code>status<code class="w"> </code>-n<code class="w"> </code>booksapp<code class="w"> </code>deploy<code class="w"/>
+
+<code class="c"># ...then test using a port forward.</code>
+$<code class="w"> </code>kubectl<code class="w"> </code>-n<code class="w"> </code>booksapp<code class="w"> </code>port-forward<code class="w"> </code>svc/webapp<code class="w"> </code><code class="m">8080</code>:80<code class="w"/>
+
+<code class="c"># Now browse to localhost:8080.</code></pre></div>
+</div></section>
+</div></section>
+
+
+
+
+
+
+<section class="preface" data-pdf-bookmark="Configuring booksapp Policy" data-type="sect1"><div class="preface" id="id212">
+<h1 class="calibre8">Configuring booksapp Policy</h1>
+
+<p class="author1">At this point, booksapp is running<a data-primary="policy" data-secondary="route-based with booksapp application" data-tertiary="configuring booksapp policy" data-type="indexterm" id="id1331" class="calibre4"/><a data-primary="booksapp application" data-secondary="route-based policy" data-tertiary="configuring booksapp policy" data-type="indexterm" id="id1332" class="calibre4"/> with no restrictions: everything can
+access everything else. This is often the simplest place to start when working
+with policy; once you know that the application is working, you can start
+tightening things up.</p>
+
+<p class="author1">We’ll work through our booksapp policy in steps:</p>
+<ol class="calibre54">
+<li class="calibre55">
+<p class="author1">At the start, we’ll work on the low-level infrastructure, switching to
+default deny and allowing Linkerd Viz to still work. We’ll use
+Server-based policy for this; it doesn’t require the granularity of route-based
+policy, so we’ll avoid the complexity.</p>
+</li>
+<li class="calibre55">
+<p class="author1">We’ll next configure minimal route-based policy to allow read-only access to the
+application.</p>
+</li>
+<li class="calibre55">
+<p class="author1">We’ll then allow writes to the <code class="calibre9">authors</code> workload, then the <code class="calibre9">books</code>
+workload.</p>
+</li>
+<li class="calibre55">
+<p class="author1">Finally, we’ll allow access from the traffic generator to the <code class="calibre9">webapp</code>.</p>
+</li>
+
+</ol>
+
+<p class="author1">The advantage of doing things in this order is that it should quickly make it
+possible to see at least part of the application working, and we can do
+incremental testing. This is usually a very good idea when doing complex
+configuration, and (as we’ve said before) route-based policy is very complex.</p>
+
+
+
+
+
+
+
+
+<section data-pdf-bookmark="Infrastructure Policy" data-type="sect2" class="preface"><div class="preface" id="id74">
+<h2 class="calibre27">Infrastructure Policy</h2>
+
+<p class="author1">The first step is infrastructure policy.<a data-primary="policy" data-secondary="route-based with booksapp application" data-tertiary="infrastructure policy" data-type="indexterm" id="id1333" class="calibre4"/><a data-primary="booksapp application" data-secondary="route-based policy" data-tertiary="infrastructure policy" data-type="indexterm" id="id1334" class="calibre4"/> We’ll switch the <code class="calibre9">booksapp</code> namespace
+to default deny using a Server-based policy. In turn, this will require us to
+explicitly permit Linkerd Viz to keep working. All of this is shown in
+<a data-type="xref" href="#EX-infra-policy" class="calibre4">Example 9-2</a>.</p>
+<div class="calibre40" data-type="example" id="EX-infra-policy">
+<h5 class="calibre41"><span class="calibre">Example 9-2. </span>books-infra-policy.yaml</h5>
+
+<pre data-code-language="bash" data-type="programlisting" class="calibre42"><code class="c"># Create books-infra-policy.yaml.</code>
+$<code class="w"> </code>cat<code class="w"> </code><code class="s">&lt;&lt;EOF &gt; books-infra-policy.yaml</code>
+<code class="s">---</code>
+<code class="s">apiVersion: policy.linkerd.io/v1beta1</code>
+<code class="s">kind: Server</code>
+<code class="s">metadata:</code>
+<code class="s">  namespace: booksapp</code>
+<code class="s">  name: linkerd-admin</code>
+<code class="s">spec:</code>
+<code class="s">  podSelector:</code>
+<code class="s">    matchLabels: {}</code>
+<code class="s">  port: linkerd-admin</code>
+<code class="s">  proxyProtocol: HTTP/2</code>
+<code class="s">---</code>
+<code class="s">apiVersion: policy.linkerd.io/v1alpha1</code>
+<code class="s">kind: AuthorizationPolicy</code>
+<code class="s">metadata:</code>
+<code class="s">  name: allow-viz</code>
+<code class="s">  namespace: booksapp</code>
+<code class="s">spec:</code>
+<code class="s">  targetRef:</code>
+<code class="s">    kind: Namespace</code>
+<code class="s">    name: booksapp</code>
+<code class="s">  requiredAuthenticationRefs:</code>
+<code class="s">    - name: linkerd-viz</code>
+<code class="s">      kind: MeshTLSAuthentication</code>
+<code class="s">      group: policy.linkerd.io</code>
+<code class="s">---</code>
+<code class="s">apiVersion: policy.linkerd.io/v1alpha1</code>
+<code class="s">kind: MeshTLSAuthentication</code>
+<code class="s">metadata:</code>
+<code class="s">  name: linkerd-viz</code>
+<code class="s">  namespace: booksapp</code>
+<code class="s">spec:</code>
+<code class="s">  identities:</code>
+<code class="s">    - "tap.linkerd-viz.serviceaccount.identity.linkerd.cluster.local"</code>
+<code class="s">    - "prometheus.linkerd-viz.serviceaccount.identity.linkerd.cluster.local"</code>
+<code class="s">EOF</code><code class="w"/></pre></div>
+
+<p class="author1">This is similar to what we did in <a data-type="xref" href="ch08.html#LUAR_server_policy" class="calibre4">Chapter 8</a> to allow Linkerd Viz. Let’s go ahead and apply
+the infrastructure policy YAML, then switch the <code class="calibre9">booksapp</code> namespace to
+default deny, as shown in <a data-type="xref" href="#EX-apply-infra-policy" class="calibre4">Example 9-3</a>.</p>
+<div class="calibre40" data-type="example" id="EX-apply-infra-policy">
+<h5 class="calibre41"><span class="calibre">Example 9-3. </span>Setting up infrastructure policy</h5>
+
+<pre data-code-language="bash" data-type="programlisting" class="calibre42"><code class="c"># Apply the YAML we just created...</code>
+$<code class="w"> </code>kubectl<code class="w"> </code>apply<code class="w"> </code>-f<code class="w"> </code>books-infra-policy.yaml<code class="w"/>
+
+<code class="c"># Switch `booksapp` to default deny...</code>
+$<code class="w"> </code>kubectl<code class="w"> </code>annotate<code class="w"> </code>namespace<code class="w"> </code>booksapp<code class="w"> </code>config.linkerd.io/default-inbound-policy<code class="o">=</code>deny<code class="w"/>
+
+<code class="c"># ...and finally, restart the booksapp workloads.</code>
+$<code class="w"> </code>kubectl<code class="w"> </code>rollout<code class="w"> </code>restart<code class="w"> </code>deployment<code class="w"> </code>-n<code class="w"> </code>booksapp<code class="w"/></pre></div>
+<div data-type="note" epub:type="note" class="calibre16"><h1 class="calibre26">What About Health Checks?</h1>
+<p class="author1">The astute observer will notice that<a data-primary="policy" data-secondary="route-based with booksapp application" data-tertiary="HTTPRoute and health checks" data-type="indexterm" id="id1335" class="calibre4"/><a data-primary="booksapp application" data-secondary="route-based policy" data-tertiary="HTTPRoute and health checks" data-type="indexterm" id="id1336" class="calibre4"/><a data-primary="HTTPRoute resource" data-secondary="route-based policy" data-tertiary="health checks and HTTPRoutes" data-type="indexterm" id="id1337" class="calibre4"/><a data-primary="health checks and HTTPRoutes" data-type="indexterm" id="id1338" class="calibre4"/><a data-primary="Pods" data-secondary="policy" data-tertiary="health checks and HTTPRoutes" data-type="indexterm" id="id1339" class="calibre4"/><a data-primary="liveness and readiness probes and HTTPRoutes" data-type="indexterm" id="id1340" class="calibre4"/> while our Pods have readiness and
+liveness probes configured, they’re still starting and staying ready even
+though we haven’t carved out any explicit authorizations for the <code class="calibre9">kubelet</code> to
+probe our Pods. That’s because Linkerd will, by default, look for liveness and
+readiness probes for your applications and create a default HTTPRoute that
+will allow that traffic—but it will only do this <em class="hyperlink">as long as you haven’t
+created HTTPRoutes yourself</em>.</p>
+
+<p class="author1">As soon as you begin creating your own HTTPRoutes for your application,
+Linkerd will delete its default routes, which means that you’ll need to ensure
+that you create routes for your liveness and readiness probes.</p>
+</div>
+
+<p class="author1">At this point, with the <code class="calibre9">booksapp</code> namespace switched to default deny and only
+Viz authorized, our application won’t work at all. Let’s continue with getting
+our app running.</p>
+</div></section>
+
+
+
+
+
+
+
+
+<section data-pdf-bookmark="Read-Only Access" data-type="sect2" class="preface"><div class="preface" id="id75">
+<h2 class="calibre27">Read-Only Access</h2>
+
+<p class="author1">The next thing we’ll do is use<a data-primary="policy" data-secondary="route-based with booksapp application" data-tertiary="read-only access" data-type="indexterm" id="ch09-reado" class="calibre4"/><a data-primary="read-only access to an application" data-type="indexterm" id="ch09-reado2" class="calibre4"/><a data-primary="booksapp application" data-secondary="route-based policy" data-tertiary="read-only access" data-type="indexterm" id="ch09-reado3" class="calibre4"/> route-based policy to allow read-only access to
+the application. We’ll be able to use a web browser to look up books and
+authors, but we won’t be able to change anything.</p>
+
+<p class="author1">Everything we’re doing from this point forward is just applying YAML, so we’ll
+just show the YAML that you need to apply. We’ll do this from the inside
+out, so our first step is to permit the <code class="calibre9">books</code> workload to fetch
+<code class="calibre9">/authors.json</code> and <code class="calibre9">/authors/</code> from the <code class="calibre9">authors</code> workload. This requires
+four resources.</p>
+
+<p class="author1">First up, we need to define a Server for the <code class="calibre9">authors</code> workload in the <code class="calibre9">books</code>
+namespace, as shown in <a data-type="xref" href="#EX-route-authors-server" class="calibre4">Example 9-4</a>. This will allow us to use
+an HTTPRoute to configure policy for specific requests being made to the
+<code class="calibre9">authors</code> workload.</p>
+<div data-type="example" id="EX-route-authors-server" class="calibre40">
+<h5 class="calibre41"><span class="calibre">Example 9-4. </span><code class="calibre9">authors</code> Server</h5>
+
+<pre data-code-language="yaml" data-type="programlisting" class="calibre42"><code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io/v1beta1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">Server</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">authors</code><code class="w"/>
+<code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">app</code><code class="p">:</code><code class="w"> </code><code class="calibre9">authors</code><code class="w"/>
+<code class="w">    </code><code class="nt">app.kubernetes.io/part-of</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="w">    </code><code class="nt">project</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">podSelector</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">matchLabels</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">app</code><code class="p">:</code><code class="w"> </code><code class="calibre9">authors</code><code class="w"/>
+<code class="w">      </code><code class="nt">project</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="w">  </code><code class="nt">port</code><code class="p">:</code><code class="w"> </code><code class="calibre9">service</code><code class="w"/>
+<code class="w">  </code><code class="nt">proxyProtocol</code><code class="p">:</code><code class="w"> </code><code class="calibre9">HTTP/1</code><code class="w"/></pre></div>
+
+<p class="author1">Next, we’ll create an HTTPRoute specifying the two requests that we want to
+allow, as shown in <a data-type="xref" href="#EX-route-authors-httproute" class="calibre4">Example 9-5</a>.</p>
+<div data-type="example" id="EX-route-authors-httproute" class="calibre40">
+<h5 class="calibre41"><span class="calibre">Example 9-5. </span><code class="calibre9">authors</code> HTTPRoute</h5>
+
+<pre data-code-language="yaml" data-type="programlisting" class="calibre42"><code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io/v1beta1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">HTTPRoute</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">authors-get-route</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">app.kubernetes.io/part-of</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="w">    </code><code class="nt">project</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">parentRefs</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">authors</code><code class="w"/>
+<code class="w">      </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">Server</code><code class="w"/>
+<code class="w">      </code><code class="nt">group</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io</code><code class="w"/>
+<code class="w">  </code><code class="nt">rules</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">matches</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">path</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="nt">value</code><code class="p">:</code><code class="w"> </code><code class="s">"/authors.json"</code><code class="w"/>
+<code class="w">        </code><code class="nt">method</code><code class="p">:</code><code class="w"> </code><code class="calibre9">GET</code><code class="w"/>
+<code class="w">      </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">path</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="nt">value</code><code class="p">:</code><code class="w"> </code><code class="s">"/authors/"</code><code class="w"/>
+<code class="w">          </code><code class="nt">type</code><code class="p">:</code><code class="w"> </code><code class="s">"PathPrefix"</code><code class="w"/>
+<code class="w">        </code><code class="nt">method</code><code class="p">:</code><code class="w"> </code><code class="calibre9">GET</code><code class="w"/></pre></div>
+<div data-type="note" epub:type="note" class="calibre16"><h1 class="calibre26">Which HTTPRoute?</h1>
+<p class="author1">We’ve used <code class="calibre9">policy.linkerd.io</code> HTTPRoutes to accommodate readers with
+older versions of Linkerd. If you’re using Linkerd 2.14 or newer, though, feel
+free to switch to <code class="calibre9">gateway.network⁠ing.k8s.io/v1beta1</code> HTTPRoutes!</p>
+</div>
+
+<p class="author1">Finally, we can specify an AuthorizationPolicy/MeshTLSAuthentication pair,
+where the <code class="calibre9">targetRef</code> of the AuthorizationPolicy is the HTTPRoute we just
+defined, to define which identities are allowed to use this HTTPRoute, as shown in <a data-type="xref" href="#EX-route-authors-auth" class="calibre4">Example 9-6</a>.</p>
+<div data-type="example" id="EX-route-authors-auth" class="calibre40">
+<h5 class="calibre41"><span class="calibre">Example 9-6. </span><code class="calibre9">authors</code> AuthorizationPolicy and MeshTLSAuthentication</h5>
+
+<pre data-code-language="yaml" data-type="programlisting" class="calibre42"><code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io/v1alpha1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">AuthorizationPolicy</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">allow-books-to-authors</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">app.kubernetes.io/part-of</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="w">    </code><code class="nt">project</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">targetRef</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">group</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io</code><code class="w"/>
+<code class="w">    </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">HTTPRoute</code><code class="w"/>
+<code class="w">    </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">authors-get-route</code><code class="w"/>
+<code class="w">  </code><code class="nt">requiredAuthenticationRefs</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">books</code><code class="w"/>
+<code class="w">      </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">MeshTLSAuthentication</code><code class="w"/>
+<code class="w">      </code><code class="nt">group</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io</code><code class="w"/>
+<code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io/v1alpha1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">MeshTLSAuthentication</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">books</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">identities</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="s">"books.booksapp.serviceaccount.identity.linkerd.cluster.local"</code><code class="w"/></pre></div>
+
+<p class="author1">Once these resources are applied, the <code class="calibre9">books</code> workload will be able to talk to
+the <code class="calibre9">authors</code> workload. <a data-primary="policy" data-secondary="route-based with booksapp application" data-tertiary="HTTPRoute and health checks" data-type="indexterm" id="id1341" class="calibre4"/><a data-primary="booksapp application" data-secondary="route-based policy" data-tertiary="HTTPRoute and health checks" data-type="indexterm" id="id1342" class="calibre4"/><a data-primary="health checks and HTTPRoutes" data-type="indexterm" id="id1343" class="calibre4"/><a data-primary="HTTPRoute resource" data-secondary="route-based policy" data-tertiary="health checks and HTTPRoutes" data-type="indexterm" id="id1344" class="calibre4"/><a data-primary="Pods" data-secondary="policy" data-tertiary="health checks and HTTPRoutes" data-type="indexterm" id="id1345" class="calibre4"/>However, we’ve just broken health checks for the
+<code class="calibre9">authors</code> workload, as we noted earlier. As soon as we attached our
+HTTPRoute to the <code class="calibre9">authors</code> Server, the probe routes generated by Linkerd went
+away.</p>
+
+<p class="author1">To allow those probe requests, we’ll use a separate HTTPRoute, which  will
+allow us to use a NetworkAuthorization to permit unauthenticated probe
+requests from anywhere in our cluster. We definitely don’t want to permit any
+other requests to use that NetworkAuthorization, so we really do need a
+separate HTTPRoute for the probes! This is shown in
+<a data-type="xref" href="#EX-route-authors-probes" class="calibre4">Example 9-7</a>.</p>
+<div data-type="example" id="EX-route-authors-probes" class="calibre40">
+<h5 class="calibre41"><span class="calibre">Example 9-7. </span>Re-permitting <code class="calibre9">authors</code> health probes</h5>
+
+<pre data-code-language="yaml" data-type="programlisting" class="calibre42"><code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io/v1beta1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">HTTPRoute</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">books-probes</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">parentRefs</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">authors</code><code class="w"/>
+<code class="w">      </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">Server</code><code class="w"/>
+<code class="w">      </code><code class="nt">group</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io</code><code class="w"/>
+<code class="w">  </code><code class="nt">rules</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">matches</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">path</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="nt">value</code><code class="p">:</code><code class="w"> </code><code class="s">"/ping"</code><code class="w"/>
+<code class="w">        </code><code class="nt">method</code><code class="p">:</code><code class="w"> </code><code class="calibre9">GET</code><code class="w"/>
+<code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io/v1alpha1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">AuthorizationPolicy</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">authors-probe</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">targetRef</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">group</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io</code><code class="w"/>
+<code class="w">    </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">HTTPRoute</code><code class="w"/>
+<code class="w">    </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">books-probes</code><code class="w"/>
+<code class="w">  </code><code class="nt">requiredAuthenticationRefs</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">probe-authn</code><code class="w"/>
+<code class="w">      </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">NetworkAuthentication</code><code class="w"/>
+<code class="w">      </code><code class="nt">group</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io</code><code class="w"/>
+<code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io/v1alpha1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">NetworkAuthentication</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">probe-authn</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">networks</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">cidr</code><code class="p">:</code><code class="w"> </code><code class="calibre9">0.0.0.0/0</code><code class="w"/>
+<code class="w">  </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">cidr</code><code class="p">:</code><code class="w"> </code><code class="calibre9">::/0</code><code class="w"/></pre></div>
+<div data-type="note" epub:type="note" class="calibre16"><h1 class="calibre26">What’s in a CIDR?</h1>
+<p class="author1">The <code class="calibre9">probe-authn</code> NetworkAuthorization<a data-primary="CIDR (Classless Inter-Domain Routing)" data-secondary="NetworkAuthentication CIDR ranges" data-type="indexterm" id="id1346" class="calibre4"/> is unnecessarily broad; it should
+really be limited just to the Pod CIDR range for your cluster. We can’t
+predict that, so you should feel free to replace the CIDR ranges in the
+<code class="calibre9">probe-authn</code> NetworkAuthentication resource with the appropriate values for
+your cluster.</p>
+</div>
+
+<p class="author1">At this point, the <code class="calibre9">books</code> workload should be able to read from the <code class="calibre9">authors</code>
+workload, and probes to the <code class="calibre9">authors</code> workload should work as well. Now we
+need to repeat all of this to permit the <code class="calibre9">authors</code> workload to talk to
+<code class="calibre9">books</code>, as shown in <a data-type="xref" href="#EX-route-books-from-authors" class="calibre4">Example 9-8</a>.</p>
+<div data-type="example" id="EX-route-books-from-authors" class="calibre40">
+<h5 class="calibre41"><span class="calibre">Example 9-8. </span>Allowing <code class="calibre9">authors</code> to read from <code class="calibre9">books</code></h5>
+
+<pre data-code-language="yaml" data-type="programlisting" class="calibre42"><code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io/v1beta1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">Server</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">books</code><code class="w"/>
+<code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">app</code><code class="p">:</code><code class="w"> </code><code class="calibre9">books</code><code class="w"/>
+<code class="w">    </code><code class="nt">app.kubernetes.io/part-of</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="w">    </code><code class="nt">project</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">podSelector</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">matchLabels</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">app</code><code class="p">:</code><code class="w"> </code><code class="calibre9">books</code><code class="w"/>
+<code class="w">      </code><code class="nt">project</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="w">  </code><code class="nt">port</code><code class="p">:</code><code class="w"> </code><code class="calibre9">service</code><code class="w"/>
+<code class="w">  </code><code class="nt">proxyProtocol</code><code class="p">:</code><code class="w"> </code><code class="calibre9">HTTP/1</code><code class="w"/>
+<code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io/v1beta1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">HTTPRoute</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">books-get-route</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">app.kubernetes.io/part-of</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="w">    </code><code class="nt">project</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">parentRefs</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">books</code><code class="w"/>
+<code class="w">      </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">Server</code><code class="w"/>
+<code class="w">      </code><code class="nt">group</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io</code><code class="w"/>
+<code class="w">  </code><code class="nt">rules</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">matches</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">path</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="nt">value</code><code class="p">:</code><code class="w"> </code><code class="s">"/books.json"</code><code class="w"/>
+<code class="w">        </code><code class="nt">method</code><code class="p">:</code><code class="w"> </code><code class="calibre9">GET</code><code class="w"/>
+<code class="w">      </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">path</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="nt">value</code><code class="p">:</code><code class="w"> </code><code class="s">"/books/"</code><code class="w"/>
+<code class="w">          </code><code class="nt">type</code><code class="p">:</code><code class="w"> </code><code class="s">"PathPrefix"</code><code class="w"/>
+<code class="w">        </code><code class="nt">method</code><code class="p">:</code><code class="w"> </code><code class="calibre9">GET</code><code class="w"/>
+<code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io/v1alpha1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">AuthorizationPolicy</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">allow-authors-to-books</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">app.kubernetes.io/part-of</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="w">    </code><code class="nt">project</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">targetRef</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">group</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io</code><code class="w"/>
+<code class="w">    </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">HTTPRoute</code><code class="w"/>
+<code class="w">    </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">books-get-route</code><code class="w"/>
+<code class="w">  </code><code class="nt">requiredAuthenticationRefs</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">authors</code><code class="w"/>
+<code class="w">      </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">MeshTLSAuthentication</code><code class="w"/>
+<code class="w">      </code><code class="nt">group</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io</code><code class="w"/>
+<code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io/v1alpha1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">MeshTLSAuthentication</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">authors</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">identities</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="s">"authors.booksapp.serviceaccount.identity.linkerd.cluster.local"</code><code class="w"/>
+<code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io/v1beta1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">HTTPRoute</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">authors-probes</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">parentRefs</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">authors</code><code class="w"/>
+<code class="w">      </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">Server</code><code class="w"/>
+<code class="w">      </code><code class="nt">group</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io</code><code class="w"/>
+<code class="w">  </code><code class="nt">rules</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">matches</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">path</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="nt">value</code><code class="p">:</code><code class="w"> </code><code class="s">"/ping"</code><code class="w"/>
+<code class="w">        </code><code class="nt">method</code><code class="p">:</code><code class="w"> </code><code class="calibre9">GET</code><code class="w"/>
+<code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io/v1alpha1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">AuthorizationPolicy</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">authors-probe</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">targetRef</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">group</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io</code><code class="w"/>
+<code class="w">    </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">HTTPRoute</code><code class="w"/>
+<code class="w">    </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">authors-probes</code><code class="w"/>
+<code class="w">  </code><code class="nt">requiredAuthenticationRefs</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">probe-authn</code><code class="w"/>
+<code class="w">      </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">NetworkAuthentication</code><code class="w"/>
+<code class="w">      </code><code class="nt">group</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io</code><code class="w"/></pre></div>
+
+<p class="author1">Finally, we need to permit <code class="calibre9">webapp</code> to talk to both <code class="calibre9">authors</code> and <code class="calibre9">books</code>. We
+can use our existing HTTPRoutes here, and we don’t need another Server. All we
+need to do is add new AuthorizationPolicy and MeshTLSAuthentication
+resources, as shown in <a data-type="xref" href="#EX-route-allow-webapp" class="calibre4">Example 9-9</a>.</p>
+<div data-type="note" epub:type="note" class="calibre16"><h1 class="calibre26">What’s in an Identity?</h1>
+<p class="author1">We could also do this by adding<a data-primary="policy" data-secondary="route-based policy overview" data-tertiary="granularity of route-based policy" data-type="indexterm" id="id1347" class="calibre4"/> another identity to our existing <code class="calibre9">authors</code> and
+<code class="calibre9">books</code> MeshTLSAuthentications. However, the fine granularity available with
+route-based policy is a major point in its favor, and using a separate
+AuthorizationPolicy and MeshTLSAu⁠thentication helps preserve that.</p>
+</div>
+<div data-type="example" id="EX-route-allow-webapp" class="calibre40">
+<h5 class="calibre41"><span class="calibre">Example 9-9. </span>Permitting web access</h5>
+
+<pre data-code-language="yaml" data-type="programlisting" class="calibre42"><code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io/v1alpha1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">AuthorizationPolicy</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">allow-webapp-to-books</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">app.kubernetes.io/part-of</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="w">    </code><code class="nt">project</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">targetRef</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">group</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io</code><code class="w"/>
+<code class="w">    </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">HTTPRoute</code><code class="w"/>
+<code class="w">    </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">authors-get-route</code><code class="w"/>
+<code class="w">  </code><code class="nt">requiredAuthenticationRefs</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">webapp</code><code class="w"/>
+<code class="w">      </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">MeshTLSAuthentication</code><code class="w"/>
+<code class="w">      </code><code class="nt">group</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io</code><code class="w"/>
+<code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io/v1alpha1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">AuthorizationPolicy</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">allow-webapp-to-authors</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">app.kubernetes.io/part-of</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="w">    </code><code class="nt">project</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">targetRef</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">group</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io</code><code class="w"/>
+<code class="w">    </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">HTTPRoute</code><code class="w"/>
+<code class="w">    </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">authors-get-route</code><code class="w"/>
+<code class="w">  </code><code class="nt">requiredAuthenticationRefs</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">webapp</code><code class="w"/>
+<code class="w">      </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">MeshTLSAuthentication</code><code class="w"/>
+<code class="w">      </code><code class="nt">group</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io</code><code class="w"/>
+<code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io/v1alpha1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">MeshTLSAuthentication</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">webapp</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">identities</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="s">"webapp.booksapp.serviceaccount.identity.linkerd.cluster.local"</code><code class="w"/></pre></div>
+
+<p class="author1">At this point, we should be able to use a web browser to view the booksapp
+GUI, and we should be able to read everything, but modify nothing.</p>
+<aside data-type="sidebar" epub:type="sidebar" class="calibre38"><div class="sidebar" id="id1348">
+<h1 class="calibre39">Advanced Techniques</h1>
+<p class="author1">In some situations, you might want<a data-primary="workloads" data-secondary="multiple in a single Server definition" data-type="indexterm" id="id1349" class="calibre4"/><a data-primary="Server resources" data-secondary="multiple workloads in a single Server definition" data-type="indexterm" id="id1350" class="calibre4"/><a data-primary="policy" data-secondary="route-based with booksapp application" data-tertiary="multiple workloads in a single Server definition" data-type="indexterm" id="id1351" class="calibre4"/><a data-primary="booksapp application" data-secondary="route-based policy" data-tertiary="multiple workloads in a single Server definition" data-type="indexterm" id="id1352" class="calibre4"/><a data-primary="identity" data-secondary="MeshTLSAuthentication with multiple identities" data-type="indexterm" id="id1353" class="calibre4"/> to combine multiple workloads in a single
+Server definition. As long as the workloads all share the same <code class="calibre9">port</code> and
+<code class="calibre9">proxyProtocol</code>, you can do this using the <code class="calibre9">In</code> operator of the Kubernetes <code class="calibre9">podSelector</code>:</p>
+
+<pre data-code-language="yaml" data-type="programlisting" class="calibre36"><code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io/v1beta1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">Server</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="calibre9">emojivoto</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">authors-and-books</code><code class="w"/>
+<code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">app.kubernetes.io/part-of</code><code class="p">:</code><code class="w"> </code><code class="calibre9">emojivoto</code><code class="w"/>
+<code class="w">    </code><code class="nt">project</code><code class="p">:</code><code class="w"> </code><code class="calibre9">emojivoto</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">podSelector</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">matchExpressions</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">key</code><code class="p">:</code><code class="w"> </code><code class="calibre9">app</code><code class="w"/>
+<code class="w">      </code><code class="nt">operator</code><code class="p">:</code><code class="w"> </code><code class="calibre9">In</code><code class="w"/>
+<code class="w">      </code><code class="nt">values</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="calibre9">-</code><code class="w"> </code><code class="calibre9">authors</code><code class="w"/>
+<code class="w">        </code><code class="calibre9">-</code><code class="w"> </code><code class="calibre9">books</code><code class="w"/>
+<code class="w">  </code><code class="nt">port</code><code class="p">:</code><code class="w"> </code><code class="calibre9">http</code><code class="w"/>
+<code class="w">  </code><code class="nt">proxyProtocol</code><code class="p">:</code><code class="w"> </code><code class="calibre9">HTTP/1</code><code class="w"/></pre>
+
+<p class="author1">Likewise, MeshTLSAuthentications can list multiple identities:</p>
+
+<pre data-code-language="yaml" data-type="programlisting" class="calibre36"><code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io/v1alpha1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">MeshTLSAuthentication</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">webapp-and-traffic</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">identities</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="s">"webapp.booksapp.serviceaccount.identity.linkerd.cluster.local"</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="s">"traffic.booksapp.serviceaccount.identity.linkerd.cluster.local"</code><code class="w"/></pre>
+
+<p class="author1">And, of course, HTTPRoutes can list multiple matches, as we’ve seen throughout
+this chapter.</p>
+
+<p class="author1">These advanced techniques sacrifice a certain amount of granularity, but they
+can make it considerably easier to set up practical Linkerd policies.<a data-startref="ch09-reado" data-type="indexterm" id="id1354" class="calibre4"/><a data-startref="ch09-reado2" data-type="indexterm" id="id1355" class="calibre4"/><a data-startref="ch09-reado3" data-type="indexterm" id="id1356" class="calibre4"/></p>
+</div></aside>
+</div></section>
+
+
+
+
+
+
+
+
+<section data-pdf-bookmark="Enabling Write Access" data-type="sect2" class="preface"><div class="preface" id="id76">
+<h2 class="calibre27">Enabling Write Access</h2>
+
+<p class="author1">The booksapp application is supposed<a data-primary="policy" data-secondary="route-based with booksapp application" data-tertiary="write access enabled" data-type="indexterm" id="ch09-writ" class="calibre4"/><a data-primary="booksapp application" data-secondary="route-based policy" data-tertiary="write access enabled" data-type="indexterm" id="ch09-writ2" class="calibre4"/><a data-primary="write access enabled" data-type="indexterm" id="ch09-writ3" class="calibre4"/> to allow updating both books and authors, so our
+next task will be to allow writes to the <code class="calibre9">authors</code> workload. Once this is
+done, we’ll be able to make changes to our authors (including updates,
+additions, and deletions), but we still won’t be able to change any books.</p>
+
+<p class="author1">The way booksapp is built, both <code class="calibre9">webapp</code> and <code class="calibre9">books</code> need to be able to
+write to <code class="calibre9">authors</code>. We’ll start by creating an HTTPRoute, shown in
+<a data-type="xref" href="#EX-author-modify-route" class="calibre4">Example 9-10</a>, that describes the kinds of modification requests
+we want to allow.</p>
+<div data-type="example" id="EX-author-modify-route" class="calibre40">
+<h5 class="calibre41"><span class="calibre">Example 9-10. </span>Modification requests to <code class="calibre9">authors</code></h5>
+
+<pre data-code-language="yaml" data-type="programlisting" class="calibre42"><code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io/v1beta1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">HTTPRoute</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">authors-modify-route</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">parentRefs</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">authors</code><code class="w"/>
+<code class="w">      </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">Server</code><code class="w"/>
+<code class="w">      </code><code class="nt">group</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io</code><code class="w"/>
+<code class="w">  </code><code class="nt">rules</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">matches</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">path</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="nt">value</code><code class="p">:</code><code class="w"> </code><code class="s">"/authors/"</code><code class="w"/>
+<code class="w">          </code><code class="nt">type</code><code class="p">:</code><code class="w"> </code><code class="s">"PathPrefix"</code><code class="w"/>
+<code class="w">        </code><code class="nt">method</code><code class="p">:</code><code class="w"> </code><code class="calibre9">DELETE</code><code class="w"/>
+<code class="w">      </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">path</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="nt">value</code><code class="p">:</code><code class="w"> </code><code class="s">"/authors/"</code><code class="w"/>
+<code class="w">          </code><code class="nt">type</code><code class="p">:</code><code class="w"> </code><code class="s">"PathPrefix"</code><code class="w"/>
+<code class="w">        </code><code class="nt">method</code><code class="p">:</code><code class="w"> </code><code class="calibre9">PUT</code><code class="w"/>
+<code class="w">      </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">path</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="nt">value</code><code class="p">:</code><code class="w"> </code><code class="s">"/authors.json"</code><code class="w"/>
+<code class="w">        </code><code class="nt">method</code><code class="p">:</code><code class="w"> </code><code class="calibre9">POST</code><code class="w"/>
+<code class="w">      </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">path</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="nt">value</code><code class="p">:</code><code class="w"> </code><code class="s">"/"</code><code class="w"/>
+<code class="nn">---</code><code class="w"/></pre></div>
+
+<p class="author1">This HTTPRoute is attached to our existing <code class="calibre9">authors</code> Server, because it
+describes requests being made to the <code class="calibre9">authors</code> workload. Given that HTTPRoute,
+we want to allow both <code class="calibre9">books</code> and <code class="calibre9">webapp</code> to make those requests, as shown in
+<a data-type="xref" href="#EX-author-modify-policy" class="calibre4">Example 9-11</a>.</p>
+<div data-type="example" id="EX-author-modify-policy" class="calibre40">
+<h5 class="calibre41"><span class="calibre">Example 9-11. </span>Permitting modifications</h5>
+
+<pre data-code-language="yaml" data-type="programlisting" class="calibre42"><code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io/v1alpha1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">AuthorizationPolicy</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">authors-modify-policy</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">targetRef</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">group</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io</code><code class="w"/>
+<code class="w">    </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">HTTPRoute</code><code class="w"/>
+<code class="w">    </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">authors-modify-route</code><code class="w"/>
+<code class="w">  </code><code class="nt">requiredAuthenticationRefs</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">webapp-books</code><code class="w"/>
+<code class="w">      </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">MeshTLSAuthentication</code><code class="w"/>
+<code class="w">      </code><code class="nt">group</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io</code><code class="w"/>
+<code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io/v1alpha1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">MeshTLSAuthentication</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">webapp-books</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">identities</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="s">"webapp.booksapp.serviceaccount.identity.linkerd.cluster.local"</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="s">"books.booksapp.serviceaccount.identity.linkerd.cluster.local"</code><code class="w"/></pre></div>
+
+<p class="author1">Here we’re using the technique<a data-primary="identity" data-secondary="MeshTLSAuthentication with multiple identities" data-type="indexterm" id="id1357" class="calibre4"/><a data-primary="MeshTLSAuthentication resource" data-secondary="multiple identities in one" data-type="indexterm" id="id1358" class="calibre4"/><a data-primary="policy" data-secondary="policy resources" data-tertiary="MeshTLSAuthentication resource" data-type="indexterm" id="id1359" class="calibre4"/><a data-primary="permissions" data-secondary="multiple identities in same MeshTLSAuthentication" data-type="indexterm" id="id1360" class="calibre4"/><a data-primary="policy" data-secondary="route-based with booksapp application" data-tertiary="multiple identities in same MeshTLSAuthentication" data-type="indexterm" id="id1361" class="calibre4"/><a data-primary="booksapp application" data-secondary="route-based policy" data-tertiary="multiple identities in same MeshTLSAuthentication" data-type="indexterm" id="id1362" class="calibre4"/> of listing multiple identities in the same
+MeshTLSAu⁠thentication, since <code class="calibre9">webapp</code> and <code class="calibre9">books</code> need <em class="hyperlink">exactly</em> the same
+permissions in this example.</p>
+
+<p class="author1">After all of this is done, we have the policy setup shown in
+<a data-type="xref" href="#books-author-policies" class="calibre4">Figure 9-3</a>.</p>
+
+<figure class="calibre23"><div class="figure" id="books-author-policies">
+<img alt="luar 0903" src="assets/luar_0903.png" class="calibre24"/>
+<h6 class="calibre25"><span class="calibre">Figure 9-3. </span><code class="calibre9">books</code> after setting up policy for <code class="calibre9">authors</code></h6>
+</div></figure>
+</div></section>
+
+
+
+
+
+
+
+
+<section data-pdf-bookmark="Allowing Writes to books" data-type="sect2" class="preface"><div class="preface" id="id77">
+<h2 class="calibre27">Allowing Writes to books</h2>
+
+<p class="author1">We’ll finish up our booksapp functionality by allowing writes to the <code class="calibre9">books</code>
+workload, as shown in <a data-type="xref" href="#EX-books-modify-policy" class="calibre4">Example 9-12</a>. This is exactly parallel to
+allowing writes to <code class="calibre9">authors</code> and will finally permit booksapp to fully
+function.<a data-startref="ch09-writ" data-type="indexterm" id="id1363" class="calibre4"/><a data-startref="ch09-writ2" data-type="indexterm" id="id1364" class="calibre4"/><a data-startref="ch09-writ3" data-type="indexterm" id="id1365" class="calibre4"/></p>
+<div data-type="example" id="EX-books-modify-policy" class="calibre40">
+<h5 class="calibre41"><span class="calibre">Example 9-12. </span>Modification requests to <code class="calibre9">books</code></h5>
+
+<pre data-code-language="yaml" data-type="programlisting" class="calibre42"><code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io/v1beta1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">HTTPRoute</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">books-modify-route</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">parentRefs</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">books</code><code class="w"/>
+<code class="w">      </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">Server</code><code class="w"/>
+<code class="w">      </code><code class="nt">group</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io</code><code class="w"/>
+<code class="w">  </code><code class="nt">rules</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">matches</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">path</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="nt">value</code><code class="p">:</code><code class="w"> </code><code class="s">"/books/"</code><code class="w"/>
+<code class="w">          </code><code class="nt">type</code><code class="p">:</code><code class="w"> </code><code class="s">"PathPrefix"</code><code class="w"/>
+<code class="w">        </code><code class="nt">method</code><code class="p">:</code><code class="w"> </code><code class="calibre9">DELETE</code><code class="w"/>
+<code class="w">      </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">path</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="nt">value</code><code class="p">:</code><code class="w"> </code><code class="s">"/books/"</code><code class="w"/>
+<code class="w">          </code><code class="nt">type</code><code class="p">:</code><code class="w"> </code><code class="s">"PathPrefix"</code><code class="w"/>
+<code class="w">        </code><code class="nt">method</code><code class="p">:</code><code class="w"> </code><code class="calibre9">PUT</code><code class="w"/>
+<code class="w">      </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">path</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="nt">value</code><code class="p">:</code><code class="w"> </code><code class="s">"/books.json"</code><code class="w"/>
+<code class="w">        </code><code class="nt">method</code><code class="p">:</code><code class="w"> </code><code class="calibre9">POST</code><code class="w"/>
+<code class="w">      </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">path</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="nt">value</code><code class="p">:</code><code class="w"> </code><code class="s">"/"</code><code class="w"/>
+<code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io/v1alpha1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">AuthorizationPolicy</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">books-modify-policy</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">targetRef</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">group</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io</code><code class="w"/>
+<code class="w">    </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">HTTPRoute</code><code class="w"/>
+<code class="w">    </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">books-modify-route</code><code class="w"/>
+<code class="w">  </code><code class="nt">requiredAuthenticationRefs</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">webapp-authors</code><code class="w"/>
+<code class="w">      </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">MeshTLSAuthentication</code><code class="w"/>
+<code class="w">      </code><code class="nt">group</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io</code><code class="w"/>
+<code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io/v1alpha1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">MeshTLSAuthentication</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">webapp-authors</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">identities</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="s">"webapp.booksapp.serviceaccount.identity.linkerd.cluster.local"</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="s">"authors.booksapp.serviceaccount.identity.linkerd.cluster.local"</code><code class="w"/></pre></div>
+</div></section>
+
+
+
+
+
+
+
+
+<section data-pdf-bookmark="Reenabling the Traffic Generator" data-type="sect2" class="preface"><div class="preface" id="id78">
+<h2 class="calibre27">Reenabling the Traffic Generator</h2>
+
+<p class="author1">Finally, we’ll add permission for the<a data-primary="policy" data-secondary="route-based with booksapp application" data-tertiary="reenabling the traffic generator" data-type="indexterm" id="ch09-traf" class="calibre4"/><a data-primary="booksapp application" data-secondary="route-based policy" data-tertiary="reenabling the traffic generator" data-type="indexterm" id="ch09-traf2" class="calibre4"/><a data-primary="traffic generator reenabled" data-type="indexterm" id="ch09-traf3" class="calibre4"/> <code class="calibre9">traffic</code> workload, which generates some
+load at all times, to access the <code class="calibre9">webapp</code> workload. The booksapp application doesn’t
+actually need the traffic generator, but it’s very useful for debugging and
+demos! So let’s get it running again.</p>
+
+<p class="author1">We’ll start with a Server for <code class="calibre9">webapp</code> (which we haven’t needed before), so
+that we can write policies allowing requests to it. This is shown in
+<a data-type="xref" href="#EX-route-webapp-server" class="calibre4">Example 9-13</a>.</p>
+<div data-type="example" id="EX-route-webapp-server" class="calibre40">
+<h5 class="calibre41"><span class="calibre">Example 9-13. </span>A Server for <code class="calibre9">webapp</code></h5>
+
+<pre data-code-language="yaml" data-type="programlisting" class="calibre42"><code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io/v1beta1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">Server</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">webapp-server</code><code class="w"/>
+<code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">app</code><code class="p">:</code><code class="w"> </code><code class="calibre9">webapp</code><code class="w"/>
+<code class="w">    </code><code class="nt">app.kubernetes.io/part-of</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="w">    </code><code class="nt">project</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">podSelector</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">matchLabels</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">app</code><code class="p">:</code><code class="w"> </code><code class="calibre9">webapp</code><code class="w"/>
+<code class="w">      </code><code class="nt">project</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="w">  </code><code class="nt">port</code><code class="p">:</code><code class="w"> </code><code class="calibre9">service</code><code class="w"/>
+<code class="w">  </code><code class="nt">proxyProtocol</code><code class="p">:</code><code class="w"> </code><code class="calibre9">HTTP/1</code><code class="w"/></pre></div>
+
+<p class="author1">Given this Server, it’s straightforward to permit <code class="calibre9">traffic</code> to access it.
+We’ll take the lazy way out and write a Server-based policy here, as shown in
+<a data-type="xref" href="#EX-route-traffic-policy" class="calibre4">Example 9-14</a>, since we really do want <code class="calibre9">traffic</code> to be able to
+do basically everything.<a data-startref="ch09-traf" data-type="indexterm" id="id1366" class="calibre4"/><a data-startref="ch09-traf2" data-type="indexterm" id="id1367" class="calibre4"/><a data-startref="ch09-traf3" data-type="indexterm" id="id1368" class="calibre4"/></p>
+<div data-type="example" id="EX-route-traffic-policy" class="calibre40">
+<h5 class="calibre41"><span class="calibre">Example 9-14. </span>Permitting the traffic generator</h5>
+
+<pre data-code-language="yaml" data-type="programlisting" class="calibre42"><code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io/v1alpha1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">AuthorizationPolicy</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">allow-traffic</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">app.kubernetes.io/part-of</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="w">    </code><code class="nt">project</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">targetRef</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">group</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io</code><code class="w"/>
+<code class="w">    </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">Server</code><code class="w"/>
+<code class="w">    </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">webapp</code><code class="w"/>
+<code class="w">  </code><code class="nt">requiredAuthenticationRefs</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">traffic</code><code class="w"/>
+<code class="w">      </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">MeshTLSAuthentication</code><code class="w"/>
+<code class="w">      </code><code class="nt">group</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io</code><code class="w"/>
+<code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="calibre9">policy.linkerd.io/v1alpha1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="calibre9">MeshTLSAuthentication</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="calibre9">traffic</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="calibre9">booksapp</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">identities</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="calibre9">-</code><code class="w"> </code><code class="s">"traffic.booksapp.serviceaccount.identity.linkerd.cluster.local"</code><code class="w"/></pre></div>
+</div></section>
+</div></section>
+
+
+
+
+
+
+<section data-pdf-bookmark="Summary" data-type="sect1" class="preface"><div class="preface" id="id322">
+<h1 class="calibre8">Summary</h1>
+
+<p class="author1">Linkerd’s route-based policy mechanism is the most complex part of Linkerd, enough so
+that there are actually a number of powerful tools, both open source and
+commercial, for creating and debugging policies in Linkerd. The Tap component
+of Linkerd Viz is the simplest, most readily available tool here; likewise,
+the <code class="calibre9">linkerd diagnostics</code> command that we discussed in <a data-type="xref" href="ch06.html#LUAR_cli" class="calibre4">Chapter 6</a> has a lot
+to offer. On the commercial side, we would be remiss if we didn’t mention the
+policy tools available in Buoyant Enterprise for Linkerd.</p>
+
+<p class="author1">Overall, policy in Linkerd is a powerful and extensible tool for managing
+traffic in your cluster, and route-based policy in particular is at once a
+very powerful mechanism and a very focused tool. It’s a great way to further
+refine policy that you’ve already established with the Server-based mechanism.</p>
+</div></section>
+</div></section></body></html>
