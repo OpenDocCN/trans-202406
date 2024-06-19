@@ -1,0 +1,512 @@
+<html><head></head><body><div id="sbo-rt-content"><section data-type="chapter" epub:type="chapter" data-pdf-bookmark="Chapter 15. Configuring Sharding"><div class="chapter" id="chapter-shard-config"><h1><span class="label">Chapter 15. </span>Configuring Sharding</h1><p>In the previous chapter, you set up a “cluster” on one machine. This
+  chapter covers how to set up a more realistic cluster and how each piece
+  fits. In particular, you’ll learn:</p><ul><li><p>How to set up config servers, shards, and <em class="filename">mongos</em> processes</p></li><li><p>How to add capacity to a cluster</p></li><li><p>How data is stored and distributed</p></li></ul><section data-type="sect1" data-pdf-bookmark="When to Shard"><div class="sect1" id="idm45882347165528"><h1>When to Shard</h1><p>Deciding<a data-type="indexterm" data-primary="sharding, basics of" data-secondary="when to shard" id="idm45882347164616"/><a data-type="indexterm" data-primary="sharding, configuration of" data-secondary="when to shard" id="idm45882347163480"/> when to shard is a balancing act. You generally do not want
+    to shard too early because it adds operational complexity to your
+    deployment and forces you to make design decisions that are difficult to
+    change later. On the other hand, you do not want to wait too long to shard
+    because it is difficult to shard an overloaded system without
+    downtime.</p><p>In<a data-type="indexterm" data-primary="sharding, configuration of" data-secondary="uses for sharding" id="idm45882347159064"/><a data-type="indexterm" data-primary="sharding, basics of" data-secondary="uses for sharding" id="idm45882347157960"/> general, sharding is used to:</p><ul><li><p>Increase available RAM</p></li><li><p>Increase available disk space</p></li><li><p>Reduce load on a server</p></li><li><p>Read or write data with greater throughput than a single
+        <em>mongod</em> can handle</p></li></ul><p>Thus, good monitoring is important to decide when sharding will be
+    necessary. Carefully measure each of these metrics. Generally people speed
+    toward one of these bottlenecks much faster than the others, so figure out
+    which one your deployment will need to provision for first and make plans
+    well in advance about when and how you plan to convert your replica
+    set.</p></div></section><section data-type="sect1" data-pdf-bookmark="Starting the Servers"><div class="sect1" id="idm45882347153816"><h1>Starting the Servers</h1><p>The<a data-type="indexterm" data-primary="sharding, configuration of" data-secondary="processes involved" id="idm45882347152904"/><a data-type="indexterm" data-primary="sharding, basics of" data-secondary="processes involved" id="idm45882347151704"/> first step in creating a cluster is to start up all of the
+    processes required. As mentioned in the previous chapter, you need to set
+    up the <em class="filename">mongos</em> and the shards. There’s
+    also a third component, the config servers, which are an important piece.
+    Config servers are normal <em class="filename">mongod</em>
+    servers that store the cluster configuration: which<a data-type="indexterm" data-primary="replica sets, sharding and" data-secondary="role of config servers" id="idm45882347128168"/> replica sets host the shards, what collections are sharded
+    by, and on which shard each chunk is located. MongoDB 3.2 introduced the
+    use of replica sets as config servers. Replica sets replace the original
+    syncing mechanism used by config servers; the ability to use that
+    mechanism was removed in MongoDB 3.4.</p><section data-type="sect2" data-pdf-bookmark="Config Servers"><div class="sect2" id="idm45882347126584"><h2>Config Servers</h2><p>Config servers<a data-type="indexterm" data-primary="servers" data-secondary="config servers" id="idm45882347125368"/><a data-type="indexterm" data-primary="config servers" data-secondary="purpose of" id="idm45882347124232"/><a data-type="indexterm" data-primary="sharding, configuration of" data-secondary="starting the servers" data-tertiary="config servers" id="idm45882347123128"/> are the brains of your cluster: they hold all of the
+      metadata about which servers hold what data. Thus, they must be set up
+      first, and the data they hold is <em>extremely</em>
+      important: make sure that they are running with journaling enabled and
+      that their data is stored on nonephemeral drives. In<a data-type="indexterm" data-primary="config servers" data-secondary="best practices" id="idm45882347120840"/> production deployments, your config server replica set
+      should consist of at least three members. Each config server should be
+      on a separate physical machine, preferable geographically
+      distributed.</p><p>The<a data-type="indexterm" data-primary="config servers" data-secondary="starting" id="idm45882347119128"/> config servers must be started before any of the
+      <em class="filename">mongos</em> processes, as <em class="filename">mongos</em> pulls its configuration from them. To
+      begin, run the following commands on three separate machines to start
+      your config servers:</p><pre id="I_programlisting10_d1e11496" data-type="programlisting">$ mongod --configsvr --replSet configRS --bind_ip localhost,198.51.100.51 mongod 
+  --dbpath /var/lib/mongodb
+ 
+$ mongod --configsvr --replSet configRS --bind_ip localhost,198.51.100.52 mongod 
+  --dbpath /var/lib/mongodb
+ 
+$ mongod --configsvr --replSet configRS --bind_ip localhost,198.51.100.53 mongod 
+  --dbpath /var/lib/mongodb</pre><p>Then<a data-type="indexterm" data-primary="replica sets, sharding and" data-secondary="initiating config servers as" id="idm45882347114872"/><a data-type="indexterm" data-primary="config servers" data-secondary="initiating as replica sets" id="idm45882347113704"/> initiate the config servers as a replica set. To do this,
+      connect a <em>mongo</em> shell to one of the replica set
+      members:</p><pre data-type="programlisting">$ mongo --host <em><code>&lt;hostname&gt;</code></em> --port <em><code>&lt;port&gt;</code></em></pre><p>and
+      use the <code>rs.initiate()<a data-type="indexterm" data-primary="rs.initiate()" id="idm45882347109912"/></code> helper:</p><pre data-type="programlisting" data-code-language="javascript"><code class="o">&gt;</code> <code class="nx">rs</code><code class="p">.</code><code class="nx">initiate</code><code class="p">(</code>
+  <code class="p">{</code>
+    <code class="nx">_id</code><code class="o">:</code> <code class="s2">"configRS"</code><code class="p">,</code>
+    <code class="nx">configsvr</code><code class="o">:</code> <code class="kc">true</code><code class="p">,</code>
+    <code class="nx">members</code><code class="o">:</code> <code class="p">[</code>
+      <code class="p">{</code> <code class="nx">_id</code> <code class="o">:</code> <code class="mi">0</code><code class="p">,</code> <code class="nx">host</code> <code class="o">:</code> <code class="s2">"cfg1.example.net:27019"</code> <code class="p">},</code>
+      <code class="p">{</code> <code class="nx">_id</code> <code class="o">:</code> <code class="mi">1</code><code class="p">,</code> <code class="nx">host</code> <code class="o">:</code> <code class="s2">"cfg2.example.net:27019"</code> <code class="p">},</code>
+      <code class="p">{</code> <code class="nx">_id</code> <code class="o">:</code> <code class="mi">2</code><code class="p">,</code> <code class="nx">host</code> <code class="o">:</code> <code class="s2">"cfg3.example.net:27019"</code> <code class="p">}</code>
+    <code class="p">]</code>
+  <code class="p">}</code>
+<code class="p">)</code></pre><p>Here we’re using <em>configRS</em> as the replica set
+      name. Note that this name appears both on the command line when
+      instantiating each config server and in the call to <span class="keep-together"><code class="function">rs.initiate()</code>.</span></p><p>The <code class="option">--configsvr</code> option<a data-type="indexterm" data-primary="--configsvr option" data-primary-sortas="configsvr option" id="idm45882347057272"/> indicates to the <em class="filename">mongod</em> that you are planning to use it as a
+      config server. On a server running with this option, clients (i.e.,
+      other cluster components) cannot write data to any database other than
+      <em>config</em> or <em>admin</em>.</p><p>The <em>admin</em> database<a data-type="indexterm" data-primary="admin database" data-secondary="contents of" id="idm45882347053416"/> contains the collections related to authentication and
+      authorization, as well as the other <em>system.*</em>
+      collections for internal use. The <em>config</em>
+      database<a data-type="indexterm" data-primary="config database" data-secondary="contents of" id="idm45882347051208"/> contains the collections that hold the sharded cluster
+      metadata. MongoDB writes data to the <em>config</em>
+      database when the metadata changes, such as after a chunk migration or a
+      chunk split.</p><p>When writing to config servers, MongoDB uses a <code>writeConcern</code> level
+      of <code class="option">"majority"</code>. Similarly, when reading from config
+      servers, MongoDB uses a <code>readConcern</code> level of
+      <code class="option">"majority"</code>. This ensures that sharded cluster metadata
+      will not be committed to the config server replica set until it can’t be
+      rolled back. It also ensures that only metadata that will survive a
+      failure of the config servers will be read. This is necessary to ensure
+      all <em>mongos</em> routers have a consistent view of how
+      data is organized in a sharded <span class="keep-together">cluster</span>.</p><p>In terms of provisioning, config servers should be provisioned
+      adequately in terms of networking and CPU resources. They only hold a
+      table of contents of the data in the cluster so the storage resources
+      required are minimal. They should be deployed on separate hardware to
+      avoid contention for the machine’s resources.</p><div data-type="warning" epub:type="warning"><h6>Warning</h6><p>If all of your config servers are lost, you must dig through the
+        data on your shards to figure out which data is where. This is
+        possible, but slow and unpleasant. Take frequent backups of config
+        server data. Always take a backup of your config servers before
+        performing any cluster maintenance.</p></div></div></section><section data-type="sect2" data-pdf-bookmark="The mongos Processes"><div class="sect2" id="idm45882347126280"><h2>The mongos Processes</h2><p>Once<a data-type="indexterm" data-primary="--configdb option" id="idm45882347042744"/><a data-type="indexterm" data-primary="mongos" data-secondary="--configdb option" id="idm45882347041880"/><a data-type="indexterm" data-primary="sharding, configuration of" data-secondary="starting the servers" data-tertiary="mongo processes" id="idm45882347040776"/> you have three config servers running, start a
+      <em>mongos</em> process for your application to connect to.
+      <em class="filename">mongos</em> processes need to know where
+      the config servers are, so you must always start <em class="filename">mongos</em> with the <code class="option">--configdb</code>
+      option:</p><pre id="I_programlisting10_d1e11508" data-type="programlisting" data-code-language="javascript"><code class="nx">$</code> <code class="nx">mongos</code> <code class="o">--</code><code class="nx">configdb</code> <code class="o">\</code>
+  <code class="nx">configRS</code><code class="o">/</code><code class="nx">cfg1</code><code class="p">.</code><code class="nx">example</code><code class="p">.</code><code class="nx">net</code><code class="o">:</code><code class="mi">27019</code><code class="p">,</code> <code class="o">\</code>
+  <code class="nx">cfg2</code><code class="p">.</code><code class="nx">example</code><code class="p">.</code><code class="nx">net</code><code class="o">:</code><code class="mi">27019</code><code class="p">,</code><code class="nx">cfg3</code><code class="p">.</code><code class="nx">example</code><code class="p">.</code><code class="nx">net</code><code class="o">:</code><code class="mi">27019</code> <code class="o">\</code>
+<code class="o">--</code><code class="nx">bind_ip</code> <code class="nx">localhost</code><code class="p">,</code><code class="mf">198.51</code><code class="p">.</code><code class="mf">100.100</code> <code class="o">--</code><code class="nx">logpath</code> <code class="o">/</code><code class="kd">var</code><code class="err">/log/mongos.log</code></pre><p>By default, <em class="filename">mongos</em> runs on
+      port 27017. Note that it does not need a data directory (<em class="filename">mongos</em> holds no data itself; it loads the
+      cluster configuration from the config servers on startup). Make sure
+      that you set <code class="option">--logpath</code> to save the <em class="filename">mongos</em> log somewhere safe.</p><p>You<a data-type="indexterm" data-primary="mongos" data-secondary="locating processes near shards" id="idm45882346824088"/> should start a small number of <em class="filename">mongos</em> processes and locate them as close to
+      all the shards as possible. This improves performance of queries that
+      need to access multiple shards or which perform scatter/gather
+      operations. The minimal setup is at least two <em class="filename">mongos</em> processes to ensure high availability.
+      It is possible to run tens or hundreds of <em class="filename">mongos</em> processes but this causes resource
+      contention on the <em class="filename">config server</em>s.
+      The recommended approach is to provide a small pool of routers.</p></div></section><section data-type="sect2" data-pdf-bookmark="Adding a Shard from a Replica Set"><div class="sect2" id="idm45882346824312"><h2>Adding a Shard from a Replica Set</h2><p>Finally, you’re<a data-type="indexterm" data-primary="replica sets, sharding and" data-secondary="adding shards from replica sets" id="RSSAadding15"/><a data-type="indexterm" data-primary="sharding, configuration of" data-secondary="starting the servers" data-tertiary="adding shards from replica sets" id="SCOservadd15"/> ready to add a shard. There are two possibilities: you
+      may have an existing replica set or you may be starting from scratch. We
+      will cover starting from an existing set. If you are starting from
+      scratch, initialize an empty set and follow the steps outlined
+      here.</p><p>If you already have a replica set serving your application, that
+      will become your first shard. To convert it into a shard, you need to
+      make some small configuration modifications to the members and then tell
+      the <em class="filename">mongos</em> how to find the replica
+      set that will comprise the shard.</p><p>For example, if you have a replica set named
+      <em>rs0</em> on <em class="filename">svr1.example.net</em>, <em class="filename">svr2.example.net</em>, and <em class="filename">svr3.example.net</em>, you would first connect to
+      one of the members using the <em>mongo</em> shell:</p><pre id="I_programlisting10_d1e11528" data-type="programlisting">$ mongo srv1.example.net</pre><p>Then use <code>rs.status()<a data-type="indexterm" data-primary="rs.status()" id="idm45882346809048"/></code> to determine which member is the primary and
+      which are secondaries:</p><pre id="I_programlisting10_d1e115282" data-type="programlisting" data-code-language="javascript"><code class="o">&gt;</code> <code class="nx">rs</code><code class="p">.</code><code class="nx">status</code><code class="p">()</code>
+   <code class="s2">"set"</code> <code class="o">:</code> <code class="s2">"rs0"</code><code class="p">,</code>
+   <code class="s2">"date"</code> <code class="o">:</code> <code class="nx">ISODate</code><code class="p">(</code><code class="s2">"2018-11-02T20:02:16.543Z"</code><code class="p">),</code>
+   <code class="s2">"myState"</code> <code class="o">:</code> <code class="mi">1</code><code class="p">,</code>
+   <code class="s2">"term"</code> <code class="o">:</code> <code class="nx">NumberLong</code><code class="p">(</code><code class="mi">1</code><code class="p">),</code>
+   <code class="s2">"heartbeatIntervalMillis"</code> <code class="o">:</code> <code class="nx">NumberLong</code><code class="p">(</code><code class="mi">2000</code><code class="p">),</code>
+   <code class="s2">"optimes"</code> <code class="o">:</code> <code class="p">{</code>
+
+
+         <code class="s2">"lastCommittedOpTime"</code> <code class="o">:</code> <code class="p">{</code>
+            <code class="s2">"ts"</code> <code class="o">:</code> <code class="nx">Timestamp</code><code class="p">(</code><code class="mi">1478116934</code><code class="p">,</code> <code class="mi">1</code><code class="p">),</code>
+            <code class="s2">"t"</code> <code class="o">:</code> <code class="nx">NumberLong</code><code class="p">(</code><code class="mi">1</code><code class="p">)</code>
+         <code class="p">},</code>
+         <code class="s2">"readConcernMajorityOpTime"</code> <code class="o">:</code> <code class="p">{</code>
+            <code class="s2">"ts"</code> <code class="o">:</code> <code class="nx">Timestamp</code><code class="p">(</code><code class="mi">1478116934</code><code class="p">,</code> <code class="mi">1</code><code class="p">),</code>
+            <code class="s2">"t"</code> <code class="o">:</code> <code class="nx">NumberLong</code><code class="p">(</code><code class="mi">1</code><code class="p">)</code>
+         <code class="p">},</code>
+         <code class="s2">"appliedOpTime"</code> <code class="o">:</code> <code class="p">{</code>
+            <code class="s2">"ts"</code> <code class="o">:</code> <code class="nx">Timestamp</code><code class="p">(</code><code class="mi">1478116934</code><code class="p">,</code> <code class="mi">1</code><code class="p">),</code>
+            <code class="s2">"t"</code> <code class="o">:</code> <code class="nx">NumberLong</code><code class="p">(</code><code class="mi">1</code><code class="p">)</code>
+         <code class="p">},</code>
+         <code class="s2">"durableOpTime"</code> <code class="o">:</code> <code class="p">{</code>
+            <code class="s2">"ts"</code> <code class="o">:</code> <code class="nx">Timestamp</code><code class="p">(</code><code class="mi">1478116934</code><code class="p">,</code> <code class="mi">1</code><code class="p">),</code>
+            <code class="s2">"t"</code> <code class="o">:</code> <code class="nx">NumberLong</code><code class="p">(</code><code class="mi">1</code><code class="p">)</code>
+         <code class="p">}</code>
+      <code class="p">},</code>
+
+   <code class="s2">"members"</code> <code class="o">:</code> <code class="p">[</code>
+      <code class="p">{</code>
+            <code class="s2">"_id"</code> <code class="o">:</code> <code class="mi">0</code><code class="p">,</code>
+            <code class="s2">"name"</code> <code class="o">:</code> <code class="s2">"svr1.example.net:27017"</code><code class="p">,</code>
+            <code class="s2">"health"</code> <code class="o">:</code> <code class="mi">1</code><code class="p">,</code>
+            <code class="s2">"state"</code> <code class="o">:</code> <code class="mi">1</code><code class="p">,</code>
+            <code class="s2">"stateStr"</code> <code class="o">:</code> <code class="s2">"PRIMARY"</code><code class="p">,</code>
+            <code class="s2">"uptime"</code> <code class="o">:</code> <code class="mi">269</code><code class="p">,</code>
+            <code class="s2">"optime"</code> <code class="o">:</code> <code class="p">{</code>
+                        <code class="s2">"ts"</code> <code class="o">:</code> <code class="nx">Timestamp</code><code class="p">(</code><code class="mi">1478116934</code><code class="p">,</code> <code class="mi">1</code><code class="p">),</code>
+                        <code class="s2">"t"</code> <code class="o">:</code> <code class="nx">NumberLong</code><code class="p">(</code><code class="mi">1</code><code class="p">)</code>
+            <code class="p">},</code>
+            <code class="s2">"optimeDate"</code> <code class="o">:</code> <code class="nx">ISODate</code><code class="p">(</code><code class="s2">"2018-11-02T20:02:14Z"</code><code class="p">),</code>
+            <code class="s2">"infoMessage"</code> <code class="o">:</code> <code class="s2">"could not find member to sync from"</code><code class="p">,</code>
+            <code class="s2">"electionTime"</code> <code class="o">:</code> <code class="nx">Timestamp</code><code class="p">(</code><code class="mi">1478116933</code><code class="p">,</code> <code class="mi">1</code><code class="p">),</code>
+            <code class="s2">"electionDate"</code> <code class="o">:</code> <code class="nx">ISODate</code><code class="p">(</code><code class="s2">"2018-11-02T20:02:13Z"</code><code class="p">),</code>
+            <code class="s2">"configVersion"</code> <code class="o">:</code> <code class="mi">1</code><code class="p">,</code>
+            <code class="s2">"self"</code> <code class="o">:</code> <code class="kc">true</code>
+      <code class="p">},</code>
+      <code class="p">{</code>
+            <code class="s2">"_id"</code> <code class="o">:</code> <code class="mi">1</code><code class="p">,</code>
+            <code class="s2">"name"</code> <code class="o">:</code> <code class="s2">"svr2.example.net:27017"</code><code class="p">,</code>
+            <code class="s2">"health"</code> <code class="o">:</code> <code class="mi">1</code><code class="p">,</code>
+            <code class="s2">"state"</code> <code class="o">:</code> <code class="mi">2</code><code class="p">,</code>
+            <code class="s2">"stateStr"</code> <code class="o">:</code> <code class="s2">"SECONDARY"</code><code class="p">,</code>
+            <code class="s2">"uptime"</code> <code class="o">:</code> <code class="mi">14</code><code class="p">,</code>
+            <code class="s2">"optime"</code> <code class="o">:</code> <code class="p">{</code>
+               <code class="s2">"ts"</code> <code class="o">:</code> <code class="nx">Timestamp</code><code class="p">(</code><code class="mi">1478116934</code><code class="p">,</code> <code class="mi">1</code><code class="p">),</code>
+               <code class="s2">"t"</code> <code class="o">:</code> <code class="nx">NumberLong</code><code class="p">(</code><code class="mi">1</code><code class="p">)</code>
+            <code class="p">},</code>
+            <code class="s2">"optimeDurable"</code> <code class="o">:</code> <code class="p">{</code>
+               <code class="s2">"ts"</code> <code class="o">:</code> <code class="nx">Timestamp</code><code class="p">(</code><code class="mi">1478116934</code><code class="p">,</code> <code class="mi">1</code><code class="p">),</code>
+               <code class="s2">"t"</code> <code class="o">:</code> <code class="nx">NumberLong</code><code class="p">(</code><code class="mi">1</code><code class="p">)</code>
+            <code class="p">},</code>
+            <code class="s2">"optimeDate"</code> <code class="o">:</code> <code class="nx">ISODate</code><code class="p">(</code><code class="s2">"2018-11-02T20:02:14Z"</code><code class="p">),</code>
+            <code class="s2">"optimeDurableDate"</code> <code class="o">:</code> <code class="nx">ISODate</code><code class="p">(</code><code class="s2">"2018-11-02T20:02:14Z"</code><code class="p">),</code>
+            <code class="s2">"lastHeartbeat"</code> <code class="o">:</code> <code class="nx">ISODate</code><code class="p">(</code><code class="s2">"2018-11-02T20:02:15.618Z"</code><code class="p">),</code>
+            <code class="s2">"lastHeartbeatRecv"</code> <code class="o">:</code> <code class="nx">ISODate</code><code class="p">(</code><code class="s2">"2018-11-02T20:02:14.866Z"</code><code class="p">),</code>
+            <code class="s2">"pingMs"</code> <code class="o">:</code> <code class="nx">NumberLong</code><code class="p">(</code><code class="mi">0</code><code class="p">),</code>
+            <code class="s2">"syncingTo"</code> <code class="o">:</code> <code class="s2">"m1.example.net:27017"</code><code class="p">,</code>
+            <code class="s2">"configVersion"</code> <code class="o">:</code> <code class="mi">1</code>
+      <code class="p">},</code>
+      <code class="p">{</code>
+            <code class="s2">"_id"</code> <code class="o">:</code> <code class="mi">2</code><code class="p">,</code>
+            <code class="s2">"name"</code> <code class="o">:</code> <code class="s2">"svr3.example.net:27017"</code><code class="p">,</code>
+            <code class="s2">"health"</code> <code class="o">:</code> <code class="mi">1</code><code class="p">,</code>
+            <code class="s2">"state"</code> <code class="o">:</code> <code class="mi">2</code><code class="p">,</code>
+            <code class="s2">"stateStr"</code> <code class="o">:</code> <code class="s2">"SECONDARY"</code><code class="p">,</code>
+            <code class="s2">"uptime"</code> <code class="o">:</code> <code class="mi">14</code><code class="p">,</code>
+            <code class="s2">"optime"</code> <code class="o">:</code> <code class="p">{</code>
+               <code class="s2">"ts"</code> <code class="o">:</code> <code class="nx">Timestamp</code><code class="p">(</code><code class="mi">1478116934</code><code class="p">,</code> <code class="mi">1</code><code class="p">),</code>
+               <code class="s2">"t"</code> <code class="o">:</code> <code class="nx">NumberLong</code><code class="p">(</code><code class="mi">1</code><code class="p">)</code>
+            <code class="p">},</code>
+            <code class="s2">"optimeDurable"</code> <code class="o">:</code> <code class="p">{</code>
+               <code class="s2">"ts"</code> <code class="o">:</code> <code class="nx">Timestamp</code><code class="p">(</code><code class="mi">1478116934</code><code class="p">,</code> <code class="mi">1</code><code class="p">),</code>
+               <code class="s2">"t"</code> <code class="o">:</code> <code class="nx">NumberLong</code><code class="p">(</code><code class="mi">1</code><code class="p">)</code>
+            <code class="p">},</code>
+            <code class="s2">"optimeDate"</code> <code class="o">:</code> <code class="nx">ISODate</code><code class="p">(</code><code class="s2">"2018-11-02T20:02:14Z"</code><code class="p">),</code>
+            <code class="s2">"optimeDurableDate"</code> <code class="o">:</code> <code class="nx">ISODate</code><code class="p">(</code><code class="s2">"2018-11-02T20:02:14Z"</code><code class="p">),</code>
+            <code class="s2">"lastHeartbeat"</code> <code class="o">:</code> <code class="nx">ISODate</code><code class="p">(</code><code class="s2">"2018-11-02T20:02:15.619Z"</code><code class="p">),</code>
+            <code class="s2">"lastHeartbeatRecv"</code> <code class="o">:</code> <code class="nx">ISODate</code><code class="p">(</code><code class="s2">"2018-11-02T20:02:14.787Z"</code><code class="p">),</code>
+            <code class="s2">"pingMs"</code> <code class="o">:</code> <code class="nx">NumberLong</code><code class="p">(</code><code class="mi">0</code><code class="p">),</code>
+            <code class="s2">"syncingTo"</code> <code class="o">:</code> <code class="s2">"m1.example.net:27017"</code><code class="p">,</code>
+            <code class="s2">"configVersion"</code> <code class="o">:</code> <code class="mi">1</code>
+      <code class="p">}</code>
+   <code class="p">],</code>
+   <code class="s2">"ok"</code> <code class="o">:</code> <code class="mi">1</code>
+<code class="p">}</code></pre><p>Beginning with MongoDB 3.4, for sharded clusters,
+      <em>mongod</em> instances for shards
+      <em>must</em> be configured with the <code>--shardsvr</code>
+      option<a data-type="indexterm" data-primary="--shardsvr option" data-primary-sortas="shardsvr option" id="idm45882346797400"/>, either via the configuration file setting
+      <code>sharding.clusterRole<a data-type="indexterm" data-primary="sharding.clusterRole" id="idm45882346795992"/></code> or via the command-line option
+      <code>--shardsvr</code>.</p><p>You will need to do this for each of the members of the replica
+      set you are in the process of converting to a shard. You’ll do this by
+      first restarting each secondary in turn with the <code>--shardsvr</code>
+      option, then stepping down the primary and restarting it with the
+      <code>--shardsvr</code> option.</p><p>After shutting down a secondary, restart it as follows:</p><pre data-type="programlisting">$ mongod --replSet "rs0" --shardsvr --port 27017 
+    --bind_ip localhost,&lt;<em><code>ip address of member</code></em>&gt;</pre><p>Note that you’ll need to use the correct IP address for each
+      secondary for the <span class="keep-together"><code>--bind_ip</code> parameter<a data-type="indexterm" data-primary="--bind_ip parameter" data-primary-sortas="bind_ip parameter" id="idm45882346390168"/></span>.</p><p>Now connect a <em>mongo</em> shell to the
+      primary:</p><pre data-type="programlisting">$ mongo m1.example.net</pre><p class="pagebreak-before">and step it down:</p><pre data-type="programlisting" data-code-language="javascript"><code class="o">&gt;</code> <code class="nx">rs</code><code class="p">.</code><code class="nx">stepDown</code><code class="p">()</code></pre><p>Then restart the former primary with the <code>--shardsvr</code>
+      option:</p><pre data-type="programlisting">$ mongod --replSet "rs0" --shardsvr --port 27017 
+    --bind_ip localhost,&lt;<em><code>ip address of the former primary</code></em>&gt;</pre><p>Now you’re ready to add your replica set as a shard. Connect a
+      <em>mongo</em> shell to the <em>admin</em>
+      database of the <em>mongos</em>:</p><pre data-type="programlisting">$ mongo mongos1.example.net:27017/admin</pre><p>And add a shard to the cluster using the <code class="function">sh.addShard()</code> method<a data-type="indexterm" data-primary="sh.addShard() method" id="idm45882346380648"/>:</p><pre data-type="programlisting" data-code-language="javascript"><code class="o">&gt;</code> <code class="nx">sh</code><code class="p">.</code><code class="nx">addShard</code><code class="p">(</code>
+    <code class="s2">"rs0/svr1.example.net:27017,svr2.example.net:27017,svr3.example.net:27017"</code> <code class="p">)</code></pre><p>You can specify all the members of the set, but you do not have
+      to. <em class="filename">mongos</em> will automatically
+      detect any members that were not included in the seed list. If you run
+      <code>sh.status()</code>, you’ll see that MongoDB
+      soon lists the shard as</p><pre data-type="programlisting" data-code-language="javascript"><code class="nx">rs0</code><code class="o">/</code><code class="nx">svr1</code><code class="p">.</code><code class="nx">example</code><code class="p">.</code><code class="nx">net</code><code class="o">:</code><code class="mi">27017</code><code class="p">,</code><code class="nx">svr2</code><code class="p">.</code><code class="nx">example</code><code class="p">.</code><code class="nx">net</code><code class="o">:</code><code class="mi">27017</code><code class="p">,</code><code class="nx">svr3</code><code class="p">.</code><code class="nx">example</code><code class="p">.</code><code class="nx">net</code><code class="o">:</code><code class="mi">27017</code></pre><p>The set name, <em>rs0</em>, is taken on as an
+      identifier for this shard. If you ever want to remove this shard or
+      migrate data to it, you can use <em>rs0</em> to describe it.
+      This works better than using a specific server (e.g., <em class="filename">svr1.example.net</em>), as replica set membership
+      and status can change over time.</p><p>Once you’ve added the replica set as a shard you can convert your
+      application from connecting to the replica set to connecting to the
+      <em class="filename">mongos</em>. When you add the shard,
+      <em class="filename">mongos</em> registers that all the
+      databases in the replica set are “owned” by that shard, so it will pass
+      through all queries to your new shard. <em class="filename">mongos</em> will also automatically handle
+      failover for your application as your client library would: it will pass
+      the errors through to you.</p><p>Test failing over a shard’s primary in a development environment
+      to ensure that your application handles the errors received from
+      <em class="filename">mongos</em> correctly (they should be
+      identical to the errors that you receive from talking to the primary
+      directly).</p><div data-type="note" epub:type="note"><h6>Note</h6><p>Once you have added a shard, you <em>must</em> set
+        up all clients to send requests to the <em class="filename">mongos</em> instead of contacting the replica
+        set. Sharding will not function correctly if some clients are still
+        making requests to the replica set directly (not through the <em class="filename">mongos</em>). Switch all clients to contacting
+        the <em class="filename">mongos</em> immediately after
+        adding the shard and set up a firewall rule to ensure that they are
+        unable to connect directly to the shard.</p></div><p>Prior to MongoDB 3.6 it was possible to create a standalone
+      <em>mongod</em> as a shard. This is no longer an option in
+      versions of MongoDB later than 3.6. All shards must be replica<a data-type="indexterm" data-startref="SCOservadd15" id="idm45882346286440"/><a data-type="indexterm" data-startref="RSSAadding15" id="idm45882346285608"/> sets.</p></div></section><section data-type="sect2" data-pdf-bookmark="Adding Capacity"><div class="sect2" id="idm45882346819400"><h2>Adding Capacity</h2><p>When<a data-type="indexterm" data-primary="capacity, adding with shards" id="idm45882346283912"/><a data-type="indexterm" data-primary="sharding, configuration of" data-secondary="starting the servers" data-tertiary="adding capacity" id="idm45882346283080"/> you want to add more capacity, you’ll need to add more
+      shards. To add a new, empty shard, create a replica set. Make sure it
+      has a distinct name from any of your other shards. Once it is
+      initialized and has a primary, add it to your cluster by running the
+      <code>addShard</code> command through <em class="filename">mongos</em>, specifying the new replica set’s name
+      and its hosts as seeds.</p><p>If you have several existing replica sets that are not shards, you
+      can add all of them as new shards in your cluster so long as they do not
+      have any database names in common. For example, if you had one replica
+      set with a <em>blog</em> database, one with a
+      <em>calendar</em> database, and one with
+      <em>mail</em>, <em>tel</em>, and
+      <em>music</em> databases, you could add each replica set as
+      a shard and end up with a cluster with three shards and five databases.
+      However, if you had a fourth replica set that also had a database named
+      <em>tel</em>, <em class="filename">mongos</em>
+      would refuse to add it to the cluster.</p></div></section><section data-type="sect2" data-pdf-bookmark="Sharding Data"><div class="sect2" id="idm45882346279816"><h2>Sharding Data</h2><p>MongoDB<a data-type="indexterm" data-primary="data" data-secondary="sharding" id="idm45882346275000"/><a data-type="indexterm" data-primary="sharding, configuration of" data-secondary="starting the servers" data-tertiary="sharding data" id="idm45882346273864"/> won’t distribute your data automatically until you tell
+      it how to do so. You must explicitly tell both the database and the
+      collection that you want them to be distributed. For example, suppose
+      you wanted to shard the <em>artists</em> collection in the
+      <em>music</em> database on the <code>"name"</code> key. First, you’d enable sharding for
+      the database:</p><pre id="I_programlisting10_d1e11615" data-type="programlisting" data-code-language="javascript"><code class="o">&gt;</code> <code class="nx">db</code><code class="p">.</code><code class="nx">enableSharding</code><code class="p">(</code><code class="s2">"music"</code><code class="p">)</code></pre><p>Sharding a database is always a prerequisite to sharding one of
+      its collections.</p><p>Once you’ve enabled sharding on the database level, you can shard
+      a collection by running <code>sh.shardCollection()</code>:</p><pre id="I_programlisting10_d1e11627" data-type="programlisting" data-code-language="javascript"><code class="o">&gt;</code> <code class="nx">sh</code><code class="p">.</code><code class="nx">shardCollection</code><code class="p">(</code><code class="s2">"music.artists"</code><code class="p">,</code> <code class="p">{</code><code class="s2">"name"</code> <code class="o">:</code> <code class="mi">1</code><code class="p">})</code></pre><p>Now the <em>artists</em> collection will be sharded by
+      the <code>"name"</code> key. If you are sharding
+      an existing collection there must be an index on the <code>"name"</code> field; otherwise, the <code class="function">shardCollection</code> call will return an error. If
+      you get an error, create the index (<em class="filename">mongos</em> will return the index it suggests as
+      part of the error message) and retry the <code class="function">shardCollection</code> command.</p><p>If the collection you are sharding does not yet exist, <em class="filename">mongos</em> will automatically create the shard
+      key index for you.</p><p>The <code>shardCollection</code> command
+      splits the collection into <span class="firstterm">chunks</span>, which are the
+      units MongoDB uses to move data around. Once the command returns
+      <span class="keep-together">successfully</span>, <span class="keep-together">MongoDB</span> will begin balancing the collection across the
+      shards in your cluster. This process is not instantaneous. For large
+      collections it may take hours to finish this initial <span class="keep-together">balancing</span>. This time can be reduced with
+      <span class="firstterm">presplitting</span> where chunks are created on the
+      shards prior to loading the data. Data loaded after this point will be
+      inserted directly to the current shard without requiring additional
+      balancing.</p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="How MongoDB Tracks Cluster Data"><div class="sect1" id="idm45882346233304"><h1>How MongoDB Tracks Cluster Data</h1><p>Each<a data-type="indexterm" data-primary="sharding, configuration of" data-secondary="how MongoDB tracks cluster data" id="SCOcldata15"/><a data-type="indexterm" data-primary="clusters" data-secondary="tracking cluster data" id="Cckdata15"/> <em class="filename">mongos</em> must always
+    know where to find a document, given its shard key. Theoretically, MongoDB
+    could track where each and every document lived, but this becomes unwieldy
+    for collections with millions or billions of documents. Thus, MongoDB
+    groups documents into<a data-type="indexterm" data-primary="chunks" data-secondary="defined" id="idm45882346195768"/> <span class="firstterm">chunks</span>, which are documents in a
+    given range of the shard key. A chunk always lives on a single shard, so
+    MongoDB can keep a small table of chunks mapped to shards.</p><p>For<a data-type="indexterm" data-primary="chunks" data-secondary="basics of" id="idm45882346193160"/> example, if a user collection’s shard key is <code>{"age" : 1}</code>, one chunk might be all documents
+    with an <code>"age"</code> field between <code>3</code> and <code>17</code>. If
+    <em class="filename">mongos</em> gets a query for <code>{"age" : 5}</code>, it can route the query to the shard
+    where this chunk lives.</p><p>As writes occur, the number and size of the documents in a chunk
+    might change. Inserts can make a chunk contain more documents, and removes
+    fewer. For example, if we were making a game for children and preteens,
+    our chunk for ages 3−17 might get larger and larger (one would hope).
+    Almost all of our users would be in that chunk and so would be on a single
+    shard, somewhat defeating the point of distributing our data. Thus, once a
+    chunk grows to a certain size, MongoDB automatically splits it into two
+    smaller chunks. In this example, the original chunk might be split into
+    one chunk containing documents with ages 3 through 11 and another with
+    ages 12 through 17. Note that these two chunks still cover the entire age
+    range that the original chunk covered: 3−17. As these new chunks grow,
+    they can be split into still smaller chunks until there is a chunk for
+    each age.</p><p>You cannot have chunks with overlapping ranges, like 3−15 and 12−17.
+    If you could, MongoDB would need to check both chunks when attempting to
+    find an age in the overlap, like 14. It is more efficient to only have to
+    look in one place, particularly once chunks begin moving around the
+    cluster.</p><p>A document always belongs to one and only one chunk. One consequence
+    of this rule is that you cannot use an array field as your shard key,
+    since MongoDB creates multiple index entries for arrays. For example, if a
+    document had <code>[5, 26, 83]</code> in its
+    <code>"age"</code> field, it would belong in up to
+    three chunks.</p><div data-type="note" epub:type="note"><h6>Note</h6><p>A common misconception is that the data in a chunk is physically
+      grouped on disk. This is incorrect: chunks have no effect on how
+      <em class="filename">mongod</em> stores collection
+      data.</p></div><section data-type="sect2" data-pdf-bookmark="Chunk Ranges"><div class="sect2" id="idm45882346165816"><h2>Chunk Ranges</h2><p>Each<a data-type="indexterm" data-primary="chunks" data-secondary="chunk ranges" id="idm45882346164632"/> chunk is described by the range it contains. A<a data-type="indexterm" data-primary="collections" data-secondary="chunks and" id="idm45882346163368"/> newly sharded collection starts off with a single chunk,
+      and every document lives in this chunk. This chunk’s bounds are negative
+      infinity to infinity, shown as <code>$minKey</code> and <code>$maxKey</code> in the shell.</p><p>As this chunk grows, MongoDB will automatically split it into two
+      chunks, with the range negative infinity to <em><code>&lt;some
+      value&gt;</code></em> and <em><code>&lt;some
+      value&gt;</code></em> to infinity. <em><code>&lt;some
+      value&gt;</code></em> is the same for both chunks: the lower chunk
+      contains everything up to (but not including) <em><code>&lt;some
+      value&gt;</code></em>, and the upper chunk contains
+      <em><code>&lt;some value&gt;</code></em> and everything
+      higher.</p><p>This may be more intuitive with an example. Suppose we were
+      sharding by <code>"age"</code> as described
+      earlier. All documents with <code>"age"</code>
+      between <code>3</code> and <code>17</code> are contained in one chunk: <code>3 ≤ "age" &lt; 17</code>. When this is split, we end
+      up with two ranges: <code>3 ≤ "age" &lt; 12</code>
+      in one chunk and <code>12 ≤ "age" &lt; 17</code>
+      in the other. 12 is called the <em>split point</em>.</p><p>Chunk information is stored in the <em class="filename">config.chunks</em> collection. If you looked at
+      the contents of that collection, you’d see documents that looked
+      something like this (some fields have been omitted for clarity):</p><pre data-type="programlisting" data-code-language="javascript"><code class="o">&gt;</code> <code class="nx">db</code><code class="p">.</code><code class="nx">chunks</code><code class="p">.</code><code class="nx">find</code><code class="p">(</code><code class="nx">criteria</code><code class="p">,</code> <code class="p">{</code><code class="s2">"min"</code> <code class="o">:</code> <code class="mi">1</code><code class="p">,</code> <code class="s2">"max"</code> <code class="o">:</code> <code class="mi">1</code><code class="p">})</code>
+<code class="p">{</code>
+    <code class="s2">"_id"</code> <code class="o">:</code> <code class="s2">"test.users-age_-100.0"</code><code class="p">,</code>
+    <code class="s2">"min"</code> <code class="o">:</code> <code class="p">{</code><code class="s2">"age"</code> <code class="o">:</code> <code class="o">-</code><code class="mi">100</code><code class="p">},</code>
+    <code class="s2">"max"</code> <code class="o">:</code> <code class="p">{</code><code class="s2">"age"</code> <code class="o">:</code> <code class="mi">23</code><code class="p">}</code>
+<code class="p">}</code>
+<code class="p">{</code>
+    <code class="s2">"_id"</code> <code class="o">:</code> <code class="s2">"test.users-age_23.0"</code><code class="p">,</code>
+    <code class="s2">"min"</code> <code class="o">:</code> <code class="p">{</code><code class="s2">"age"</code> <code class="o">:</code> <code class="mi">23</code><code class="p">},</code>
+    <code class="s2">"max"</code> <code class="o">:</code> <code class="p">{</code><code class="s2">"age"</code> <code class="o">:</code> <code class="mi">100</code><code class="p">}</code>
+<code class="p">}</code>
+<code class="p">{</code>
+    <code class="s2">"_id"</code> <code class="o">:</code> <code class="s2">"test.users-age_100.0"</code><code class="p">,</code>
+    <code class="s2">"min"</code> <code class="o">:</code> <code class="p">{</code><code class="s2">"age"</code> <code class="o">:</code> <code class="mi">100</code><code class="p">},</code>
+    <code class="s2">"max"</code> <code class="o">:</code> <code class="p">{</code><code class="s2">"age"</code> <code class="o">:</code> <code class="mi">1000</code><code class="p">}</code>
+<code class="p">}</code></pre><p>Based on the <em class="filename">config.chunks</em>
+      documents shown, here are a few examples of where various documents
+      would live:</p><dl><dt><code>{"_id" : 123, "age" :
+          50}</code></dt><dd><p>This document would live in the second chunk, as that chunk
+            contains all documents with <code>"age"</code> between <code>23</code> and <code>100</code>.</p></dd><dt><code>{"_id" : 456, "age" :
+          100}</code></dt><dd><p>This document would live in the third chunk, as lower bounds
+            are inclusive. The second chunk contains all documents up to
+            <code>"age" : 100</code>, but not any
+            documents where <code>"age"</code> equals
+            <code>100</code>.</p></dd><dt><code>{"_id" : 789, "age" :
+          -101}</code></dt><dd><p>This document would not be in any of these chunks. It would
+            be in some chunk with a range lower than the first chunk’s.</p></dd></dl><p>With<a data-type="indexterm" data-primary="sharding, basics of" data-secondary="compound shard keys" id="idm45882345882520"/><a data-type="indexterm" data-primary="chunks" data-secondary="compound shard keys and" id="idm45882345881448"/> a compound shard key, shard ranges work the same way that
+      sorting by the two keys would work. For example, suppose that we had a
+      shard key on <code>{"username" : 1, "age" :
+      1}</code>. Then we might have chunk ranges such as:</p><pre data-type="programlisting" data-code-language="javascript"><code class="p">{</code>
+    <code class="s2">"_id"</code> <code class="o">:</code> <code class="s2">"test.users-username_MinKeyage_MinKey"</code><code class="p">,</code>
+    <code class="s2">"min"</code> <code class="o">:</code> <code class="p">{</code>
+        <code class="s2">"username"</code> <code class="o">:</code> <code class="p">{</code> <code class="s2">"$minKey"</code> <code class="o">:</code> <code class="mi">1</code> <code class="p">},</code>
+        <code class="s2">"age"</code> <code class="o">:</code> <code class="p">{</code> <code class="s2">"$minKey"</code> <code class="o">:</code> <code class="mi">1</code> <code class="p">}</code>
+    <code class="p">},</code>
+    <code class="s2">"max"</code> <code class="o">:</code> <code class="p">{</code>
+        <code class="s2">"username"</code> <code class="o">:</code> <code class="s2">"user107487"</code><code class="p">,</code>
+        <code class="s2">"age"</code> <code class="o">:</code> <code class="mi">73</code>
+    <code class="p">}</code>
+<code class="p">}</code>
+<code class="p">{</code>
+    <code class="s2">"_id"</code> <code class="o">:</code> <code class="s2">"test.users-username_\"user107487\"age_73.0"</code><code class="p">,</code>
+    <code class="s2">"min"</code> <code class="o">:</code> <code class="p">{</code>
+        <code class="s2">"username"</code> <code class="o">:</code> <code class="s2">"user107487"</code><code class="p">,</code>
+        <code class="s2">"age"</code> <code class="o">:</code> <code class="mi">73</code>
+    <code class="p">},</code>
+    <code class="s2">"max"</code> <code class="o">:</code> <code class="p">{</code>
+        <code class="s2">"username"</code> <code class="o">:</code> <code class="s2">"user114978"</code><code class="p">,</code>
+        <code class="s2">"age"</code> <code class="o">:</code> <code class="mi">119</code>
+    <code class="p">}</code>
+<code class="p">}</code>
+<code class="p">{</code>
+    <code class="s2">"_id"</code> <code class="o">:</code> <code class="s2">"test.users-username_\"user114978\"age_119.0"</code><code class="p">,</code>
+    <code class="s2">"min"</code> <code class="o">:</code> <code class="p">{</code>
+        <code class="s2">"username"</code> <code class="o">:</code> <code class="s2">"user114978"</code><code class="p">,</code>
+        <code class="s2">"age"</code> <code class="o">:</code> <code class="mi">119</code>
+    <code class="p">},</code>
+    <code class="s2">"max"</code> <code class="o">:</code> <code class="p">{</code>
+        <code class="s2">"username"</code> <code class="o">:</code> <code class="s2">"user122468"</code><code class="p">,</code>
+        <code class="s2">"age"</code> <code class="o">:</code> <code class="mi">68</code>
+    <code class="p">}</code>
+<code class="p">}</code></pre><p>Thus, <em class="filename">mongos</em> can easily find
+      which chunk someone with a given username (or a given username and age)
+      lives in. However, given just an age, <em class="filename">mongos</em> would have to check all, or almost
+      all, of the chunks. If we wanted to be able to target queries on age to
+      the right chunk, we’d have to use the “opposite” shard key: <code>{"age" : 1, "username" : 1}</code>. This is often a
+      point of confusion: a range over the second half of a shard key will cut
+      across multiple chunks.</p></div></section><section data-type="sect2" data-pdf-bookmark="Splitting Chunks"><div class="sect2" id="idm45882346165512"><h2>Splitting Chunks</h2><p>Each<a data-type="indexterm" data-primary="chunks" data-secondary="splitting chunks" id="idm45882345764808"/> shard primary <em class="filename">mongod</em>
+      tracks their current chunks and, once they reach a certain threshold,
+      checks if the chunk needs to be split, as shown in Figures <a data-type="xref" data-xrefstyle="select: labelnumber" href="#splitstorm1">15-1</a> and <a data-type="xref" data-xrefstyle="select: labelnumber" href="#splitstorm2">15-2</a>. If the
+      chunk does need to be split, the <em class="filename">mongod</em> will request the global chunk size
+      configuration value from the config servers. It will then perform the
+      chunk split and update the metadata on the config servers. New chunk
+      documents are created on the config servers and the old chunk’s range
+      (<code>"max"</code>) is modified. If the chunk is
+      the top chunk of the shard, then the <em class="filename">mongod</em> will request the balancer move this
+      chunk to a different shard. The idea is to prevent a shard from becoming
+      “hot” where the shard key uses a monotonically increasing key.</p><p>A shard may not be able to find any split points, though, even for
+      a large chunk, as there are a limited number of ways to legally split a
+      chunk. Any two documents with the same shard key must live in the same
+      chunk, so chunks can only be split between documents where the shard
+      key’s value changes. For example, if the shard key was <code>"age"</code>, the following chunk could be split at
+      the points where the shard key changed, as indicated:</p><pre data-type="programlisting" data-code-language="javascript"><code class="p">{</code><code class="s2">"age"</code> <code class="o">:</code> <code class="mi">13</code><code class="p">,</code> <code class="s2">"username"</code> <code class="o">:</code> <code class="s2">"ian"</code><code class="p">}</code>
+<code class="p">{</code><code class="s2">"age"</code> <code class="o">:</code> <code class="mi">13</code><code class="p">,</code> <code class="s2">"username"</code> <code class="o">:</code> <code class="s2">"randolph"</code><code class="p">}</code>
+<code class="o">------------</code> <code class="c1">// split point</code>
+<code class="p">{</code><code class="s2">"age"</code> <code class="o">:</code> <code class="mi">14</code><code class="p">,</code> <code class="s2">"username"</code> <code class="o">:</code> <code class="s2">"randolph"</code><code class="p">}</code>
+<code class="p">{</code><code class="s2">"age"</code> <code class="o">:</code> <code class="mi">14</code><code class="p">,</code> <code class="s2">"username"</code> <code class="o">:</code> <code class="s2">"eric"</code><code class="p">}</code>
+<code class="p">{</code><code class="s2">"age"</code> <code class="o">:</code> <code class="mi">14</code><code class="p">,</code> <code class="s2">"username"</code> <code class="o">:</code> <code class="s2">"hari"</code><code class="p">}</code>
+<code class="p">{</code><code class="s2">"age"</code> <code class="o">:</code> <code class="mi">14</code><code class="p">,</code> <code class="s2">"username"</code> <code class="o">:</code> <code class="s2">"mathias"</code><code class="p">}</code>
+<code class="o">------------</code> <code class="c1">// split point</code>
+<code class="p">{</code><code class="s2">"age"</code> <code class="o">:</code> <code class="mi">15</code><code class="p">,</code> <code class="s2">"username"</code> <code class="o">:</code> <code class="s2">"greg"</code><code class="p">}</code>
+<code class="p">{</code><code class="s2">"age"</code> <code class="o">:</code> <code class="mi">15</code><code class="p">,</code> <code class="s2">"username"</code> <code class="o">:</code> <code class="s2">"andrew"</code><code class="p">}</code></pre><p>The primary <em class="filename">mongod</em> for the
+      shard only requests that the top chunk for a shard when split be moved
+      to the balancer. The other chunks will remain on the shard unless
+      manually moved.</p><p>If, however, the chunk contained the following documents, it could
+      not be split (unless the application started inserting fractional
+      ages):</p><pre data-type="programlisting" data-code-language="javascript"><code class="p">{</code><code class="s2">"age"</code> <code class="o">:</code> <code class="mi">12</code><code class="p">,</code> <code class="s2">"username"</code> <code class="o">:</code> <code class="s2">"kevin"</code><code class="p">}</code>
+<code class="p">{</code><code class="s2">"age"</code> <code class="o">:</code> <code class="mi">12</code><code class="p">,</code> <code class="s2">"username"</code> <code class="o">:</code> <code class="s2">"spencer"</code><code class="p">}</code>
+<code class="p">{</code><code class="s2">"age"</code> <code class="o">:</code> <code class="mi">12</code><code class="p">,</code> <code class="s2">"username"</code> <code class="o">:</code> <code class="s2">"alberto"</code><code class="p">}</code>
+<code class="p">{</code><code class="s2">"age"</code> <code class="o">:</code> <code class="mi">12</code><code class="p">,</code> <code class="s2">"username"</code> <code class="o">:</code> <code class="s2">"tad"</code><code class="p">}</code></pre><p>Thus, having a variety of values for your shard key is important.
+      Other important properties will be covered in the next chapter.</p><p>If one of the config servers is down when a <em class="filename">mongod</em> tries to do a split, the <em class="filename">mongod</em> won’t be able to update the metadata
+      (as shown in <a data-type="xref" href="#splitstorm4">Figure 15-3</a>). All config servers must be
+      up and reachable for splits to happen. If the <em class="filename">mongod</em> continues to receive write requests
+      for the chunk, it will keep trying to split the chunk and fail. As long
+      as the config servers are not healthy, splits will continue not to work,
+      and all the split attempts can slow down the <em class="filename">mongod</em> and the shard involved (which repeats
+      the process shown in Figures <a data-type="xref" data-xrefstyle="select: labelnumber" href="#splitstorm1">15-1</a> through <a data-type="xref" data-xrefstyle="select: labelnumber" href="#splitstorm4">15-3</a> for each incoming write). This process of
+      <em class="filename">mongod</em> repeatedly attempting to
+      split a chunk and being unable to is called a <em>split
+      storm<a data-type="indexterm" data-primary="split storms" id="idm45882345570584"/></em>. The only way to prevent split storms is to
+      ensure that your config servers are up and healthy as much of the time
+      as<a data-type="indexterm" data-startref="Cckdata15" id="idm45882345569448"/><a data-type="indexterm" data-startref="SCOcldata15" id="idm45882345568648"/> possible.</p><figure style="float: 0"><div id="splitstorm1" class="figure"><img src="Images/mdb3_1501.png" width="761" height="302"/><h6><span class="label">Figure 15-1. </span>When a client writes to a chunk, the mongod will check its
+        split threshold for the chunk</h6></div></figure><figure style="float: 0"><div id="splitstorm2" class="figure"><img src="Images/mdb3_1502.png" width="977" height="317"/><h6><span class="label">Figure 15-2. </span>If the split threshold has been reached, the mongod will send a
+        request to the balancer to migrate the top chunk; otherwise the chunk
+        remains on the shard</h6></div></figure><figure style="float: 0"><div id="splitstorm4" class="figure"><img src="Images/mdb3_1503.png" width="894" height="317"/><h6><span class="label">Figure 15-3. </span>The mongod chooses a split point and attempts to inform the
+        config server, but cannot reach it; thus, it is still over its split
+        threshold for the chunk and any subsequent writes will trigger this
+        process again</h6></div></figure></div></section></div></section><section data-type="sect1" data-pdf-bookmark="The Balancer"><div class="sect1" id="sect1-balancer-2"><h1>The Balancer</h1><p>The<a data-type="indexterm" data-primary="balancer" data-secondary="role of" id="idm45882345562488"/><a data-type="indexterm" data-primary="sharding, configuration of" data-secondary="balancers" id="idm45882345561352"/> <em>balancer</em> is responsible for migrating
+    data. It regularly checks for imbalances between shards and, if it finds
+    an imbalance, will begin migrating chunks. In MongoDB version 3.4+, the
+    balancer is located on the primary member of the config server replica
+    set; prior to this version, each <em class="filename">mongos</em> used to play the part of “the balancer”
+    occasionally.</p><p>The balancer is a background process on the primary of the config
+    server replica set, which monitors the number of chunks on each shard. It
+    becomes active only when a shard’s number of chunks reaches a specific
+    migration threshold.</p><div data-type="note" epub:type="note"><h6>Note</h6><p>In<a data-type="indexterm" data-primary="sharding, basics of" data-secondary="number of concurrent migrations allowed" id="idm45882345557512"/> MongoDB 3.4+, the number of concurrent migrations
+      increased to one migration per shard with a maximum number of concurrent
+      migrations being half the total number of shards. In earlier versions
+      only one concurrent migration in total was supported.</p></div><p>Assuming that some collections have hit the threshold, the balancer
+    will begin migrating chunks. It chooses a chunk from the overloaded shard
+    and asks the shard if it should split the chunk before migrating. Once it
+    does any necessary splits, it migrates the chunk(s) to a machine with
+    fewer chunks.</p><p>An application using the cluster does not need be aware that the
+    data is moving: all reads and writes are routed to the old chunk until the
+    move is complete. Once the metadata is updated, any <em class="filename">mongos</em> process attempting to access the data in
+    the old location will get an error. These errors should not be visible to
+    the client: the <em class="filename">mongos</em> will silently
+    handle the error and retry the operation on the new shard.</p><p>This is a common cause of errors you might see in <em class="filename">mongos</em> logs that relate to being “unable to
+    <code class="function">setShardVersion</code>.” When a <em class="filename">mongos</em> gets this type of error, it looks up the
+    new location of the data from the config servers, updates its chunk table,
+    and attempts the request again. If it successfully retrieves the data from
+    the new location, it will return it to the client as though nothing went
+    wrong (but it will print a message in the log that the error
+    occurred).</p><p>If the <em class="filename">mongos</em> is unable to
+    retrieve the new chunk location because the config servers are
+    unavailable, it will return an error to the client. This is another reason
+    why it is important to always have config servers up and healthy.</p></div></section><section data-type="sect1" data-pdf-bookmark="Collations"><div class="sect1" id="sect1-collations-2"><h1>Collations</h1><p><em>Collations<a data-type="indexterm" data-primary="collations" id="idm45882345547880"/></em><a data-type="indexterm" data-primary="sharding, configuration of" data-secondary="collations" id="idm45882345546920"/> in MongoDB allow for the specification of language-specific
+    rules for string comparison. Examples of these rules include how
+    lettercase and accent marks are compared. It is possible to shard a
+    collection that is a default collation. There are two requirements: the
+    collection must have an index whose prefix is the shard key, and the index
+    must also have the collation <code>{ locale: "simple"
+    }</code>.</p></div></section><section data-type="sect1" data-pdf-bookmark="Change Streams"><div class="sect1" id="sect1-changestreams-2"><h1>Change Streams</h1><p><em>Change Streams<a data-type="indexterm" data-primary="change streams" id="idm45882345543560"/></em><a data-type="indexterm" data-primary="sharding, configuration of" data-secondary="change streams" id="idm45882345542696"/> allow applications to track real-time changes to the data
+    in the database. Prior to MongoDB 3.6, this was only possible by tailing
+    the oplog and was a complex error-prone operation. Change streams provide
+    a subscription mechanism for all data changes on a collection, a set of
+    collections, a database, or across a full deployment. The aggregation
+    framework is used by this feature. It allows applications to filter for
+    specific changes or to transform the change notifications received. In a
+    sharded cluster, all change stream operations must be issued against a
+    <em class="filename">mongos</em>.</p><p>The changes across a sharded cluster are kept ordered through the
+    use of a global logical clock. This guarantees the order of changes, and
+    stream notifications can be safely interpreted by the order of their
+    receipt. The <em class="filename">mongos</em> needs to check
+    with each shard upon receipt of a change notification, to ensure that no
+    shard has seen more recent changes. The activity level of the cluster and
+    the geographical distribution of the shards can both impact the response
+    time for this checking. The use of notification filters can improve the
+    response time in these situations.</p><div data-type="note" epub:type="note"><h6>Note</h6><p>There are a few notes and caveats when using change streams with a
+      sharded cluster. You open a change stream by issuing an open change
+      stream operation. In sharded deployments, this <em>must</em>
+      be issued against a <em class="filename">mongos</em>. If an
+      update operation with <code>multi: true</code> is
+      run against a sharded collection with an open change stream, then it is
+      possible for notifications to be sent for orphaned documents. If a shard
+      is removed, it may cause an open change stream cursor to
+      close—furthermore, that cursor may not be fully <span class="keep-together">resumable</span>.</p></div></div></section></div></section></div>
+
+
+
+  </body></html>

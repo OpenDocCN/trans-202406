@@ -1,0 +1,298 @@
+<html><head></head><body><div id="sbo-rt-content"><section data-type="chapter" epub:type="chapter" data-pdf-bookmark="Chapter 11. Components of a Replica Set"><div class="chapter" id="chapter-repl-comp"><h1><span class="label">Chapter 11. </span>Components of a Replica Set</h1><p>This chapter covers how the pieces of a replica set fit together,
+  including:</p><ul><li><p>How replica set members replicate new data</p></li><li><p>How bringing up new members works</p></li><li><p>How elections work</p></li><li><p>Possible server and network failure scenarios</p></li></ul><section data-type="sect1" data-pdf-bookmark="Syncing"><div class="sect1" id="idm45882354191000"><h1>Syncing</h1><p>Replication<a data-type="indexterm" data-primary="syncing" data-secondary="role of oplogs in" id="idm45882354189624"/><a data-type="indexterm" data-primary="oplogs" data-secondary="purpose of" id="idm45882354188488"/><a data-type="indexterm" data-primary="replication" data-secondary="purpose of" id="idm45882354187384"/><a data-type="indexterm" data-primary="replica sets, components of" data-secondary="syncing" id="RSCsync11"/> is concerned with keeping an identical copy of data on
+    multiple servers. The way MongoDB accomplishes this is by keeping a log of
+    operations, or <em>oplog</em>, containing every write that a
+    primary performs. This<a data-type="indexterm" data-primary="capped collections" data-secondary="oplogs" id="idm45882354160184"/> is a capped collection that lives in the <em class="filename">local</em> database on the primary. The secondaries
+    query this collection for operations to <span class="keep-together">replicate</span>.</p><p>Each<a data-type="indexterm" data-primary="oplogs" data-secondary="syncing" id="idm45882354157352"/> secondary maintains its own oplog, recording each operation
+    it replicates from the primary. This allows any member to be used as a
+    sync source for any other member, as shown in <a data-type="xref" href="#sync-0">Figure 11-1</a>.
+    Secondaries fetch operations from the member they are syncing from, apply
+    the operations to their dataset, and then write the operations to their
+    oplog. If applying an operation fails (which should only happen if the
+    underlying data has been corrupted or in some way differs from the
+    primary’s), the secondary will exit.</p><figure style="float: 0"><div id="sync-0" class="figure"><img src="Images/mdb3_1101.png" width="754" height="456"/><h6><span class="label">Figure 11-1. </span>Oplogs keep an ordered list of write operations that have
+      occurred; each member has its own copy of the oplog, which should be
+      identical to the primary’s (modulo some lag)</h6></div></figure><p>If a secondary goes down for any reason, when it restarts it will
+    start syncing from the last operation in its oplog. As operations are
+    applied to data and then written to the oplog, the secondary may replay
+    operations that it has already applied to its data. MongoDB is designed to
+    handle this correctly: replaying oplog ops multiple times yields the same
+    result as replaying them once. Each operation in the oplog is idempotent.
+    That is, oplog operations produce the same results whether applied once or
+    multiple times to the target dataset.</p><p>Because<a data-type="indexterm" data-primary="syncing" data-secondary="oplog size" id="idm45882354151976"/><a data-type="indexterm" data-primary="oplogs" data-secondary="size limits" id="idm45882354151000"/> the oplog is a fixed size, it can only hold a certain
+    number of operations. In general, the oplog will use space at
+    approximately the same rate as writes come into the system: if you’re
+    writing 1 KB/minute on the primary, your oplog is probably going to fill
+    up at about 1 KB/minute. However, there are a few exceptions: operations
+    that affect multiple documents, such as removes or a multi-updates, will
+    be exploded into many oplog entries. The single operation on the primary
+    will be split into one oplog op per document affected. Thus, if you remove
+    1,000,000 documents from a collection with <code>db.coll.remove()<a data-type="indexterm" data-primary="db.coll.remove()" id="idm45882354148936"/></code>, it will become 1,000,000 oplog entries removing
+    one document at a time. If you are doing lots of bulk operations, this can
+    fill up your oplog more quickly than you might expect.</p><p>In most cases, the default oplog size is sufficient. If you can
+    predict your replica set’s workload to resemble one of the following
+    patterns, then you might want to create an oplog that is larger than the
+    default. Conversely, if your application predominantly performs reads with
+    a minimal amount of write operations, a smaller oplog may be sufficient.
+    These are the kinds of workloads that might require a larger oplog
+    size:</p><dl><dt>Updates to multiple documents at once</dt><dd><p>The<a data-type="indexterm" data-primary="documents" data-secondary="updating multiple" id="idm45882354146120"/><a data-type="indexterm" data-primary="updates" data-secondary="multiple documents" id="idm45882354144888"/> oplog must translate multi-updates into individual
+          operations in order to maintain idempotency. This can use a great
+          deal of oplog space without a corresponding increase in data size or
+          disk use.</p></dd><dt>Deletions equal the same amount of data as inserts</dt><dd><p>If you delete roughly the same amount of data as you insert,
+          the database will not grow significantly in terms of disk use, but
+          the size of the operation log can be quite large.</p></dd><dt>Significant number of in-place updates</dt><dd><p>If<a data-type="indexterm" data-primary="updates" data-secondary="in-place updates" id="idm45882354141816"/><a data-type="indexterm" data-primary="in-place updates" id="idm45882354140680"/> a significant portion of the workload is updates that
+          do not increase the size of the documents, the database records a
+          large number of operations but the quantity of data on disk does not
+          change.</p></dd></dl><p>Before<a data-type="indexterm" data-primary="oplogs" data-secondary="changing size of" id="idm45882354139000"/> <em>mongod</em> creates an oplog, you can
+    specify its size with the <code>oplogSizeMB</code>
+    option<a data-type="indexterm" data-primary="oplogSizeMB option" id="idm45882354136888"/>. However, after you have started a replica set member for
+    the first time, you can only change the size of the oplog using the <a href="https://oreil.ly/mh5SX">“Change
+    the Size of the Oplog” procedure</a>.</p><p>MongoDB uses two forms of data synchronization: an initial sync to
+    populate new members with the full dataset, and replication to apply
+    ongoing changes to the entire dataset. Let’s take a closer look at each of
+    these.</p><section data-type="sect2" data-pdf-bookmark="Initial Sync"><div class="sect2" id="idm45882354134632"><h2>Initial Sync</h2><p>MongoDB<a data-type="indexterm" data-primary="syncing" data-secondary="initial sync" id="idm45882354133512"/> performs an initial sync to copy all the data from one
+      member of the replica set to another member. When a member of the set
+      starts up, it will check if it is in a valid state to begin syncing from
+      someone. If it is in a valid state, it will attempt to make a full copy
+      of the data from another member of the set. There are several steps to
+      the process, which you can follow in the <em class="filename">mongod</em>’s log.</p><p>First, MongoDB clones all databases except the
+      <em>local</em> database. The <em>mongod</em>
+      scans every collection in each source database and inserts all the data
+      into its own copies of these collections on the target member. Prior to
+      beginning the clone operations, any existing data on the target member
+      will be dropped.</p><div data-type="warning" epub:type="warning"><h6>Warning</h6><p>Only do an initial sync for a member if you do not want the data
+        in your data directory or have moved it elsewhere, as <em class="filename">mongod</em>’s first action is to delete it
+        all.</p></div><p>In MongoDB 3.4 and later, the initial sync builds all the
+      collection indexes as the documents are copied for each collection (in
+      earlier versions, only the <code>"_id"</code>
+      indexes are built during this stage). It also pulls newly added oplog
+      records during the data copy, so you should ensure that the target
+      member has enough disk space in the <em>local</em> database
+      to store these records during this data copy stage.</p><p>Once all the databases are cloned, the <em>mongod</em>
+      uses the oplog from the source to update its dataset to reflect the
+      current state of the replica set, applying all changes to the dataset
+      that occurred while the copy was in progress. These changes might
+      include any type of write (inserts, updates, and deletes), and this
+      process might mean that <em>mongod</em> has to reclone
+      certain documents that were moved and therefore missed by the
+      cloner.</p><p>This is roughly what the logs will look like if some documents had
+      to be recloned. Depending on the level of traffic and the types of
+      operations that where happening on the sync source, you may or may not
+      have missing objects:</p><pre data-type="programlisting">Mon Jan 30 15:38:36 [rsSync] oplog sync 1 of 3
+Mon Jan 30 15:38:36 [rsBackgroundSync] replSet syncing to: server-1:27017
+Mon Jan 30 15:38:37 [rsSyncNotifier] replset setting oplog notifier to 
+    server-1:27017
+Mon Jan 30 15:38:37 [repl writer worker 2] replication update of non-mod
+    failed: 
+    { ts: Timestamp 1352215827000|17, h: -5618036261007523082, v: 2, op: "u", 
+      ns: "db1.someColl", o2: { _id: ObjectId('50992a2a7852201e750012b7') }, 
+      o: { $set: { count.0: 2, count.1: 0 } } }
+Mon Jan 30 15:38:37 [repl writer worker 2] replication info 
+    adding missing object
+Mon Jan 30 15:38:37 [repl writer worker 2] replication missing object
+    not found on source. presumably deleted later in oplog</pre><p>At this point, the data should exactly match the dataset as it
+      existed at some point on the primary. The member finishes the initial
+      sync process and transitions to normal syncing, which allows it to
+      become a secondary.</p><p>Doing an initial sync is very easy from an operator’s perspective:
+      just start up a <em class="filename">mongod</em> with a clean
+      data directory. However, it is often preferable to restore from a backup
+      instead, as covered in <a data-type="xref" href="ch23.xhtml#chapter-backup">Chapter 23</a>. Restoring from
+      a backup is often faster than copying all of your data through <em class="filename">mongod</em>.</p><p>Also, cloning <a data-type="indexterm" data-primary="syncing" data-secondary="cloning and working sets" id="idm45882354119512"/>can ruin the sync source’s <span class="firstterm">working
+      set</span>. Many deployments end up with a subset of their data
+      that’s frequently accessed and always in memory (because the OS is
+      accessing it often). Performing an initial sync forces the member to
+      page all of its data into memory, evicting the frequently used data.
+      This can slow down a member dramatically as requests that were being
+      handled by data in RAM are suddenly forced to go to disk. However, for
+      small datasets and servers with some breathing room, initial syncing is
+      a good, easy option.</p><p>One of the most common issues people run into with initial sync is
+      it taking too long. In these cases, the new member can “fall off” the
+      end of sync source’s oplog: it gets so far behind the sync source that
+      it can no longer catch up because the sync source’s oplog has
+      overwritten the data the member would need to use to continue
+      replicating.</p><p>There is no way to fix this other than attempting the initial sync
+      at a less busy time or restoring from a backup. The initial sync cannot
+      proceed if the member has fallen off of the sync source’s oplog. <a data-type="xref" href="#handlingStaleness">“Handling Staleness”</a> covers this in more depth.</p></div></section><section data-type="sect2" data-pdf-bookmark="Replication"><div class="sect2" id="idm45882354134328"><h2>Replication</h2><p>The<a data-type="indexterm" data-primary="syncing" data-secondary="replication" id="idm45882354113976"/> second type of synchronization MongoDB performs is
+      replication. Secondary members replicate data continuously after the
+      initial sync. They copy the oplog from their sync source and apply these
+      operations in an asynchronous process. Secondaries may automatically
+      change their sync-from source as needed, in response to changes in the
+      ping time and the state of other members’ replication. There are several
+      rules that govern which members a given node can sync from. For example,
+      replica set members with one vote cannot sync from members with zero
+      votes, and secondaries avoid syncing from delayed members and hidden
+      members. Elections and different classes of replica set members are
+      discussed in later sections.</p></div></section><section data-type="sect2" data-pdf-bookmark="Handling Staleness"><div class="sect2" id="handlingStaleness"><h2>Handling Staleness</h2><p>If<a data-type="indexterm" data-primary="staleness, handling" id="idm45882354110696"/><a data-type="indexterm" data-primary="syncing" data-secondary="handling staleness" id="idm45882354109832"/> a secondary falls too far behind the actual operations
+      being performed on the sync source, the secondary will go
+      <em>stale</em>. A stale secondary is unable to catch up
+      because every operation in the sync source’s oplog is too far ahead: it
+      would be skipping operations if it continued to sync. This could happen
+      if the secondary has had downtime, has more writes than it can handle,
+      or is too busy handling reads.</p><p>When a secondary goes stale, it will attempt to replicate from
+      each member of the set in turn to see if there’s anyone with a longer
+      oplog that it can bootstrap from. If there is no one with a long-enough
+      oplog, replication on that member will halt and it will need to be fully
+      resynced (or restored from a more recent backup).</p><p>To<a data-type="indexterm" data-primary="oplogs" data-secondary="avoiding out-of-sync secondaries" id="idm45882354106824"/> avoid out-of-sync secondaries, it’s important to have a
+      large oplog so that the primary can store a long history of operations.
+      A larger oplog will obviously use more disk space, but in general this
+      is a good tradeoff to make because disk space tends to be cheap and
+      little of the oplog is typically in use, so it doesn’t take up much RAM.
+      A general rule of thumb is that the oplog should provide coverage
+      (replication window) for two to three days’ worth of normal operations.
+      For<a data-type="indexterm" data-startref="RSCsync11" id="idm45882354105000"/> more
+      information on sizing the oplog, see <a data-type="xref" href="ch13.xhtml#sect1-resize-oplog">“Resizing the Oplog”</a>.</p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="Heartbeats"><div class="sect1" id="idm45882354190696"><h1>Heartbeats</h1><p>Members<a data-type="indexterm" data-primary="replica sets, components of" data-secondary="heartbeats" id="idm45882354102200"/> need to know about the other members’ states: who’s
+    primary, who they can sync from, and who’s down. To keep an up-to-date
+    view of the set, a member sends out a <em>heartbeat
+    request</em> <a data-type="indexterm" data-primary="heartbeat requests" id="idm45882354100360"/>to every other member of the set every two seconds. A
+    heartbeat request is a short message that checks everyone’s state.</p><p>One of the most important functions of heartbeats is to let the
+    primary know if it can reach a majority of the set. If a primary can no
+    longer reach a majority of the servers, it will demote itself and become a
+    secondary (see <a data-type="xref" href="ch10.xhtml#repl-setup-section4">“How to Design a Set”</a>).</p><section data-type="sect2" data-pdf-bookmark="Member States"><div class="sect2" id="sect2-rs-states"><h2>Member States</h2><p>Members<a data-type="indexterm" data-primary="replica sets, components of" data-secondary="member states" id="idm45882354096472"/><a data-type="indexterm" data-primary="members" data-secondary="member states" id="idm45882354095224"/> also communicate what state they are in via heartbeats.
+      We’ve already discussed two states: primary and secondary. There are
+      several other normal states that you’ll often see members be in:</p><dl><dt>STARTUP</dt><dd><p>This is the state a member is in when it’s first started,
+            while MongoDB is attempting to load its replica set configuration.
+            Once the configuration has been loaded, it transitions to
+            STARTUP2.</p></dd><dt>STARTUP2</dt><dd><p>This state lasts throughout the initial sync process, which
+            typically takes just a few seconds. The member forks off a couple
+            of threads to handle replication and elections and then
+            transitions into the next state: RECOVERING.</p></dd><dt>RECOVERING</dt><dd><p>This state indicates that the member is operating correctly
+            but is not available for reads. You may see it in a variety of
+            situations.</p><p>On startup, a member has to make a few checks to make sure
+            it’s in a valid state before accepting reads; therefore, all
+            members go through the RECOVERING state briefly on startup before
+            becoming secondaries. A member can also go into <span class="keep-together">this</span> state during long-running
+            operations such as compacting or in response to <a href="https://oreil.ly/6mJu-">the
+            <code>replSetMaintenance</code>
+            command</a>.</p><p>A member will also go into the RECOVERING state if it has
+            fallen too far behind the other members to catch up. This is,
+            generally, a failure state that requires resyncing the member. The
+            member does not go into an error state at this point because it
+            lives in hope that someone will come online with a long-enough
+            oplog that it can bootstrap itself back to non-staleness.</p></dd><dt>ARBITER</dt><dd><p>Arbiters (see <a data-type="xref" href="ch10.xhtml#electionArbiters">“Election Arbiters”</a>) have a
+            special state and should always be in this state during normal
+            operation.</p></dd></dl><p>There are also a few states that indicate a problem with the
+      system. These include:</p><dl><dt>DOWN</dt><dd><p>If a member was up but then becomes unreachable, it will
+            enter this state. Note that a member reported as “down” might, in
+            fact, still be up, just unreachable due to network issues.</p></dd><dt>UNKNOWN</dt><dd><p>If a member has never been able to reach another member, it
+            will not know what state it’s in, so it will report it as UNKNOWN.
+            This generally indicates that the unknown member is down or that
+            there are network problems between the two members.</p></dd><dt>REMOVED</dt><dd><p>This is the state of a member that has been removed from the
+            set. If a removed member is added back into the set, it will
+            transition back into its “normal” state.</p></dd><dt>ROLLBACK</dt><dd><p>This state is used when a member is rolling back data, as
+            described in <a data-type="xref" href="#sect1-rollbacks">“Rollbacks”</a>. At the end of the
+            rollback process, a server will transition back into the
+            RECOVERING state and then become a secondary.</p></dd></dl></div></section></div></section><section data-type="sect1" data-pdf-bookmark="Elections"><div class="sect1" id="idm45882354080552"><h1>Elections</h1><p>A<a data-type="indexterm" data-primary="elections" data-secondary="members seeking" id="idm45882354079672"/><a data-type="indexterm" data-primary="replica sets, components of" data-secondary="elections" id="idm45882354078568"/> member will seek election if it cannot reach a primary (and
+    is itself eligible to become primary). A member seeking election will send
+    out a notice to all of the members it can reach. These members may know
+    why this member is an unsuitable primary: it may be behind in replication
+    or there may already be a primary that the member seeking election cannot
+    reach. In these cases, the other members will vote against the
+    candidate.</p><p>Assuming that there is no reason to object, the other members will
+    vote for the member seeking election. If the member seeking election
+    receives votes from a majority of the set, the election was successful and
+    the member will transition into PRIMARY state. If it did not receive a
+    majority if votes, it will remain a secondary and may try to become a
+    primary again later. A primary will remain primary until it cannot reach a
+    majority of members, goes down, or is stepped down, or the set is
+    reconfigured.</p><p>Assuming<a data-type="indexterm" data-primary="elections" data-secondary="speed of" id="idm45882354075800"/> that the network is healthy and a majority of the servers
+    are up, elections should be fast. It will take a member up to two seconds
+    to notice that a primary has gone down (due to the heartbeats mentioned
+    earlier) and it will immediately start an election, which should only take
+    a few milliseconds. However, the situation is often nonoptimal: an
+    election may be triggered due to networking issues or overloaded servers
+    responding too slowly. In these cases, an election might take more
+    time—even up to a few minutes.</p></div></section><section data-type="sect1" data-pdf-bookmark="Rollbacks"><div class="sect1" id="sect1-rollbacks"><h1>Rollbacks</h1><p>The<a data-type="indexterm" data-primary="replica sets, components of" data-secondary="rollbacks" id="RSCroll11"/> election process described in the previous section means
+    that if a primary does a write and goes down before the secondaries have a
+    chance to replicate it, the next primary elected may not have the write.
+    For example, suppose we have two data centers, one with the primary and a
+    secondary, and the other with three secondaries, as shown in <a data-type="xref" href="#repl-misc-3">Figure 11-2</a>.</p><figure style="float: 0"><div id="repl-misc-3" class="figure"><img src="Images/mdb3_1102.png" width="619" height="387"/><h6><span class="label">Figure 11-2. </span>A possible two-data-center configuration</h6></div></figure><p>Suppose that there is a network partition between the two data
+    centers, as shown in <a data-type="xref" href="#repl-misc-4">Figure 11-3</a>. The servers in the
+    first data center are up to operation 126, but that data center hasn’t yet
+    replicated to the servers in the other data center.</p><figure style="float: 0"><div id="repl-misc-4" class="figure"><img src="Images/mdb3_1103.png" width="619" height="435"/><h6><span class="label">Figure 11-3. </span>Replication across data centers can be slower than within a
+      single data <span class="keep-together">center</span></h6></div></figure><p>The servers in the other data center can still reach a majority of
+    the set (three out of five servers). Thus, one of them may be elected
+    primary. This new primary begins taking its own writes, as shown in <a data-type="xref" href="#repl-misc-5">Figure 11-4</a>.</p><figure style="float: 0"><div id="repl-misc-5" class="figure"><img src="Images/mdb3_1104.png" width="619" height="437"/><h6><span class="label">Figure 11-4. </span>Unreplicated writes won’t match writes on the other side of a
+      network <span class="keep-together">partition</span></h6></div></figure><p>When<a data-type="indexterm" data-primary="rollbacks" data-secondary="defined" id="idm45882354060856"/> the network is repaired, the servers in the first data
+    center will look for operation 126 to start syncing from the other
+    servers, but will not be able to find it. When this happens, <em class="filename">A</em> and <em class="filename">B</em>
+    will begin a process called <em>rollback</em>. Rollback is
+    used to undo ops that were not replicated before failover. The servers
+    with 126 in their oplogs will look back through the oplogs of the servers
+    in the other data center for a common point. They’ll find that operation
+    125 is the latest operation that matches. <a data-type="xref" href="#fig-oplog-rollback">Figure 11-5</a> shows what the oplogs would look like. A
+    apparently crashed before replicating ops 126−128, so these operations are
+    not present on B, which has more recent operations. A will have to roll
+    back these three operations before resuming syncing.</p><figure style="float: 0"><div id="fig-oplog-rollback" class="figure"><img src="Images/mdb3_1105.png" width="696" height="290"/><h6><span class="label">Figure 11-5. </span>Two members with conflicting oplogs⁠—the last common op was 125,
+      so as B has more recent operations A will need to roll back ops
+      126-128</h6></div></figure><p>At this point, the server will go through the ops it has and write
+    its version of each document affected by those ops to a <em class="filename">.bson</em> file in a <em class="filename">rollback</em> directory of your data directory.
+    Thus, if (for example) operation 126 was an update, it will write the
+    document updated by 126 to <em class="filename">&lt;collectionName&gt;.bson</em>. Then it will copy
+    the version of that document from the current primary.</p><p>The following is a paste of the log entries generated from a typical
+    rollback:</p><pre data-type="programlisting">Fri Oct  7 06:30:35 [rsSync] replSet syncing to: server-1
+Fri Oct  7 06:30:35 [rsSync] replSet our last op time written: Oct  7 
+    06:30:05:3 
+Fri Oct  7 06:30:35 [rsSync] replset source's GTE: Oct  7 06:30:31:1
+Fri Oct  7 06:30:35 [rsSync] replSet rollback 0
+Fri Oct  7 06:30:35 [rsSync] replSet ROLLBACK
+Fri Oct  7 06:30:35 [rsSync] replSet rollback 1
+Fri Oct  7 06:30:35 [rsSync] replSet rollback 2 FindCommonPoint
+Fri Oct  7 06:30:35 [rsSync] replSet info rollback our last optime:   Oct  7 
+    06:30:05:3
+Fri Oct  7 06:30:35 [rsSync] replSet info rollback their last optime: Oct  7 
+    06:30:31:2
+Fri Oct  7 06:30:35 [rsSync] replSet info rollback diff in end of log times: 
+    -26 seconds
+Fri Oct  7 06:30:35 [rsSync] replSet rollback found matching events at Oct  7 
+    06:30:03:4118
+Fri Oct  7 06:30:35 [rsSync] replSet rollback findcommonpoint scanned : 6
+Fri Oct  7 06:30:35 [rsSync] replSet replSet rollback 3 fixup
+Fri Oct  7 06:30:35 [rsSync] replSet rollback 3.5
+Fri Oct  7 06:30:35 [rsSync] replSet rollback 4 n:3
+Fri Oct  7 06:30:35 [rsSync] replSet minvalid=Oct  7 06:30:31 4e8ed4c7:2
+Fri Oct  7 06:30:35 [rsSync] replSet rollback 4.6
+Fri Oct  7 06:30:35 [rsSync] replSet rollback 4.7
+Fri Oct  7 06:30:35 [rsSync] replSet rollback 5 d:6 u:0
+Fri Oct  7 06:30:35 [rsSync] replSet rollback 6
+Fri Oct  7 06:30:35 [rsSync] replSet rollback 7
+Fri Oct  7 06:30:35 [rsSync] replSet rollback done
+Fri Oct  7 06:30:35 [rsSync] replSet RECOVERING
+Fri Oct  7 06:30:36 [rsSync] replSet syncing to: server-1
+Fri Oct  7 06:30:36 [rsSync] replSet SECONDARY</pre><p>The<a data-type="indexterm" data-primary="rollbacks" data-secondary="ROLLBACK state" id="idm45882354049432"/> server begins syncing from another member (<em class="filename">server-1</em>, in this case) and realizes that it
+    cannot find its latest operation on the sync source. At that point, it
+    starts the rollback process by going into the ROLLBACK state (<code>replSet ROLLBACK<a data-type="indexterm" data-primary="replSet ROLLBACK" id="idm45882354047000"/></code>).</p><p>At step 2, it finds the common point between the two oplogs, which
+    was 26 seconds ago. It then begins undoing the operations from the last 26
+    seconds from its oplog. Once the rollback is complete, it transitions into
+    the RECOVERING state and begins syncing normally again.</p><p>To<a data-type="indexterm" data-primary="rollbacks" data-secondary="applying operations to current primary" id="idm45882354045096"/> apply operations that have been rolled back to the current
+    primary, first use <em class="filename">mongorestore</em> to
+    load them into a temporary collection:</p><pre data-type="programlisting">$ mongorestore --db stage --collection stuff \
+    /data/db/rollback/important.stuff.2018-12-19T18-27-14.0.bson</pre><p>Then examine the documents (using the shell) and compare them to the
+    current contents of the collection from whence they came. For example, if
+    someone had created a “normal” index on the rollback member and a unique
+    index on the current primary, you’d want to make sure that there weren’t
+    any duplicates in the rolled-back data and resolve them if there
+    were.</p><p>Once<a data-type="indexterm" data-primary="rollbacks" data-secondary="loading documents into main collection" id="idm45882354041496"/> you have a version of the documents that you like in your
+    staging collection, load it into your main collection:</p><pre data-type="programlisting" data-code-language="javascript"><code class="o">&gt;</code> <code class="nx">staging</code><code class="p">.</code><code class="nx">stuff</code><code class="p">.</code><code class="nx">find</code><code class="p">().</code><code class="nx">forEach</code><code class="p">(</code><code class="kd">function</code><code class="p">(</code><code class="nx">doc</code><code class="p">)</code> <code class="p">{</code>
+<code class="p">...</code>     <code class="nx">prod</code><code class="p">.</code><code class="nx">stuff</code><code class="p">.</code><code class="nx">insert</code><code class="p">(</code><code class="nx">doc</code><code class="p">);</code>
+<code class="p">...</code> <code class="p">})</code></pre><p>If you have any insert-only collections, you can directly load the
+    rollback documents into the collection. However, if you are doing updates
+    on the collection you will need to be more careful about how you merge
+    rollback data.</p><p>One<a data-type="indexterm" data-primary="rollbacks" data-secondary="manipulating member votes" id="idm45882354021544"/> often-misused member configuration option is the number of
+    votes each member has. Manipulating the number of votes is almost always
+    not what you want to do and causes a lot of rollbacks (which is why it was
+    not included in the list of member configuration options in the last
+    chapter). Do not change the number of votes unless you are prepared to
+    deal with regular rollbacks.</p><p>For more information on preventing rollbacks, see <a data-type="xref" href="ch12.xhtml#chapter-repl-app">Chapter 12</a>.</p><section data-type="sect2" data-pdf-bookmark="When Rollbacks Fail"><div class="sect2" id="idm45882354015928"><h2>When Rollbacks Fail</h2><p>In<a data-type="indexterm" data-primary="rollbacks" data-secondary="failed" id="idm45882354014920"/> older versions of MongoDB, it could decide that the
+      rollback was too large to undertake. Since MongoDB version 4.0, there is
+      no limit on the amount of data that can be rolled back. A rollback in
+      versions before 4.0 can fail if there are more than 300 MB of data or
+      about 30 minutes of operations to roll back. In these cases, you must
+      resync the node that is stuck in rollback.</p><p>The most common cause of this is when secondaries are lagging and
+      the primary goes down. If one of the secondaries becomes primary, it
+      will be missing a lot of operations from the old primary. The best way
+      to make sure you don’t get a member stuck in rollback is to keep your
+      secondaries as up to date as<a data-type="indexterm" data-startref="RSCroll11" id="idm45882354012616"/> possible.</p></div></section></div></section></div></section></div>
+
+
+
+  </body></html>

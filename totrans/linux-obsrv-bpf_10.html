@@ -1,0 +1,170 @@
+<html><head></head><body><section data-type="chapter" epub:type="chapter" data-pdf-bookmark="Chapter 9. Real-World Use Cases"><div class="chapter" id="use_cases">
+<h1><span class="label">Chapter 9. </span>Real-World Use Cases</h1>
+
+
+<p>The most important question to ask yourself when implementing a new technology is: “What are the use cases for this out there?” That’s why we decided to interview the creators of some of the most exciting BPF projects out there to share their ideas.<a data-type="indexterm" data-primary="use cases, real world" id="ix_usecs"/><a data-type="indexterm" data-primary="BPF" data-secondary="real-world use cases" id="ix_BPFuse"/></p>
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Sysdig eBPF God Mode"><div class="sect1" id="idm46623548463912">
+<h1>Sysdig eBPF God Mode</h1>
+
+<p>Sysdig, the company that makes the eponymous open source Linux troubleshooting tool, started playing with eBPF in 2017 under kernel 4.11.<a data-type="indexterm" data-primary="eBPF" data-secondary="Sysdig eBPF God mode" id="ix_eBPFsysdig"/><a data-type="indexterm" data-primary="use cases, real world" data-secondary="Sysdig eBPF God mode" id="ix_usecsSysdig"/><a data-type="indexterm" data-primary="BPF" data-secondary="real-world use cases" data-tertiary="Sysdig eBPF God mode" id="ix_BPFuseSysdig"/><a data-type="indexterm" data-primary="Sysdig eBPF God mode" id="ix_Sysdig"/></p>
+
+<p>It has been historically using a kernel module to extract and do all the kernel-side work, but as the user base increased and when more and more companies started experimenting, the company acknowledged that it is a limitation for the majority of external actors, in many ways:</p>
+
+<ul>
+<li>
+<p>There’s an increasing number of users who can’t load kernel modules on their machines. Cloud-native platforms are becoming more and more restrictive against what runtime programs can do.<a data-type="indexterm" data-primary="kernel" data-secondary="inability to load kernel modules" id="idm46623548454808"/></p>
+</li>
+<li>
+<p>New contributors (and even old) don’t understand the architecture of a kernel module. That decreases the overall number of contributors and is a limiting factor for the growth of the project itself.</p>
+</li>
+<li>
+<p>Kernel modules maintenance is difficult, not just because of writing the code, but also because of the effort needed to keep it safe and well organized.</p>
+</li>
+</ul>
+
+<p>For those motivations, Sysdig decided to try the approach of writing the same set of features it has in the module but using an eBPF program instead. Another benefit that automatically comes from adopting eBPF is the possibility for Sysdig to further take advantage of other nice eBPF tracing features. For example, it’s relatively easy to attach eBPF programs to particular execution points in a user-space application using user probes, as described in <a data-type="xref" href="ch04.html#uprobes">“User-Space Probes”</a>.</p>
+
+<p>In addition, the project can now use native helper capabilities in eBPF programs to capture stack traces of running processes to augment the typical system call event stream. This gives users even more troubleshooting information.</p>
+
+<p>Although it’s all bells and whistles now, Sysdig initially faced some challenges due to the limitations of the eBPF virtual machine when getting started, so the chief architect of the project, Gianluca Borello, decided to improve it by contributing upstream patches to the kernel itself, including:</p>
+
+<ul>
+<li>
+<p>The ability to deal with strings in eBPF programs <a href="https://oreil.ly/ZJ09y">natively</a></p>
+</li>
+<li>
+<p>Multiple patches to improve the arguments semantic in eBPF programs <a href="https://oreil.ly/lPcGT">1</a>, <a href="https://oreil.ly/5S_tR">2</a>, and <a href="https://oreil.ly/HLrEu">3</a></p>
+</li>
+</ul>
+
+<p>The latter was particularly essential to dealing with system call arguments, probably the most important data source available in the tool.</p>
+
+<p><a data-type="xref" href="#sysdig-ebpf">Figure 9-1</a> shows the architecture of the eBPF mode in Sysdig.</p>
+
+<figure><div id="sysdig-ebpf" class="figure">
+<img src="assets/lbpf_0901.png" alt="A diagram showing the architecture of the eBPF mode in Sysdig."/>
+<h6><span class="label">Figure 9-1. </span>Sysdig’s eBPF architecture</h6>
+</div></figure>
+
+<p>The core of the implementation is a collection of custom eBPF programs responsible for the instrumentation. These programs are written in a subset of the C programming language. They are compiled using recent versions of Clang and LLVM, which translate the high-level C code into the eBPF bytecode.</p>
+
+<p>There is one eBPF program for every different execution point where Sysdig instruments the kernel.<a data-type="indexterm" data-primary="tracepoints" data-secondary="eBPF programs attached to" id="idm46623548438696"/> Currently, eBPF programs are attached to the following static <span class="keep-together">tracepoints</span>:</p>
+
+<ul>
+<li>
+<p>System call entry path</p>
+</li>
+<li>
+<p>System call exit path</p>
+</li>
+<li>
+<p>Process context switch</p>
+</li>
+<li>
+<p>Process termination</p>
+</li>
+<li>
+<p>Minor and major page faults</p>
+</li>
+<li>
+<p>Process signal delivery</p>
+</li>
+</ul>
+
+<p>Each program takes in the execution point data (e.g., for system calls, arguments passed by the calling process) and starts processing them.<a data-type="indexterm" data-primary="system calls, data on" id="idm46623548430392"/> The processing depends on the type of system call. For simple system calls, the arguments are just copied verbatim into an eBPF map used for temporary storage until the entire event frame is formed. For other, more complicated calls, the eBPF programs include the logic to translate or augment the arguments. This enables the Sysdig application in user-space to fully leverage the data.</p>
+
+<p>Some of the additional data includes the following:</p>
+
+<ul>
+<li>
+<p>Data associated to a network connection (TCP/UDP IPv4/IPv6 tuple, UNIX socket names, etc.)</p>
+</li>
+<li>
+<p>Highly granular metrics about the process (memory counters, page faults, socket queue length, etc.)</p>
+</li>
+<li>
+<p>Container-specific data, such as the cgroups the process issuing the syscall belongs to, as well as the namespaces in which process lives</p>
+</li>
+</ul>
+
+<p>As shown in <a data-type="xref" href="#sysdig-ebpf">Figure 9-1</a>, after an eBPF program captures all the needed data for a specific system call, it uses a special native BPF function to push the data to a set of per-CPU ring buffers that the user-space application can read at a very high throughput. This is where the usage of eBPF in Sysdig differs from the typical paradigm of using eBPF maps to share “small data” produced in kernel-space with user-space. To learn more about maps and how to communicate between user- and kernel-space, refer to <a data-type="xref" href="ch03.html#bpf_maps">Chapter 3</a>.</p>
+
+<p>From a performance point of view, the results are good! In <a data-type="xref" href="#sysdig-ebpf-performance">Figure 9-2</a> you can see how the instrumentation overhead of the eBPF instrumentation of Sysdig is only marginally greater than the “classic” kernel module instrumentation.</p>
+
+<figure><div id="sysdig-ebpf-performance" class="figure">
+<img src="assets/lbpf_0902.png" alt="Performance comparison diagram between the Sysdig eBPF and kernel module implementation"/>
+<h6><span class="label">Figure 9-2. </span>Sysdig eBPF performance comparison</h6>
+</div></figure>
+
+<p>You can play with Sysdig and its eBPF support by following the <a href="https://oreil.ly/luHKp">usage instructions</a>, but also make sure to also look at the <a href="https://oreil.ly/AJddM">code of the BPF driver</a>.<a data-type="indexterm" data-primary="eBPF" data-secondary="Sysdig eBPF God mode" data-startref="ix_eBPFsysdig" id="idm46623548417384"/><a data-type="indexterm" data-primary="use cases, real world" data-secondary="Sysdig eBPF God mode" data-startref="ix_usecsSysdig" id="idm46623548416104"/><a data-type="indexterm" data-primary="Sysdig eBPF God mode" data-startref="ix_Sysdig" id="idm46623548414888"/><a data-type="indexterm" data-primary="BPF" data-secondary="real-world use cases" data-tertiary="Sysdig eBPF God mode" data-startref="ix_BPFuseSysdig" id="idm46623548413944"/></p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Flowmill"><div class="sect1" id="idm46623548463000">
+<h1>Flowmill</h1>
+
+<p>Flowmill, an observability startup, emerged from an academic research project called <a href="https://oreil.ly/e9heR">Flowtune</a> by its founder, Jonathan Perry.  Flowtune examined how to efficiently schedule individual packets in congested datacenter networks.<a data-type="indexterm" data-primary="BPF" data-secondary="real-world use cases" data-tertiary="Flowmill" id="ix_BPFuseFlw"/><a data-type="indexterm" data-primary="Flowmill (BPF use case)" id="ix_Flwm"/><a data-type="indexterm" data-primary="use cases, real world" data-secondary="Flowmill" id="ix_usecsFlow"/>  One of the core pieces of technology required for this work was a means of gathering network telemetry with extremely low overhead.   Flowmill ultimately adapted this technology to observe, aggregate, and analyze connections between every component in a distributed application to do the following:</p>
+
+<ul>
+<li>
+<p>Provide an accurate view of how services interact in a distributed system</p>
+</li>
+<li>
+<p>Identify areas where statistically significant changes have occurred in traffic rates, errors, or latency</p>
+</li>
+</ul>
+
+<p class="pagebreak-before">Flowmill uses eBPF kernel probes to trace every open socket and capture operating systems metrics on them periodically.<a data-type="indexterm" data-primary="kernel probes" data-secondary="use by Flowmill" id="idm46623548338808"/><a data-type="indexterm" data-primary="probes" data-secondary="kernel" data-tertiary="use by Flowmill" id="idm46623548337832"/>  This is complex for a number of reasons:</p>
+
+<ul>
+<li>
+<p>It’s necessary to instrument both new connections and existing connections already open at the time the eBPF probes are established.  Additionally, it must account for both TCP and UDP as well as IPv4 and IPv6 code paths through the kernel.</p>
+</li>
+<li>
+<p>For container-based systems, each socket must be attributed to the appropriate cgroup and joined with orchestrator metadata from a platform like Kubernetes or Docker.</p>
+</li>
+<li>
+<p>Network address translation performed via conntrack must be instrumented to establish the mapping between sockets and their externally visible IP addresses.  For example, in Docker, a common networking model uses source NAT to masquerade containers behind a host IP address and in Kubernetes, and a service virtual IP address is used to represent a set of containers.</p>
+</li>
+<li>
+<p>Data collected by eBPF programs must be post-processed to provide aggregates by service and to match data collected on two sides of a connection.</p>
+</li>
+</ul>
+
+<p>However, adding eBPF kernel probes provides a far more efficient and robust way of gathering this data.   It completely eliminates the risk of missing connections and can be done with low overhead on every socket on a subsecond interval. Flowmill’s approach relies on an agent, which combines a set of eBPF kprobes and user-space metrics collection as well as off-box aggregation and post processing.  The implementation makes heavy use of Perf rings to pass metrics collected on each socket to userspace for further processing.  Additionally, it uses a hash map to keep track of open TCP and UDP sockets.</p>
+
+<p>Flowmill found there are generally two strategies to designing eBPF instrumentation. The “easy” approach finds the one to two kernel functions that are called on every instrumented event, but requires BPF code to maintain more state and to do more work per call, on an instrumentation point called very frequently. To alleviate concerns about instrumentation impacting production workloads, Flowmill followed the other strategy: instrument more specific functions that are called less frequently and signify an important event. This has significantly lower overhead, but requires more effort in covering all important code paths, especially across kernel versions as kernel code evolves.</p>
+
+<p>For example, <code>tcp_v4_do_rcv</code> captures all established TCP RX traffic and has access to the <code>struct sock</code>, but has extremely high call volume. Instead, users can instrument functions dealing with ACKs, out-of-order packet handling, RTT estimation, and more that allow handling specific events that influence known metrics.</p>
+
+<p>With this approach across TCP, UDP, processes, containers, conntrack, and other subsystems, the system achieves extremely good performance of the system with overhead low enough that is difficult to measure in most systems. CPU overhead is generally  0.1% to 0.25% per core including eBPF and user-space components and is dependent primarily on the rate at which new sockets are created.</p>
+
+<p>There is more about Flowmill and Flowtune on <a href="https://www.flowmill.com">their website</a>.</p>
+
+<p>Sysdig and Flowmill are pioneers in the use of BPF to build monitoring and observability tools, but they are not the only ones. Throughout the book, we’ve mentioned other companies like Cillium and Facebook that have adopted BPF as their framework of choice to deliver highly secure and performant networking infrastructure. We’re very excited for the future ahead of BPF and its community, and we cannot wait to see what you built with it.<a data-type="indexterm" data-primary="BPF" data-secondary="real-world use cases" data-tertiary="Flowmill" data-startref="ix_BPFuseFlw" id="idm46623548324920"/><a data-type="indexterm" data-primary="Flowmill (BPF use case)" data-startref="ix_Flwm" id="idm46623548323400"/><a data-type="indexterm" data-primary="use cases, real world" data-secondary="Flowmill" data-startref="ix_usecsFlow" id="idm46623548322456"/><a data-type="indexterm" data-primary="use cases, real world" data-startref="ix_usecs" id="idm46623548321240"/><a data-type="indexterm" data-primary="BPF" data-secondary="real-world use cases" data-startref="ix_BPFuse" id="idm46623548320296"/></p>
+</div></section>
+
+
+
+
+
+
+
+</div></section></body></html>

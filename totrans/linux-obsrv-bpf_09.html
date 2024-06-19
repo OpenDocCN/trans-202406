@@ -1,0 +1,563 @@
+<html><head></head><body><section data-type="chapter" epub:type="chapter" data-pdf-bookmark="Chapter 8. Linux Kernel Security, Capabilities, and Seccomp"><div class="chapter" id="kernel_security">
+<h1><span class="label">Chapter 8. </span>Linux Kernel Security, <span class="keep-together">Capabilities, and Seccomp</span></h1>
+
+
+<p>BPF is a powerful way to extend the kernel without compromising stability, safety, and speed.<a data-type="indexterm" data-primary="kernel security, capabilities, and Seccomp" id="ix_kersec"/> For this reason, kernel developers thought that it would’ve been good to use its versatility to improve process isolation in Seccomp by implementing Seccomp filters backed by BPF programs, also known as Seccomp BPF. In this chapter we examine what Seccomp is and how it is used. Then you learn how to write Seccomp filters using BPF programs. After that you explore the built-in BPF hooks that the kernel has for Linux security modules.<a data-type="indexterm" data-primary="security" data-seealso="kernel security, capabilities, and Seccomp" id="idm46623549752488"/></p>
+
+<p>Linux Security Modules (LSM) is a framework providing a set of functions that can be used to implement different security models in a standardized way. An LSM can be used in the kernel source tree directly, like Apparmor, SELinux, and Tomoyo.<a data-type="indexterm" data-primary="Linux Security Modules (LSM) framework" id="idm46623549750872"/><a data-type="indexterm" data-primary="LSM (Linux Security Modules) framework" id="idm46623549750104"/></p>
+
+<p>We begin by discussing Linux capabilities.</p>
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Capabilities"><div class="sect1" id="idm46623549748904">
+<h1>Capabilities</h1>
+
+<p>The deal with Linux capabilities is that you need to provide your unprivileged process with permission <a data-type="indexterm" data-primary="kernel security, capabilities, and Seccomp" data-secondary="capabilities" id="ix_kerseccap"/><a data-type="indexterm" data-primary="capabilities" id="ix_capa"/>to do a specific task, but you don’t want to give <code>suid</code> privileges to the binary or otherwise make the process privileged, so you reduce the attack surface by just giving the process the specific capability to accomplish the specific tasks. For example, if your application needs to open a privileged port, like 80, instead of starting the process as root, you can just give it the <code>CAP_NET_BIND_SERVICE</code> capability.<a data-type="indexterm" data-primary="capabilities" data-secondary="CAP_NET_BIND_SERVICE" id="idm46623549743256"/></p>
+
+<p>Consider the following Go program called <em>main.go</em>:</p>
+
+<pre data-type="programlisting" data-code-language="go"><code class="kn">package</code> <code class="nx">main</code>
+
+<code class="kn">import</code> <code class="p">(</code>
+	<code class="s">"net/http"</code>
+	<code class="s">"log"</code>
+<code class="p">)</code>
+
+<code class="kd">func</code> <code class="nx">main</code><code class="p">()</code> <code class="p">{</code>
+    <code class="nx">log</code><code class="p">.</code><code class="nx">Fatalf</code><code class="p">(</code><code class="s">"%v"</code><code class="p">,</code> <code class="nx">http</code><code class="p">.</code><code class="nx">ListenAndServe</code><code class="p">(</code><code class="s">":80"</code><code class="p">,</code> <code class="kc">nil</code><code class="p">))</code>
+<code class="p">}</code></pre>
+
+<p>This program serves an HTTPserver on port 80, a privileged port.</p>
+
+<p>What we normally would do is to run that program straight after compiling it with the following:</p>
+
+<pre data-type="programlisting" data-code-language="bash"><code class="nv">$ </code>go build -o capabilities main.go
+<code class="nv">$ </code>./capabilities</pre>
+
+<p>However, because we are not giving root privileges, that code will output an error when binding the port:</p>
+
+<pre data-type="programlisting" data-code-language="bash">2019/04/25 23:17:06 listen tcp :80: <code class="nb">bind</code>: permission denied
+<code class="nb">exit </code>status 1</pre>
+<div data-type="tip"><h6>Tip</h6>
+<p><code>capsh</code> (capability shell wrapper) is a tool that will  start a shell with a specific set of capabilities.<a data-type="indexterm" data-primary="capsh (capability shell wrapper)" id="idm46623549576104"/></p>
+</div>
+
+<p>In this case, as stated, instead of giving full root permissions, we can just allow the binding of privileged ports by allowing the <code>cap_net_bind_service</code> capability along with all the others the program already has. To do that, we can wrap our program run with <code>capsh</code>:</p>
+
+<pre data-type="programlisting"># capsh --caps='cap_net_bind_service+eip cap_setpcap,cap_setuid,cap_setgid+ep' \
+    --keep=1 --user="nobody" \
+    --addamb=cap_net_bind_service -- -c "./capabilities"</pre>
+
+<p>Let’s break down that command a bit:</p>
+<dl>
+<dt><code>capsh</code></dt>
+<dd>
+<p>We use <code>capsh</code> as wrapper.</p>
+</dd>
+<dt><code>--caps='cap_net_bind_service+eip cap_setpcap,cap_setuid,cap_setgid+ep'</code></dt>
+<dd>
+<p>Because we need to change the user (we don’t want to run as root), we need to specify <code>cap_net_bind_service</code> and the capabilities to actually do the user ID change from <code>root</code> to <code>nobody</code>, namely, <code>cap_setuid</code> and <code>cap_setgid</code>:</p>
+</dd>
+<dt><code>--keep=1</code></dt>
+<dd>
+<p>We want to keep the set capabilities when the switch from root is done.</p>
+</dd>
+<dt><code>--user="nobody"</code></dt>
+<dd>
+<p>The end user running our program will be <code>nobody</code>.</p>
+</dd>
+<dt><code>--addamb=cap_net_bind_service</code></dt>
+<dd>
+<p>We set ambient capabilities because those are cleared after switching from root.<a data-type="indexterm" data-primary="ambient capabilities" id="idm46623549631208"/></p>
+</dd>
+<dt><code>-- -c "./capabilities"</code></dt>
+<dd>
+<p>After everything, we just run our program.<a data-type="indexterm" data-primary="capabilities" data-secondary="ambient" id="idm46623549629208"/></p>
+</dd>
+</dl>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>Ambient capabilities are a specific kind of capability that is inherited by the children programs when the current program executes them using <code>execve()</code>. Only those capabilities that are permitted in the ambient and are inheritable can be ambient capabilities.</p>
+</div>
+
+<p>At this point, you are probably asking yourself what is that <code>+eip</code> after the capability in the <code>--caps</code> option. Those flags are used to determine whether:</p>
+
+<ul>
+<li>
+<p>The capability needs to be activated (p).</p>
+</li>
+<li>
+<p>The capability is usable (e).</p>
+</li>
+<li>
+<p>The capability can be inherited by child processes (i).</p>
+</li>
+</ul>
+
+<p>Because we want to use our <code>cap_net_bind_service</code>, we need to make it <code>e</code>; then in our command, we started a shell. That then started the <code>capabilities</code> binary, and we needed to make it <code>i</code>. Finally, we want the capability to be activated (it was not because we changed the UID), using <code>p</code>. That ends up being <code>cap_net_bind_service+eip</code>.</p>
+
+<p>You can verify that with <code>ss</code>; we’re going to cut the output to make it fit in this page, but it will show the bound port and the user ID that are different than <code>0</code>, in this case <code>65534</code>:</p>
+
+<pre data-type="programlisting"># ss -tulpn -e -H | cut -d' ' -f17-
+128    *:80    *:*
+users:(("capabilities",pid=30040,fd=3)) uid:65534 ino:11311579 sk:2c v6only:0</pre>
+
+<p>We used <code>capsh</code> for this example, but you can write the wrapper by using <em>libcap</em>; for more info, see <code>man 3 libcap</code>.<a data-type="indexterm" data-primary="libcap (Packet Capture Library)" id="idm46623549547336"/></p>
+
+<p>When writing programs, it’s fairly common that the developer doesn’t really know in advance all the capabilities needed by a program at runtime; moreover, with newer releases, those capabilities might change.</p>
+
+<p>To better understand the capabilities used by our program, we can use the <code>capable</code> tool from BCC <a data-type="indexterm" data-primary="BCC (BPF Compiler Collection)" data-secondary="capable tool" id="idm46623549545096"/><a data-type="indexterm" data-primary="capabilities" data-secondary="capable tool in BCC" id="idm46623549544072"/><a data-type="indexterm" data-primary="cap_capable function" id="idm46623549543128"/><a data-type="indexterm" data-primary="kprobe programs" data-secondary="setting up kprobe on cap_capable function" id="idm46623549542456"/>that sets up a kprobe on the kernel function <code>cap_capable</code>:</p>
+
+<pre data-type="programlisting" class="pagebreak-before"> /usr/share/bcc/tools/capable
+TIME      UID    PID    TID    COMM             CAP  NAME                 AUDIT
+10:12:53  0      424    424    systemd-udevd    12   CAP_NET_ADMIN        1
+10:12:57  0      1103   1101   timesync         25   CAP_SYS_TIME         1
+10:12:57  0      19545  19545  capabilities     10   CAP_NET_BIND_SERVICE 1</pre>
+
+<p>We can accomplish the same using <code>bpftrace</code> with<a data-type="indexterm" data-primary="BPFTrace" data-secondary="bpftrace with kprobe on cap_capable function" id="idm46623549538728"/> a one-liner kprobe on the <code>cap_capable</code> kernel function:</p>
+
+<pre data-type="programlisting" data-code-language="bash">bpftrace -e <code class="se">\</code>
+    <code class="s1">'kprobe:cap_capable {</code>
+<code class="s1">        time("%H:%M:%S  ");</code>
+<code class="s1">        printf("%-6d %-6d %-16s %-4d %d\n", uid, pid, comm, arg2, arg3);</code>
+<code class="s1">    }'</code> <code class="se">\</code>
+    <code class="p">|</code> grep -i capabilities</pre>
+
+<p>That will output something like the following, if our program <code>capabilities</code> is started after the kprobe:</p>
+
+<pre data-type="programlisting">12:01:56  1000   13524  capabilities     21   0
+12:01:56  1000   13524  capabilities     21   0
+12:01:56  1000   13524  capabilities     21   0
+12:01:56  1000   13524  capabilities     12   0
+12:01:56  1000   13524  capabilities     12   0
+12:01:56  1000   13524  capabilities     12   0
+12:01:56  1000   13524  capabilities     12   0
+12:01:56  1000   13524  capabilities     10   1</pre>
+
+<p>The fifth column is the capability required by the process, and because this output also includes nonaudit events, we see all the nonaudit checks and finally the required capability with the audit flag (the last in the previous output) set to 1. The capability we are interested in is <code>CAP_NET_BIND_SERVICE</code>, which is defined as a constant in the kernel source code at <code>include/uapi/linux/capability.h</code> and has ID <code>10</code>:</p>
+
+<pre data-type="programlisting">/* Allows binding to TCP/UDP sockets below 1024 */
+/* Allows binding to ATM VCIs below 32 */
+
+#define CAP_NET_BIND_SERVICE 10</pre>
+
+<p>Capabilities are often used in container runtimes, like runC or Docker, to make containers unprivileged and allow only the capabilities needed to run the majority of applications.<a data-type="indexterm" data-primary="capabilities" data-secondary="use in container runtimes" id="idm46623549526072"/><a data-type="indexterm" data-primary="containers" data-secondary="capabilities in container runtimes" id="idm46623549525080"/> When an application needs particular capabilities, in Docker that can be done with <code>--cap-add</code>:</p>
+
+<pre data-type="programlisting">docker run -it --rm --cap-add=NET_ADMIN ubuntu ip link add dummy0 type dummy</pre>
+
+<p>This command will give the <code>CAP_NET_ADMIN</code> capability to that container, allowing it to set up a netlink to add the <code>dummy0</code> interface.<a data-type="indexterm" data-primary="CAP_NET_ADMIN capability" id="idm46623549513832"/></p>
+
+<p>The next section shows how to achieve capabilities such as filtering but by using another technique that will let us programmatically implement our own filters.<a data-type="indexterm" data-primary="capabilities" data-startref="ix_capa" id="idm46623549512472"/><a data-type="indexterm" data-primary="kernel security, capabilities, and Seccomp" data-secondary="capabilities" data-startref="ix_kerseccap" id="idm46623549511496"/></p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Seccomp"><div class="sect1" id="idm46623549747960">
+<h1>Seccomp</h1>
+
+<p>Seccomp stands for Secure Computing, and it is a security layer implemented in the Linux kernel that allows developers to filter specific syscalls. Although Seccomp is comparable to capabilities, its ability to control specific system calls makes it a lot more flexible when compared to capabilities.<a data-type="indexterm" data-primary="Seccomp" id="ix_Seccmp"/><a data-type="indexterm" data-primary="kernel security, capabilities, and Seccomp" data-secondary="Seccomp" id="ix_kersecseccmp"/></p>
+
+<p>Seccomp and capabilites do not exclude each other; they are often used together to bring benefits from both the worlds.<a data-type="indexterm" data-primary="capabilities" data-secondary="Seccomp and" id="idm46623549505832"/> For example, you might want to give the <code>CAP_NET_ADMIN</code> capability to a process but not allow it to accept connections on a socket by blocking the <code>accept</code> and <code>accept4</code> syscalls.</p>
+
+<p>The way Seccomp filters is based on BPF filters using the <code>SECCOMP_MODE_FILTER</code> mode, and syscalls filtering is done in the same way it is for packets.<a data-type="indexterm" data-primary="Seccomp" data-secondary="filtering" id="idm46623549502504"/><a data-type="indexterm" data-primary="filtering" data-secondary="in Seccomp" id="idm46623549501528"/></p>
+
+<p>Seccomp filters are loaded using <code>prctl</code> via the <code>PR_SET_SECCOMP</code> operation; those filters <a data-type="indexterm" data-primary="PR_SET_SECCOMP operation" id="idm46623549482536"/>are expressed in the form of a BPF program that is executed on each Seccomp <em>packet</em> expressed using the <code>seccomp_data</code> struct.<a data-type="indexterm" data-primary="seccomp_data struct" id="idm46623549480952"/> That  struct contains the reference architecture, the CPU instruction pointer at the time of the syscall, and a maximum of six system call arguments expressed as <code>uint64</code>.</p>
+
+<p>Here’s how the <code>seccomp_data</code> struct looks from the kernel’s source at <code>linux/seccomp.h</code>:</p>
+
+<pre data-type="programlisting" data-code-language="c"><code class="k">struct</code> <code class="n">seccomp_data</code> <code class="p">{</code>
+	<code class="kt">int</code> <code class="n">nr</code><code class="p">;</code>
+	<code class="n">__u32</code> <code class="n">arch</code><code class="p">;</code>
+	<code class="n">__u64</code> <code class="n">instruction_pointer</code><code class="p">;</code>
+	<code class="n">__u64</code> <code class="n">args</code><code class="p">[</code><code class="mi">6</code><code class="p">];</code>
+<code class="p">};</code></pre>
+
+<p>As you can see by reading the struct, we can filter based on the syscall, based on its arguments, or based on a combination of them.</p>
+
+<p>After receiving each Seccomp packet, the filter has the duty of doing the processing to make a final decision<a data-type="indexterm" data-primary="Seccomp" data-secondary="filtering" data-tertiary="return values or status codes" id="idm46623549457432"/> to tell the kernel what to do next. <a data-type="indexterm" data-primary="filtering" data-secondary="in Seccomp" data-tertiary="filter return values or status codes" id="idm46623549456216"/>The final decision is expressed via one of the return values (status codes) it can give, as described here:</p>
+<dl>
+<dt><code>SECCOMP_RET_KILL_PROCESS</code></dt>
+<dd>
+<p>It will kill the whole process immediately after filtering the syscall, which as a consequence, is not executed.</p>
+</dd>
+<dt><code>SECCOMP_RET_KILL_THREAD</code></dt>
+<dd>
+<p>It will kill the current thread immediately after filtering the syscall, which as a consequence, is not executed.</p>
+</dd>
+<dt><code>SECCOMP_RET_KILL</code></dt>
+<dd>
+<p>This is an alias to <code>SECCOMP_RET_KILL_THREAD</code> left for compatibility.</p>
+</dd>
+<dt><code>SECCOMP_RET_TRAP</code></dt>
+<dd>
+<p>The syscall is disallowed, and the <code>SIGSYS</code> (Bad System Call) signal is sent to the task calling it.</p>
+</dd>
+<dt><code>SECCOMP_RET_ERRNO</code></dt>
+<dd>
+<p>The syscall is not executed, and the <code>SECCOMP_RET_DATA</code> part of the filter’s return value is passed to user-space as the <code>errno</code> value. Depending on what was the cause of the error, a different <code>errno</code> is returned. You can find the list of error numbers in the following section.</p>
+</dd>
+<dt><code>SECCOMP_RET_TRACE</code></dt>
+<dd>
+<p>This is used to notify a <code>ptrace</code> tracer <a data-type="indexterm" data-primary="ptrace system call" id="idm46623549442520"/>using <code>PTRACE_O_TRACESECCOMP</code> to intercept when the syscall is called to observe and control the execution of the syscall. In case there’s no tracer attached, an error is returned, <code>errno</code> is set to <code>-ENOSYS</code>, and the syscall is not executed.</p>
+</dd>
+<dt><code>SECCOMP_RET_LOG</code></dt>
+<dd>
+<p>The syscall is allowed and logged.</p>
+</dd>
+<dt><code>SECCOMP_RET_ALLOW</code></dt>
+<dd>
+<p>The syscall is just allowed.</p>
+</dd>
+</dl>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p><code>ptrace</code> is a system call used to implement tracing mechanisms on a process, called the <em>tracee</em>, with the effect of being able to observe and control the process’s execution.<a data-type="indexterm" data-primary="tracing" data-secondary="implemeting on a process using ptrace" id="idm46623549435672"/> The tracer program can effectively affect the execution and change the memory registers of the tracee. In the context of Seccomp, <code>ptrace</code> is used  when triggered by the <code>SECCOMP_RET_TRACE</code> status code; therefore, the tracer can prevent the syscall from executing and implement its own logic.</p>
+</div>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Seccomp Errors"><div class="sect2" id="idm46623549409464">
+<h2>Seccomp Errors</h2>
+
+<p>From time to time, while working with Seccomp you will encounter different errors given by the return value of type <code>SECCOMP_RET_ERRNO</code>.<a data-type="indexterm" data-primary="Seccomp" data-secondary="errors" id="idm46623549407256"/><a data-type="indexterm" data-primary="errors" data-secondary="Seccomp" id="idm46623549406248"/><a data-type="indexterm" data-primary="kernel security, capabilities, and Seccomp" data-secondary="Seccomp" data-tertiary="errors" id="idm46623549405304"/> To notify that an error happened, the <code>seccomp</code> syscall will return <code>-1</code> instead of <code>0</code>.</p>
+
+<p>The possible errors are as follows:</p>
+<dl>
+<dt><code>EACCESS</code></dt>
+<dd>
+<p>The caller is not allowed to do the syscall—usually this happens because it didn’t have <code>CAP_SYS_ADMIN</code> privileges or did not set <code>no_new_privs</code> with <code>prctl</code>, which we explain later in this chapter.</p>
+</dd>
+<dt><code>EFAULT</code></dt>
+<dd>
+<p>The passed arguments (<code>args</code> in the <code>seccomp_data</code> struct) did not have a valid address.</p>
+</dd>
+<dt><code>EINVAL</code></dt>
+<dd>
+<p>It can have four meanings:</p>
+
+<ul>
+<li>
+<p>The requested operation is not known or supported by this kernel within its current configuration.</p>
+</li>
+<li>
+<p>The specified flags are not valid for the requested operation.</p>
+</li>
+<li>
+<p>Operation includes <code>BPF_ABS</code>, but there are problems with the specified offset that might exceed the size of the <code>seccomp_data</code> structure.</p>
+</li>
+<li>
+<p>The number of instructions passed to the filter exceeds the maximum number of instructions.</p>
+</li>
+</ul>
+</dd>
+<dt><code>ENOMEM</code></dt>
+<dd>
+<p>There’s not enough memory to execute the program.</p>
+</dd>
+<dt><code>EOPNOTSUPP</code></dt>
+<dd>
+<p>The operation specified that with <code>SECCOMP_GET_ACTION_AVAIL</code>, the action was available, but in reality the kernel has no support for the return action in the arguments.</p>
+</dd>
+<dt><code>ESRCH</code></dt>
+<dd>
+<p>There was a problem during the synchronization of another thread.</p>
+</dd>
+<dt><code>ENOSYS</code></dt>
+<dd>
+<p>There’s no tracer attached to the <code>SECCOMP_RET_TRACE</code> action.</p>
+</dd>
+</dl>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p><code>prctl</code> is a syscall that<a data-type="indexterm" data-primary="prctl system call" id="idm46623549381592"/> allows a user-space program to control (set and get) specific aspects of a process, such as endian-ness, thread names, secure computing (Seccomp) mode, privileges, Perf events, and so on.</p>
+</div>
+
+<p>Seccomp might sound to you like it is a sandboxing mechanism, but that’s not true. Seccomp is a utility that lets its users develop a sandboxing mechanism. Now here’s how to write programs to write the custom interactions using a filter called directly by a Seccomp syscall.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" class="less_space pagebreak-before" data-pdf-bookmark="Seccomp BPF Filter Example"><div class="sect2" id="idm46623549379592">
+<h2>Seccomp BPF Filter Example</h2>
+
+<p>In this example we show how to put <a data-type="indexterm" data-primary="kernel security, capabilities, and Seccomp" data-secondary="Seccomp" data-tertiary="BPF filter example" id="ix_kersecseccmpfil"/><a data-type="indexterm" data-primary="Seccomp" data-secondary="BPF filter example" id="ix_SeccmpBPFfil"/><a data-type="indexterm" data-primary="filtering" data-secondary="in Seccomp" data-tertiary="BPF filter example" id="ix_filScmpex"/>together the two actions described earlier:</p>
+
+<ul>
+<li>
+<p>Write the Seccomp BPF program to be used as a filter with different return codes based on the decisions it makes.</p>
+</li>
+<li>
+<p>Load the filter using <code>prctl</code>.</p>
+</li>
+</ul>
+
+<p>First the example needs some headers from the standard library and the Linux <span class="keep-together">kernel</span>:</p>
+
+<pre data-type="programlisting" data-code-language="c"><code class="cp">#include &lt;errno.h&gt;</code>
+<code class="cp">#include &lt;linux/audit.h&gt;</code>
+<code class="cp">#include &lt;linux/bpf.h&gt;</code>
+<code class="cp">#include &lt;linux/filter.h&gt;</code>
+<code class="cp">#include &lt;linux/seccomp.h&gt;</code>
+<code class="cp">#include &lt;linux/unistd.h&gt;</code>
+<code class="cp">#include &lt;stddef.h&gt;</code>
+<code class="cp">#include &lt;stdio.h&gt;</code>
+<code class="cp">#include &lt;stdlib.h&gt;</code>
+<code class="cp">#include &lt;sys/prctl.h&gt;</code>
+<code class="cp">#include &lt;unistd.h&gt;</code></pre>
+
+<p>Before trying to execute this example, we need to make sure that our kernel has been compiled <a data-type="indexterm" data-primary="CONFIG_SECCOMP and CONFIG_SECCOMP_FILTER" id="idm46623549358712"/>with <code>CONFIG_SECCOMP</code> and <code>CONFIG_SECCOMP_FILTER</code> set to <code>y</code>. In a live machine, that can be checked with the following:</p>
+
+<pre data-type="programlisting" data-code-language="bash">cat /proc/config.gz<code class="p">|</code> zcat  <code class="p">|</code> grep -i CONFIG_SECCOMP</pre>
+
+<p>The rest of the code is the <code>install_filter</code> function, made up of two parts. The first part contains our the list of BPF filtering instructions:</p>
+
+<pre data-type="programlisting" data-code-language="c"><code class="k">static</code> <code class="kt">int</code> <code class="nf">install_filter</code><code class="p">(</code><code class="kt">int</code> <code class="n">nr</code><code class="p">,</code> <code class="kt">int</code> <code class="n">arch</code><code class="p">,</code> <code class="kt">int</code> <code class="n">error</code><code class="p">)</code> <code class="p">{</code>
+  <code class="k">struct</code> <code class="n">sock_filter</code> <code class="n">filter</code><code class="p">[]</code> <code class="o">=</code> <code class="p">{</code>
+    <code class="n">BPF_STMT</code><code class="p">(</code><code class="n">BPF_LD</code> <code class="o">+</code> <code class="n">BPF_W</code> <code class="o">+</code> <code class="n">BPF_ABS</code><code class="p">,</code> <code class="p">(</code><code class="n">offsetof</code><code class="p">(</code><code class="k">struct</code> <code class="n">seccomp_data</code><code class="p">,</code> <code class="n">arch</code><code class="p">))),</code>
+    <code class="n">BPF_JUMP</code><code class="p">(</code><code class="n">BPF_JMP</code> <code class="o">+</code> <code class="n">BPF_JEQ</code> <code class="o">+</code> <code class="n">BPF_K</code><code class="p">,</code> <code class="n">arch</code><code class="p">,</code> <code class="mi">0</code><code class="p">,</code> <code class="mi">3</code><code class="p">),</code>
+    <code class="n">BPF_STMT</code><code class="p">(</code><code class="n">BPF_LD</code> <code class="o">+</code> <code class="n">BPF_W</code> <code class="o">+</code> <code class="n">BPF_ABS</code><code class="p">,</code> <code class="p">(</code><code class="n">offsetof</code><code class="p">(</code><code class="k">struct</code> <code class="n">seccomp_data</code><code class="p">,</code> <code class="n">nr</code><code class="p">))),</code>
+    <code class="n">BPF_JUMP</code><code class="p">(</code><code class="n">BPF_JMP</code> <code class="o">+</code> <code class="n">BPF_JEQ</code> <code class="o">+</code> <code class="n">BPF_K</code><code class="p">,</code> <code class="n">nr</code><code class="p">,</code> <code class="mi">0</code><code class="p">,</code> <code class="mi">1</code><code class="p">),</code>
+    <code class="n">BPF_STMT</code><code class="p">(</code><code class="n">BPF_RET</code> <code class="o">+</code> <code class="n">BPF_K</code><code class="p">,</code> <code class="n">SECCOMP_RET_ERRNO</code> <code class="o">|</code> <code class="p">(</code><code class="n">error</code> <code class="o">&amp;</code> <code class="n">SECCOMP_RET_DATA</code><code class="p">)),</code>
+    <code class="n">BPF_STMT</code><code class="p">(</code><code class="n">BPF_RET</code> <code class="o">+</code> <code class="n">BPF_K</code><code class="p">,</code> <code class="n">SECCOMP_RET_ALLOW</code><code class="p">),</code>
+  <code class="p">};</code></pre>
+
+<p>The instructions are set up using the <code>BPF_STMT</code> and <code>BPF_JUMP</code> macros defined in <code>linux/filter.h</code>.<a data-type="indexterm" data-primary="BPF_STMT and BPF_JUMP macros" id="idm46623549201672"/></p>
+
+<p>Let’s walk through the instructions:</p>
+<dl>
+<dt><code>BPF_STMT(BPF_LD + BPF_W + BPF_ABS (offsetof(struct seccomp_data, arch)))</code></dt>
+<dd>
+<p>This loads and accumulates with  <code>BPF_LD</code> in the form of the word <code>BPF_W</code>, and the packet data is contained at the fixed <code>BPF_ABS</code> offset.</p>
+</dd>
+<dt><code>BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, arch, 0, 3)</code></dt>
+<dd>
+<p>This checks with <code>BPF_JEQ</code> whether the architecture value in the accumulator constant <code>BPF_K</code> is equal to <code>arch</code>. If so, it will jump with offset zero to the next instruction; otherwise, it will jump with offset three to give an error, in this case because the arch did not match.</p>
+</dd>
+<dt><code>BPF_STMT(BPF_LD + BPF_W + BPF_ABS (offsetof(struct seccomp_data, nr)))</code></dt>
+<dd>
+<p>This loads and accumulates with  <code>BPF_LD</code> in the form of the word <code>BPF_W</code>, which is the syscall number data contained at the fixed <code>BPF_ABS</code> offset.</p>
+</dd>
+<dt><code>BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, nr, 0, 1)</code></dt>
+<dd>
+<p>This compares the value from the syscall number to the one in the <code>nr</code> variable. If they are equal, it will go to the next instruction and disallow the syscall; otherwise, it will allow the syscall with <code>SECCOMP_RET_ALLOW</code>.</p>
+</dd>
+<dt><code>BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ERRNO | (error &amp;</code> <span class="keep-together"><code>SECCOMP_RET_DATA))</code></span></dt>
+<dd>
+<p>This terminates the program with <code>BPF_RET</code> and gives as a result an error, <code>SECCOMP_RET_ERRNO</code>, with the specified error number from the <code>err</code> variable.</p>
+</dd>
+<dt><code>BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW)</code></dt>
+<dd>
+<p>This terminates the program with <code>BPF_RET</code> and allows the syscall execution using <code>SECCOMP_RET_ALLOW</code>.</p>
+</dd>
+</dl>
+<aside data-type="sidebar" epub:type="sidebar"><div class="sidebar" id="idm46623549199944">
+<h5>Seccomp Is cBPF</h5>
+<p>At this point you might wondering why a list of instructions is used instead of a compiled ELF object or a C program that is then JIT compiled to it?</p>
+
+<p>There are two reasons:</p>
+
+<ul>
+<li>
+<p>The first is that Seccomp uses cBPF (classic BPF) and not eBPF, which means that it does not have registries but just an accumulator to store the last computation result, as you can notice in the example.<a data-type="indexterm" data-primary="cBPF (classic BPF)" id="idm46623549179720"/></p>
+</li>
+<li>
+<p>The second is that Seccomp accepts a pointer to an array of BPF instructions directly and nothing else. The macros we used are just helpers to specify those instructions in a programmer-friendly way.</p>
+</li>
+</ul>
+</div></aside>
+
+<p>If you need further assistance in understanding that assembly, you will probably find useful some pseudocode that does the same thing:</p>
+
+<pre data-type="programlisting" data-code-language="c"><code class="k">if</code> <code class="p">(</code><code class="n">arch</code> <code class="o">!=</code> <code class="n">AUDIT_ARCH_X86_64</code><code class="p">)</code> <code class="p">{</code>
+    <code class="k">return</code> <code class="n">SECCOMP_RET_ALLOW</code><code class="p">;</code>
+<code class="p">}</code>
+<code class="k">if</code> <code class="p">(</code><code class="n">nr</code> <code class="o">==</code> <code class="n">__NR_write</code><code class="p">)</code> <code class="p">{</code>
+    <code class="k">return</code> <code class="n">SECCOMP_RET_ERRNO</code><code class="p">;</code>
+<code class="p">}</code>
+<code class="k">return</code> <code class="n">SECCOMP_RET_ALLOW</code><code class="p">;</code></pre>
+
+<p>After defining the filter code in the <code>socket_filter</code> struct, we need to define a <code>sock_fprog</code> containing the filter code and the calculated length of the filter itself. This data structure is needed as an argument for declaring the process operation later:</p>
+
+<pre data-type="programlisting" data-code-language="c">  <code class="k">struct</code> <code class="n">sock_fprog</code> <code class="n">prog</code> <code class="o">=</code> <code class="p">{</code>
+    <code class="p">.</code><code class="n">len</code> <code class="o">=</code> <code class="p">(</code><code class="kt">unsigned</code> <code class="kt">short</code><code class="p">)(</code><code class="k">sizeof</code><code class="p">(</code><code class="n">filter</code><code class="p">)</code> <code class="o">/</code> <code class="k">sizeof</code><code class="p">(</code><code class="n">filter</code><code class="p">[</code><code class="mi">0</code><code class="p">])),</code>
+    <code class="p">.</code><code class="n">filter</code> <code class="o">=</code> <code class="n">filter</code><code class="p">,</code>
+  <code class="p">};</code></pre>
+
+<p>Now we have only one thing left to do in the <code>install_filter</code> function: load the program itself! <a data-type="indexterm" data-primary="prctl system call" id="idm46623549040184"/><a data-type="indexterm" data-primary="PR_SET_SECCOMP operation" id="idm46623549039688"/>To do that, we use <code>prctl</code> using <code>PR_SET_SECCOMP</code> as an option because we want to enter secure computing mode. Then we instruct the mode to load a filter with <code>SECCOMP_MODE_FILTER</code> that is contained in our <code>prog</code> variable of type <code>sock_fprog</code>:</p>
+
+<pre data-type="programlisting" data-code-language="c">  <code class="k">if</code> <code class="p">(</code><code class="n">prctl</code><code class="p">(</code><code class="n">PR_SET_SECCOMP</code><code class="p">,</code> <code class="n">SECCOMP_MODE_FILTER</code><code class="p">,</code> <code class="o">&amp;</code><code class="n">prog</code><code class="p">))</code> <code class="p">{</code>
+    <code class="n">perror</code><code class="p">(</code><code class="s">"prctl(PR_SET_SECCOMP)"</code><code class="p">);</code>
+    <code class="k">return</code> <code class="mi">1</code><code class="p">;</code>
+  <code class="p">}</code>
+  <code class="k">return</code> <code class="mi">0</code><code class="p">;</code>
+<code class="p">}</code></pre>
+
+<p>Finally, we can take advantage of our <code>install_filter</code> function, but before using it, we need to use <code>prctl</code> to set <code>PR_SET_NO_NEW_PRIVS</code> on the current execution to avoid the situation in which child processes can have wider privileges than the parent.<a data-type="indexterm" data-primary="PR_SET_NO_NEW_PRIVS" id="idm46623549017672"/> This lets us make the following <code>prctl</code> calls in the <code>install_filter</code> function without root privileges.</p>
+
+<p>We can now call the <code>install_filter</code> function. We will block all the <code>write</code> syscalls relative to the <code>X86-64</code> architecture and will just give permission denied to all the attempts. After the filter installation we just continue the execution by using the first argument:</p>
+
+<pre data-type="programlisting" data-code-language="c"><code class="kt">int</code> <code class="nf">main</code><code class="p">(</code><code class="kt">int</code> <code class="n">argc</code><code class="p">,</code> <code class="kt">char</code> <code class="k">const</code> <code class="o">*</code><code class="n">argv</code><code class="p">[])</code> <code class="p">{</code>
+  <code class="k">if</code> <code class="p">(</code><code class="n">prctl</code><code class="p">(</code><code class="n">PR_SET_NO_NEW_PRIVS</code><code class="p">,</code> <code class="mi">1</code><code class="p">,</code> <code class="mi">0</code><code class="p">,</code> <code class="mi">0</code><code class="p">,</code> <code class="mi">0</code><code class="p">))</code> <code class="p">{</code>
+    <code class="n">perror</code><code class="p">(</code><code class="s">"prctl(NO_NEW_PRIVS)"</code><code class="p">);</code>
+    <code class="k">return</code> <code class="mi">1</code><code class="p">;</code>
+  <code class="p">}</code>
+  <code class="n">install_filter</code><code class="p">(</code><code class="n">__NR_write</code><code class="p">,</code> <code class="n">AUDIT_ARCH_X86_64</code><code class="p">,</code> <code class="n">EPERM</code><code class="p">);</code>
+  <code class="k">return</code> <code class="n">system</code><code class="p">(</code><code class="n">argv</code><code class="p">[</code><code class="mi">1</code><code class="p">]);</code>
+<code class="p">}</code></pre>
+
+<p>Let’s try it now!</p>
+
+<p>To compile our program, we can use either <code>clang</code> or <code>gcc</code>; either way, it’s just a matter of compiling the <code>main.c</code> file with no special options:</p>
+
+<pre data-type="programlisting" data-code-language="bash">clang main.c -o filter-write</pre>
+
+<p>We said that we blocked all the writes in our program. To test it then, we need a program that does writes; the <code>ls</code> program seems like a good candidate, and here is how it behaves normally:</p>
+
+<pre data-type="programlisting" data-code-language="c"><code class="n">ls</code> <code class="o">-</code><code class="n">la</code>
+<code class="n">total</code> <code class="mi">36</code>
+<code class="n">drwxr</code><code class="o">-</code><code class="n">xr</code><code class="o">-</code><code class="n">x</code> <code class="mi">2</code> <code class="n">fntlnz</code> <code class="n">users</code>  <code class="mi">4096</code> <code class="n">Apr</code> <code class="mi">28</code> <code class="mi">21</code><code class="o">:</code><code class="mi">09</code> <code class="p">.</code>
+<code class="n">drwxr</code><code class="o">-</code><code class="n">xr</code><code class="o">-</code><code class="n">x</code> <code class="mi">4</code> <code class="n">fntlnz</code> <code class="n">users</code>  <code class="mi">4096</code> <code class="n">Apr</code> <code class="mi">26</code> <code class="mi">13</code><code class="o">:</code><code class="mo">01</code> <code class="p">..</code>
+<code class="o">-</code><code class="n">rwxr</code><code class="o">-</code><code class="n">xr</code><code class="o">-</code><code class="n">x</code> <code class="mi">1</code> <code class="n">fntlnz</code> <code class="n">users</code> <code class="mi">16800</code> <code class="n">Apr</code> <code class="mi">28</code> <code class="mi">21</code><code class="o">:</code><code class="mi">09</code> <code class="n">filter</code><code class="o">-</code><code class="n">write</code>
+<code class="o">-</code><code class="n">rw</code><code class="o">-</code><code class="n">r</code><code class="o">--</code><code class="n">r</code><code class="o">--</code> <code class="mi">1</code> <code class="n">fntlnz</code> <code class="n">users</code>    <code class="mi">19</code> <code class="n">Apr</code> <code class="mi">28</code> <code class="mi">21</code><code class="o">:</code><code class="mi">09</code> <code class="p">.</code><code class="n">gitignore</code>
+<code class="o">-</code><code class="n">rw</code><code class="o">-</code><code class="n">r</code><code class="o">--</code><code class="n">r</code><code class="o">--</code> <code class="mi">1</code> <code class="n">fntlnz</code> <code class="n">users</code>  <code class="mi">1282</code> <code class="n">Apr</code> <code class="mi">28</code> <code class="mi">21</code><code class="o">:</code><code class="mi">08</code> <code class="n">main</code><code class="p">.</code><code class="n">c</code></pre>
+
+<p>Cool! Here’s what our wrapper program usage looks like; we just pass the program we want to test as first argument:</p>
+
+<pre data-type="programlisting" data-code-language="c"><code class="p">.</code><code class="o">/</code><code class="n">filter</code><code class="o">-</code><code class="n">write</code> <code class="s">"ls -la"</code></pre>
+
+<p>After it’s executed, that program gives completely empty output, leaving no output. However, we can use <code>strace</code> to see<a data-type="indexterm" data-primary="strace" id="idm46623548723288"/> what’s happening:</p>
+
+<pre data-type="programlisting" data-code-language="c"><code class="n">strace</code> <code class="o">-</code><code class="n">f</code> <code class="p">.</code><code class="o">/</code><code class="n">filter</code><code class="o">-</code><code class="n">write</code> <code class="s">"ls -la"</code></pre>
+
+<p>The result had been stripped of a lot of noise, and the relevant part of that shows that writes are being blocked with an <code>EPERM</code> error, which is the same one we set up. This means the program is silent because it can’t access that syscall now:</p>
+
+<pre data-type="programlisting" data-code-language="c"><code class="p">[</code><code class="n">pid</code> <code class="mi">25099</code><code class="p">]</code> <code class="n">write</code><code class="p">(</code><code class="mi">2</code><code class="p">,</code> <code class="s">"ls: "</code><code class="p">,</code> <code class="mi">4</code><code class="p">)</code>         <code class="o">=</code> <code class="o">-</code><code class="mi">1</code> <code class="n">EPERM</code> <code class="p">(</code><code class="n">Operation</code> <code class="n">not</code> <code class="n">permitted</code><code class="p">)</code>
+<code class="p">[</code><code class="n">pid</code> <code class="mi">25099</code><code class="p">]</code> <code class="n">write</code><code class="p">(</code><code class="mi">2</code><code class="p">,</code> <code class="s">"write error"</code><code class="p">,</code> <code class="mi">11</code><code class="p">)</code> <code class="o">=</code> <code class="o">-</code><code class="mi">1</code> <code class="n">EPERM</code> <code class="p">(</code><code class="n">Operation</code> <code class="n">not</code> <code class="n">permitted</code><code class="p">)</code>
+<code class="p">[</code><code class="n">pid</code> <code class="mi">25099</code><code class="p">]</code> <code class="n">write</code><code class="p">(</code><code class="mi">2</code><code class="p">,</code> <code class="s">"</code><code class="se">\n</code><code class="s">"</code><code class="p">,</code> <code class="mi">1</code><code class="p">)</code>           <code class="o">=</code> <code class="o">-</code><code class="mi">1</code> <code class="n">EPERM</code> <code class="p">(</code><code class="n">Operation</code> <code class="n">not</code> <code class="n">permitted</code><code class="p">)</code></pre>
+
+<p>You now have an understanding of how Seccomp BPF operates and a good sense of what you can do with it. But wouldn’t it be good if there were a way to achieve the same using eBPF instead of cBPF to harness its power?</p>
+
+<p>When thinking about eBPF programs, most people think that you just write them and load them with root privileges. Although that statement is generally true, the kernel implements a set of mechanisms to protect eBPF objects at various levels; those mechanisms are called BPF LSM <em>hooks</em>.<a data-type="indexterm" data-primary="kernel security, capabilities, and Seccomp" data-secondary="Seccomp" data-tertiary="BPF filter example" data-startref="ix_kersecseccmpfil" id="idm46623548572152"/><a data-type="indexterm" data-primary="filtering" data-secondary="in Seccomp" data-tertiary="BPF filter example" data-startref="ix_filScmpex" id="idm46623548570600"/><a data-type="indexterm" data-primary="Seccomp" data-secondary="BPF filter example" data-startref="ix_SeccmpBPFfil" id="idm46623548569112"/><a data-type="indexterm" data-primary="kernel security, capabilities, and Seccomp" data-secondary="Seccomp" data-startref="ix_kersecseccmp" id="idm46623548567896"/><a data-type="indexterm" data-primary="Seccomp" data-startref="ix_Seccmp" id="idm46623548566648"/></p>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" class="less_space pagebreak-before" data-pdf-bookmark="BPF LSM Hooks"><div class="sect1" id="idm46623549509928">
+<h1>BPF LSM Hooks</h1>
+
+<p>To provide architecture-independent control over system events, LSM implements the concept of hooks.<a data-type="indexterm" data-primary="kernel security, capabilities, and Seccomp" data-secondary="BPF LSM hooks" id="idm46623548564328"/><a data-type="indexterm" data-primary="LSM (Linux Security Modules) framework" data-secondary="BPF LSM hooks" id="idm46623548563384"/><a data-type="indexterm" data-primary="Linux Security Modules (LSM) framework" data-secondary="BPF LSM hooks" id="idm46623548562472"/><a data-type="indexterm" data-primary="BPF" data-secondary="LSM hooks" id="idm46623548561560"/> Technically, a hook call is similar to a syscall; however, being system independent and integrated with the LSM framework makes hooks interesting because the layer of abstraction this provides can be convenient and can help avoid the kind of troubles that can occur when working with syscalls on different <span class="keep-together">architectures</span>.</p>
+
+<p>At the time of writing, the kernel has seven hooks related to BPF programs, and SELinux is the only in-tree LSM implementing them.</p>
+
+<p>You can see this in the kernel source tree in this file: <code>include/linux/security.h</code>:</p>
+
+<pre data-type="programlisting" data-code-language="c"><code class="k">extern</code> <code class="kt">int</code> <code class="nf">security_bpf</code><code class="p">(</code><code class="kt">int</code> <code class="n">cmd</code><code class="p">,</code> <code class="k">union</code> <code class="n">bpf_attr</code> <code class="o">*</code><code class="n">attr</code><code class="p">,</code> <code class="kt">unsigned</code> <code class="kt">int</code> <code class="n">size</code><code class="p">);</code>
+<code class="k">extern</code> <code class="kt">int</code> <code class="nf">security_bpf_map</code><code class="p">(</code><code class="k">struct</code> <code class="n">bpf_map</code> <code class="o">*</code><code class="n">map</code><code class="p">,</code> <code class="kt">fmode_t</code> <code class="n">fmode</code><code class="p">);</code>
+<code class="k">extern</code> <code class="kt">int</code> <code class="nf">security_bpf_prog</code><code class="p">(</code><code class="k">struct</code> <code class="n">bpf_prog</code> <code class="o">*</code><code class="n">prog</code><code class="p">);</code>
+<code class="k">extern</code> <code class="kt">int</code> <code class="nf">security_bpf_map_alloc</code><code class="p">(</code><code class="k">struct</code> <code class="n">bpf_map</code> <code class="o">*</code><code class="n">map</code><code class="p">);</code>
+<code class="k">extern</code> <code class="kt">void</code> <code class="nf">security_bpf_map_free</code><code class="p">(</code><code class="k">struct</code> <code class="n">bpf_map</code> <code class="o">*</code><code class="n">map</code><code class="p">);</code>
+<code class="k">extern</code> <code class="kt">int</code> <code class="nf">security_bpf_prog_alloc</code><code class="p">(</code><code class="k">struct</code> <code class="n">bpf_prog_aux</code> <code class="o">*</code><code class="n">aux</code><code class="p">);</code>
+<code class="k">extern</code> <code class="kt">void</code> <code class="nf">security_bpf_prog_free</code><code class="p">(</code><code class="k">struct</code> <code class="n">bpf_prog_aux</code> <code class="o">*</code><code class="n">aux</code><code class="p">);</code></pre>
+
+<p>Each one of those hooks will be invoked at different stages of the execution:</p>
+<dl>
+<dt><code>security_bpf</code></dt>
+<dd>
+<p>Does an initial check on the executed BPF syscalls</p>
+</dd>
+<dt><code>security_bpf_map</code></dt>
+<dd>
+<p>Does a check when the kernel returns a file descriptor for a map</p>
+</dd>
+<dt><code>security_bpf_prog</code></dt>
+<dd>
+<p>Does a check when the kernel returns a file descriptor for an eBPF program</p>
+</dd>
+<dt><code>security_bpf_map_alloc</code></dt>
+<dd>
+<p>Does the initialization of the security field inside BPF maps</p>
+</dd>
+<dt><code>security_bpf_map_free</code></dt>
+<dd>
+<p>Does the cleanup of the security field inside BPF maps</p>
+</dd>
+<dt><code>security_bpf_prog_alloc</code></dt>
+<dd>
+<p>Does the initialization of the security field inside BPF programs</p>
+</dd>
+<dt><code>security_bpf_prog_free</code></dt>
+<dd>
+<p>Does the cleanup of the security field inside BPF programs</p>
+</dd>
+</dl>
+
+<p>Now that we’ve seen them, it becomes clear that the idea behind the LSM BPF hooks is that they can provide a per-object protection for eBPF objects in order to ensure that only those with the appropriate privileges can do operations on maps and <span class="keep-together">programs</span>.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Conclusion"><div class="sect1" id="idm46623548471480">
+<h1>Conclusion</h1>
+
+<p>Security is not something that you can implement in a universal way for everything you want to protect. It is important to be able to secure systems at different layers and in different ways, and, believe it or not, the best way to secure a system is to stack different layers with different perspectives so that a compromised layer does not lead to the ability to access the entire system. The kernel developers did a great job in providing us with a set of different layers and interaction points that we can use; our hope is that we gave you a good understanding of what the layers are and how to use BPF programs to interact with them.<a data-type="indexterm" data-primary="kernel security, capabilities, and Seccomp" data-startref="ix_kersec" id="idm46623548469576"/></p>
+</div></section>
+
+
+
+
+
+
+
+</div></section></body></html>

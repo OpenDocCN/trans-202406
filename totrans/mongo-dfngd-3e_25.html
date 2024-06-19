@@ -1,0 +1,262 @@
+<html><head></head><body><div id="sbo-rt-content"><section data-type="chapter" epub:type="chapter" data-pdf-bookmark="Chapter 20. Durability"><div class="chapter" id="chapter-dur"><h1><span class="label">Chapter 20. </span>Durability</h1><p><span class="firstterm">Durability<a data-type="indexterm" data-primary="databases" data-secondary="durability of" id="idm45882335629960"/></span><a data-type="indexterm" data-primary="durability" data-secondary="defined" id="idm45882335628824"/> is a property<a data-type="indexterm" data-primary="administration, of applications" data-secondary="durability" id="AAdur20"/> of database systems that guarantees that write operations
+  that have been committed to the database will survive permanently. For
+  example, if a ticket reservation system reports that your concert seats have
+  been booked, then your seats will remain booked even if some part of the
+  reservation system crashes. For MongoDB, we need to consider durability at
+  the cluster (or more specifically, replica set) level.</p><p>In this chapter, we will cover:</p><ul><li><p>How MongoDB guarantees durability at the replica set member level
+      through journaling</p></li><li><p>How MongoDB guarantees durability at the cluster level using write
+      concern</p></li><li><p>How to configure your application and MongoDB cluster to give you
+      the level of durability you need</p></li><li><p>How MongoDB guarantees durability at the cluster level using read
+      concern</p></li><li><p>How to set the durability level for transactions in replica
+      sets</p></li></ul><p>Throughout this chapter, we will discuss durability in replica sets. A
+  three-member replica set is the most basic cluster recommended for
+  production applications. The discussion here applies to replica sets with
+  more members and to sharded clusters.</p><section data-type="sect1" data-pdf-bookmark="Durability at the Member Level Through Journaling"><div class="sect1" id="idm45882335622424"><h1>Durability at the Member Level Through Journaling</h1><p>To<a data-type="indexterm" data-primary="write-ahead logs (WAL)" id="idm45882335621544"/><a data-type="indexterm" data-primary="servers" data-secondary="durability during failures" id="idm45882335620680"/><a data-type="indexterm" data-primary="journaling" id="idm45882335619512"/><a data-type="indexterm" data-primary="durability" data-secondary="at member level through journaling" id="idm45882335618680"/> provide durability in the event of a server failure,
+    MongoDB uses a write-ahead log (WAL) called the
+    <em>journal</em>. A WAL is a commonly used technique for
+    durability in database systems. The idea is that we simply write a
+    representation of the changes to be made to the database to a durable
+    medium (i.e., to disk) before applying those changes to the database
+    itself. In many database systems, a WAL is used to provide the atomicity
+    database property as well. However, MongoDB uses other techniques to
+    ensure atomic writes.</p><p>Beginning in MongoDB 4.0, as an application performs writes to a
+    replica set, for the data in all replicated collections MongoDB creates
+    journal entries using the same format as the oplog.<sup><a data-type="noteref" id="idm45882335615752-marker" href="ch20.xhtml#idm45882335615752">1</a></sup> As discussed in <a data-type="xref" href="ch11.xhtml#chapter-repl-comp">Chapter 11</a>,
+    MongoDB uses statement-based replication<a data-type="indexterm" data-primary="replication" data-secondary="statement-based" id="idm45882335613800"/><a data-type="indexterm" data-primary="statement-based replication" id="idm45882335612696"/> based on an operations log, or <em>oplog</em>.
+    The statements in the oplog are a representation of the actual MongoDB
+    changes made to each document affected by a write. Therefore, oplog
+    statements<a data-type="indexterm" data-primary="oplogs" data-secondary="statement-based replication" id="idm45882335611176"/> are easy to apply to any member of a replica set regardless
+    of version, hardware, or any other differences between replica set
+    members. In addition, each oplog statement is idempotent, meaning that it
+    can be applied any number of times and the outcome will always be the same
+    change to the database.</p><p>Like most databases, MongoDB maintains in-memory views of both the
+    journal and the database data files. By default, it flushes journal
+    entries to disk every 50 milliseconds and flushes database files to disk
+    every 60 seconds. The 60-second interval for flushing data files is called
+    a <em>checkpoint<a data-type="indexterm" data-primary="checkpoints" id="idm45882335608808"/></em>. The journal is used to provide durability for
+    data written since the last checkpoint. With respect to durability
+    concerns, if the server suddenly stops, when it’s restarted the journal
+    can be used to replay any writes that were not flushed to disk before the
+    shutdown.</p><p>For the journal files, MongoDB creates a subdirectory named
+    <em>journal</em> under the <em>dbPath</em>
+    directory. WiredTiger (MongoDB’s default storage engine) journal files
+    have names with the format
+    <em>WiredTigerLog.&lt;sequence&gt;</em>, where
+    <em>&lt;sequence&gt;</em> is a zero-padded number starting
+    from <em>0000000001</em>. Except for very small log records,
+    MongoDB compresses the data written to the journal. Journal files have a
+    maximum size limit of approximately 100 MB. Once a journal file exceeds
+    that limit, MongoDB creates a new journal file and begins writing new
+    records there. Because journal files are only needed to recover data since
+    the last checkpoint, MongoDB automatically removes “old” journal
+    files—i.e., those written prior to the most recent checkpoint—once a new
+    checkpoint is written.</p><p>If there is a crash (or <code>kill -9</code>),
+    <em class="filename">mongod</em> will replay its journal files
+    on startup. By default, the greatest extent of lost writes are those made
+    in the last 100 ms plus the time it takes to flush the journal writes to
+    disk.</p><p>If your application requires a shorter interval for journal flushes,
+    you have two options. One is to change the interval using the
+    <code class="option">--journalCommitInterval<a data-type="indexterm" data-primary="--journalCommitInterval" data-primary-sortas="journalCommitInterval" id="idm45882335601688"/></code> option to the <span class="command"><em>mongod</em></span> command. This option accepts values
+    ranging from 1 to 500 ms. The other option, which we’ll look at in the
+    next section, is to specify in the write concern that all writes should
+    journal to disk. Shortening the interval for journaling to disk will
+    negatively impact performance, so you need to be sure of the implications
+    for your applications before changing the journaling default.</p></div></section><section data-type="sect1" data-pdf-bookmark="Durability at the Cluster Level Using Write Concern"><div class="sect1" id="idm45882335599160"><h1>Durability at the Cluster Level Using Write Concern</h1><p>With<a data-type="indexterm" data-primary="writeConcern option" id="idm45882335598216"/><a data-type="indexterm" data-primary="clusters" data-secondary="durability of" id="idm45882335597352"/><a data-type="indexterm" data-primary="durability" data-secondary="at cluster level using write concern" id="idm45882335596248"/> write concern, you can specify what level of acknowledgment
+    your application requires in response to write requests. In a replica set,
+    network partitions, server failures, or data center outages may keep
+    writes from being replicated to every member, or even a majority of the
+    members. When a normal state is restored to the replica set, it is
+    possible that writes not replicated to a majority of members will be
+    rolled back. In those situations, clients and the database may have a
+    different view of what data has been committed.</p><p>There are applications for which it might be acceptable in some
+    circumstances to have writes rolled back. For example, it might be okay to
+    roll back a small number of comments in a social application of some kind.
+    MongoDB supports a range of durability guarantees at the cluster level to
+    enable application designers to select the durability level that works
+    best for their use case.</p><section data-type="sect2" data-pdf-bookmark="The w and wtimeout Options for writeConcern"><div class="sect2" id="idm45882335593704"><h2>The w and wtimeout Options for writeConcern</h2><p>The MongoDB query language supports specifying a write concern for
+      all insert and update methods. As an example, suppose we have an
+      ecommerce application and want to ensure that all orders are durable.
+      Writing an order to the database might look something like the
+      following:</p><pre data-type="programlisting" data-code-language="javascript"><code class="k">try</code> <code class="p">{</code>
+   <code class="nx">db</code><code class="p">.</code><code class="nx">products</code><code class="p">.</code><code class="nx">insertOne</code><code class="p">(</code>
+       <code class="p">{</code> <code class="nx">sku</code><code class="o">:</code> <code class="s2">"H1100335456"</code><code class="p">,</code> <code class="nx">item</code><code class="o">:</code> <code class="s2">"Electric Toothbrush Head"</code><code class="p">,</code> <code class="nx">quantity</code><code class="o">:</code> <code class="mi">3</code> <code class="p">},</code>
+       <code class="p">{</code> <code class="nx">writeConcern</code><code class="o">:</code> <code class="p">{</code> <code class="nx">w</code> <code class="o">:</code> <code class="s2">"majority"</code><code class="p">,</code> <code class="nx">wtimeout</code> <code class="o">:</code> <code class="mi">100</code> <code class="p">}</code> <code class="p">}</code>
+   <code class="p">);</code>
+<code class="p">}</code> <code class="k">catch</code> <code class="p">(</code><code class="nx">e</code><code class="p">)</code> <code class="p">{</code>
+   <code class="nx">print</code> <code class="p">(</code><code class="nx">e</code><code class="p">);</code>
+<code class="p">}</code></pre><p>All insert and update methods take a second parameter, a document.
+      Within that document you can specify a value for
+      <code class="option">writeConcern</code>. In the preceding example, the write
+      concern we have specified indicates that we want to see an
+      acknowledgment from the server that the write completed successfully
+      only if the write was successfully replicated to a majority of the
+      members of our application’s replica set. In addition, the write should
+      return an error if it is not replicated to a majority of replica set
+      members in 100 ms or less. In the case of such an error, MongoDB does
+      not undo successful data modifications performed before the write
+      concern exceeded the time limit—it will be up to the application to
+      choose how to handle timeouts in such situations. In general, you should
+      configure the <code>wtimeout</code> value so that
+      only in unusual circumstances will the application experience timeouts
+      and any actions your application takes in response to a timeout error
+      will ensure the correct state for your data. In most cases, your
+      application should attempt to determine whether the timeout was a result
+      of a transient slowdown in network communications or something more
+      signficant.</p><p>As the value for <code class="option">w</code> in the write concern document,
+      you may specify <code>"majority"</code> (as was
+      done in this example). Alternatively, you may specify an integer between
+      zero and the number of members in the replica set. Finally, it is
+      possible to tag replica set members, say to identify those on SSDs
+      versus spinning disks or those used for reporting versus OLTP workloads.
+      You may specify a tag set as the value of <code class="option">w</code> to ensure
+      that writes will only be acknowledged once committed to at least one
+      member of the replica set matching the provided tag set.</p></div></section><section data-type="sect2" data-pdf-bookmark="The j (Journaling) Option for writeConcern"><div class="sect2" id="idm45882335538488"><h2>The j (Journaling) Option for writeConcern</h2><p>In addition to providing a value for the <code class="option">w</code>
+      option, you may also request acknowledgment that the write operation has
+      been written to the journal by using the <code class="option">j</code> option in
+      the write concern document. With a value of <code class="option">true</code> for
+      <code class="option">j</code>, MongoDB acknowledges a successful write only after
+      the requested number of members (the value for <code class="option">w</code>) have
+      written the operation to their on-disk journal. Continuing our example,
+      if we want to ensure all writes are journaled on a majority of members,
+      we can update the code as follows:</p><pre data-type="programlisting" data-code-language="javascript"><code class="k">try</code> <code class="p">{</code>
+   <code class="nx">db</code><code class="p">.</code><code class="nx">products</code><code class="p">.</code><code class="nx">insertOne</code><code class="p">(</code>
+       <code class="p">{</code> <code class="nx">sku</code><code class="o">:</code> <code class="s2">"H1100335456"</code><code class="p">,</code> <code class="nx">item</code><code class="o">:</code> <code class="s2">"Electric Toothbrush Head"</code><code class="p">,</code> <code class="nx">quantity</code><code class="o">:</code> <code class="mi">3</code> <code class="p">},</code>
+       <code class="p">{</code> <code class="nx">writeConcern</code><code class="o">:</code> <code class="p">{</code> <code class="nx">w</code> <code class="o">:</code> <code class="s2">"majority"</code><code class="p">,</code> <code class="nx">wtimeout</code> <code class="o">:</code> <code class="mi">100</code><code class="p">,</code> <code class="nx">j</code> <code class="o">:</code> <code class="kc">true</code> <code class="p">}</code> <code class="p">}</code>
+   <code class="p">);</code>
+<code class="p">}</code> <code class="k">catch</code> <code class="p">(</code><code class="nx">e</code><code class="p">)</code> <code class="p">{</code>
+   <code class="nx">print</code> <code class="p">(</code><code class="nx">e</code><code class="p">);</code>
+<code class="p">}</code></pre><p>Without waiting for journaling, there is a brief window of about
+      100 ms on each member when, if the server process or hardware goes down,
+      a write could be lost. However, waiting for journaling before
+      acknowledging writes to members of a replica set does have a performance
+      penalty.</p><p>It is essential that in addressing durability concerns for your
+      applications, you carefully evaluate the requirements your application
+      has and weigh the performance impacts of the durability settings you
+      select.</p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="Durability at a Cluster Level Using Read Concern"><div class="sect1" id="idm45882335530504"><h1>Durability at a Cluster Level Using Read Concern</h1><p>In<a data-type="indexterm" data-primary="read concern" id="idm45882335447496"/><a data-type="indexterm" data-primary="durability" data-secondary="at cluster level using read concern" id="idm45882335446872"/> MongoDB, <code class="option">read concerns</code> allow for the
+    configuration of when results are read. This can allow clients to see
+    write results before those writes are durable. A read concern can be used
+    with a write concern to control the level of consistency and <span class="keep-together">availability</span>
+    guarantees made to an application. They should not be confused with
+    <code class="option">read preferences</code>, which deal with where the data is read
+    from; specifically, read preferences determine the data bearing member(s) in the replica
+    set. The default <code class="option">read preferences</code> is to read from the
+    primary.</p><p><code class="option">Read concern</code> determines the consistency and
+    isolation properties of the data being read. The default <code>readConcern</code> is
+    <code class="option">local</code>, which returns data with no guarantees that the
+    data has been written to the majority of the data bearing replica set
+    members. This can result in the data being rolled back in the future. The
+    <code class="option">majority</code> concern returns only durable data (will not be
+    rolled back) that has been acknowledged by the majority of replica set
+    members. In MongoDB 3.4, the <code class="option">linearizable</code> concern was
+    added. It ensures data returned reflects all successful
+    majority-acknowledged writes that have completed prior to the start of the
+    read operation. It may wait for concurrently executing writes to finish
+    before providing results.</p><p>In the same fashion, with <code class="option">write concerns</code> you will
+    need to weight the performance impacts of the <code class="option">read
+    concerns</code> against the durability and isolation guarantees they
+    provide before selecting the appropriate concern for your
+    application.</p></div></section><section data-type="sect1" data-pdf-bookmark="Durability of Transactions Using a Write Concern"><div class="sect1" id="idm45882335436760"><h1>Durability of Transactions Using a Write Concern</h1><p>In<a data-type="indexterm" data-primary="write concern" data-secondary="durability of transactions using" id="idm45882335435848"/><a data-type="indexterm" data-primary="durability" data-secondary="of transactions using write concern" id="idm45882335434648"/> MongoDB, operations on individual documents are atomic. You
+    can use embedded documents and arrays to express relationships between
+    entities in a single document rather than using a normalized data model
+    splitting entities and relationships across multiple collections. As a
+    result, many applications do not require multi-document
+    transactions.</p><p>However, for use cases that require atomicity for updates to
+    multiple documents, MongoDB provides the ability to perform multi-document
+    transactions against replica sets. Multi-document transactions can be used
+    across multiple operations, documents, collections, and databases.</p><p>Transactions require that all data changes within the transaction
+    are successful. If any operation fails, the transaction aborts and all
+    data changes are discarded. If all operations are successful, all data
+    changes made in the transaction are saved and the writes become visible to
+    future reads.</p><p>As with individual write operations, you may specify a write concern
+    for transactions. You set the write concern at the transaction level, not
+    at the individual operation level. At the time of the commit, transactions
+    use the transaction-level write concern to commit the write operations.
+    Write concerns set for individual operations inside the transaction will
+    be ignored.</p><p>You can set the write concern for the transaction commit at the
+    transaction start. A write concern of <code>0</code>
+    is not supported for transactions. If you use a write concern of <code>1</code> for a transaction, it can be rolled back if
+    there is a failover. You may use a <code>writeConcern</code> of <code>"majority"</code> to ensure transactions are durable in
+    the face of network and server failures that might force a failover in a
+    replica set. The following provides an example:</p><pre data-type="programlisting" data-code-language="javascript"><code class="kd">function</code> <code class="nx">updateEmployeeInfo</code><code class="p">(</code><code class="nx">session</code><code class="p">)</code> <code class="p">{</code>
+    <code class="nx">employeesCollection</code> <code class="o">=</code> <code class="nx">session</code><code class="p">.</code><code class="nx">getDatabase</code><code class="p">(</code><code class="s2">"hr"</code><code class="p">).</code><code class="nx">employees</code><code class="p">;</code>
+    <code class="nx">eventsCollection</code> <code class="o">=</code> <code class="nx">session</code><code class="p">.</code><code class="nx">getDatabase</code><code class="p">(</code><code class="s2">"reporting"</code><code class="p">).</code><code class="nx">events</code><code class="p">;</code>
+
+    <code class="nx">session</code><code class="p">.</code><code class="nx">startTransaction</code><code class="p">(</code> <code class="p">{</code><code class="nx">writeConcern</code><code class="o">:</code> <code class="p">{</code> <code class="nx">w</code><code class="o">:</code> <code class="s2">"majority"</code> <code class="p">}</code> <code class="p">}</code> <code class="p">);</code>
+
+    <code class="k">try</code><code class="p">{</code>
+        <code class="nx">employeesCollection</code><code class="p">.</code><code class="nx">updateOne</code><code class="p">(</code> <code class="p">{</code> <code class="nx">employee</code><code class="o">:</code> <code class="mi">3</code> <code class="p">},</code> 
+                                       <code class="p">{</code> <code class="nx">$set</code><code class="o">:</code> <code class="p">{</code> <code class="nx">status</code><code class="o">:</code> <code class="s2">"Inactive"</code> <code class="p">}</code> <code class="p">}</code> <code class="p">);</code>
+        <code class="nx">eventsCollection</code><code class="p">.</code><code class="nx">insertOne</code><code class="p">(</code> <code class="p">{</code> <code class="nx">employee</code><code class="o">:</code> <code class="mi">3</code><code class="p">,</code> <code class="nx">status</code><code class="o">:</code> <code class="p">{</code> <code class="k">new</code><code class="o">:</code> <code class="s2">"Inactive"</code><code class="p">,</code> 
+                                      <code class="nx">old</code><code class="o">:</code> <code class="s2">"Active"</code> <code class="p">}</code> <code class="p">}</code> <code class="p">);</code>
+    <code class="p">}</code> <code class="k">catch</code> <code class="p">(</code><code class="nx">error</code><code class="p">)</code> <code class="p">{</code>
+        <code class="nx">print</code><code class="p">(</code><code class="s2">"Caught exception during transaction, aborting."</code><code class="p">);</code>
+        <code class="nx">session</code><code class="p">.</code><code class="nx">abortTransaction</code><code class="p">();</code>
+        <code class="k">throw</code> <code class="nx">error</code><code class="p">;</code>
+    <code class="p">}</code>
+
+    <code class="nx">commitWithRetry</code><code class="p">(</code><code class="nx">session</code><code class="p">);</code>
+<code class="p">}</code></pre></div></section><section data-type="sect1" data-pdf-bookmark="What MongoDB Does Not Guarantee"><div class="sect1" id="idm45882335428904"><h1>What MongoDB Does Not Guarantee</h1><p>There<a data-type="indexterm" data-primary="durability" data-secondary="situations without guarantee" id="idm45882335425832"/> are a couple of situations where MongoDB cannot guarantee
+    durability, such as if there are hardware issues or filesystem bugs. In
+    particular, if a hard disk is corrupt, there is nothing MongoDB can do to
+    protect your data.</p><p>Also, different varieties of hardware and software may have
+    different durability guarantees. For example, some cheaper or older hard
+    disks report a write’s success while the write is queued up to be written,
+    not when it has actually been written. MongoDB cannot defend against
+    misreporting at this level: if the system crashes, data may be
+    lost.</p><p>Basically, MongoDB is only as safe as the underlying system: if the
+    hardware or filesystem destroys the data, MongoDB cannot prevent it. Use
+    replication to defend against system issues. If one machine fails,
+    hopefully another will still be functioning correctly.</p></div></section><section data-type="sect1" data-pdf-bookmark="Checking for Corruption"><div class="sect1" id="idm45882335205192"><h1>Checking for Corruption</h1><p>The<a data-type="indexterm" data-primary="validate command" id="idm45882335204056"/><a data-type="indexterm" data-primary="corruption, checking for" id="idm45882335203192"/><a data-type="indexterm" data-primary="collections" data-secondary="checking for corruption" id="idm45882335202392"/><a data-type="indexterm" data-primary="durability" data-secondary="checking for corruption" id="idm45882335201288"/> <code>validate</code> command can be
+    used to check a collection for corruption. To run <code>validate</code> on the <em class="filename">movies</em> collection, do:</p><pre data-type="programlisting" data-code-language="javascript"><code class="nx">db</code><code class="p">.</code><code class="nx">movies</code><code class="p">.</code><code class="nx">validate</code><code class="p">({</code><code class="nx">full</code><code class="o">:</code> <code class="kc">true</code><code class="p">})</code>
+<code class="p">{</code>
+	<code class="s2">"ns"</code> <code class="o">:</code> <code class="s2">"sample_mflix.movies"</code><code class="p">,</code>
+	<code class="s2">"nInvalidDocuments"</code> <code class="o">:</code> <code class="nx">NumberLong</code><code class="p">(</code><code class="mi">0</code><code class="p">),</code>
+	<code class="s2">"nrecords"</code> <code class="o">:</code> <code class="mi">45993</code><code class="p">,</code>
+	<code class="s2">"nIndexes"</code> <code class="o">:</code> <code class="mi">5</code><code class="p">,</code>
+	<code class="s2">"keysPerIndex"</code> <code class="o">:</code> <code class="p">{</code>
+		<code class="s2">"_id_"</code> <code class="o">:</code> <code class="mi">45993</code><code class="p">,</code>
+		<code class="s2">"$**_text"</code> <code class="o">:</code> <code class="mi">3671341</code><code class="p">,</code>
+		<code class="s2">"genres_1_imdb.rating_1_metacritic_1"</code> <code class="o">:</code> <code class="mi">94880</code><code class="p">,</code>
+		<code class="s2">"tomatoes_rating"</code> <code class="o">:</code> <code class="mi">45993</code><code class="p">,</code>
+		<code class="s2">"getMovies"</code> <code class="o">:</code> <code class="mi">45993</code>
+	<code class="p">},</code>
+	<code class="s2">"indexDetails"</code> <code class="o">:</code> <code class="p">{</code>
+		<code class="s2">"$**_text"</code> <code class="o">:</code> <code class="p">{</code>
+			<code class="s2">"valid"</code> <code class="o">:</code> <code class="kc">true</code>
+		<code class="p">},</code>
+		<code class="s2">"_id_"</code> <code class="o">:</code> <code class="p">{</code>
+			<code class="s2">"valid"</code> <code class="o">:</code> <code class="kc">true</code>
+		<code class="p">},</code>
+		<code class="s2">"genres_1_imdb.rating_1_metacritic_1"</code> <code class="o">:</code> <code class="p">{</code>
+			<code class="s2">"valid"</code> <code class="o">:</code> <code class="kc">true</code>
+		<code class="p">},</code>
+		<code class="s2">"getMovies"</code> <code class="o">:</code> <code class="p">{</code>
+			<code class="s2">"valid"</code> <code class="o">:</code> <code class="kc">true</code>
+		<code class="p">},</code>
+		<code class="s2">"tomatoes_rating"</code> <code class="o">:</code> <code class="p">{</code>
+			<code class="s2">"valid"</code> <code class="o">:</code> <code class="kc">true</code>
+		<code class="p">}</code>
+	<code class="p">},</code>
+	<code class="s2">"valid"</code> <code class="o">:</code> <code class="kc">true</code><code class="p">,</code>
+	<code class="s2">"warnings"</code> <code class="o">:</code> <code class="p">[</code> <code class="p">],</code>
+	<code class="s2">"errors"</code> <code class="o">:</code> <code class="p">[</code> <code class="p">],</code>
+	<code class="s2">"extraIndexEntries"</code> <code class="o">:</code> <code class="p">[</code> <code class="p">],</code>
+	<code class="s2">"missingIndexEntries"</code> <code class="o">:</code> <code class="p">[</code> <code class="p">],</code>
+	<code class="s2">"ok"</code> <code class="o">:</code> <code class="mi">1</code>
+<code class="p">}</code></pre><p>The main field you’re looking for is <code class="varname">"valid"</code>,
+    which will hopefully be <code>true</code>. If it is
+    not, <code>validate</code> will give some details
+    about the corruption it found.</p><p>Most of the output from <code>validate</code>
+    describes internal structures of the collection and timestamps used to
+    understand the order of operations across a cluster. These are not
+    particularly useful for debugging. (See <a data-type="xref" href="app02.xhtml#appendix_see">Appendix B</a>
+    for more information on collection internals.)</p><p>You can only run <code>validate</code> on
+    collections, and it will also check the associated indexes in the field
+    <code class="varname">indexDetails</code>. However, this requires a full <code>validate<a data-type="indexterm" data-primary="full validate" id="idm45882335052520"/></code>, which is<a data-type="indexterm" data-startref="AAdur20" id="idm45882335051528"/> configured with the <code>{ full: true }</code> option.</p></div></section><div data-type="footnotes"><p data-type="footnote" id="idm45882335615752"><sup><a href="ch20.xhtml#idm45882335615752-marker">1</a></sup> MongoDB uses a different format for writes to the local
+        database, which stores data used in the replication process and other
+        instance-specific data, but the principles and application are
+        similar.</p></div></div></section></div>
+
+
+
+  </body></html>

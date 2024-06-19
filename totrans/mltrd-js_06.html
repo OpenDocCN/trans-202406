@@ -1,0 +1,956 @@
+<html><head></head><body><div id="sbo-rt-content" class="calibre1"><section data-type="chapter" epub:type="chapter" data-pdf-bookmark="Chapter 5. Advanced Shared Memory" class="calibre4"><div class="preface" id="ch_adv_shared_mem">
+<h1 class="calibre12"><span class="keep-together">Chapter 5. </span>Advanced Shared Memory</h1>
+
+
+<p class="author1"><a data-type="xref" href="ch04.xhtml#ch_shared_mem" class="calibre6">Chapter 4</a> looked at using the <code class="calibre18">SharedArrayBuffer</code> object to read and write directly to a collection of shared data from across separate threads. But doing so is risky business, allowing one thread to clobber data that was written by another thread. However, thanks to the <code class="calibre18">Atomics</code> object, you are able to perform very basic operations with that data in a way that prevents data from being clobbered.</p>
+
+<p class="author1">Although the basic operations provided by <code class="calibre18">Atomics</code> are convenient, you will often find yourself needing to perform more complex interactions with that data. For example, once you’ve serialized data as described in <a data-type="xref" href="ch04.xhtml#ch_shared_mem_sec_serialize" class="calibre6">“Data Serialization”</a>, like a 1 kilobyte string, you’ll then need to write that data to the <code class="calibre18">SharedArrayBuffer</code> instance, and none of the existing <code class="calibre18">Atomics</code> methods will allow you to set the entire value all at once.</p>
+
+<p class="author1">This chapter covers additional functionality for coordinating reads and writes to shared data across threads for situations when the previously covered <code class="calibre18">Atomics</code> methods just aren’t enough.</p>
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Atomic Methods for Coordination" class="calibre4"><div class="preface" id="ch_adv_shared_mem_sec_atomics">
+<h1 class="calibre13">Atomic Methods for Coordination</h1>
+
+<p class="author1">These methods are a little different <a data-type="indexterm" data-primary="Atomics object" data-secondary="coordination and" id="atomcoord" class="calibre6"/>than the ones that were already covered in <a data-type="xref" href="ch04.xhtml#ch_shared_mem_sec_atomics" class="calibre6">“Atomic Methods for Data Manipulation”</a>. Specificially, the methods previously covered each work with a <code class="calibre18">TypedArray</code> of any kind and may operate on both <code class="calibre18">SharedArrayBuffer</code> and <code class="calibre18">ArrayBuffer</code> instances. However, the methods listed here will only work with <code class="calibre18">Int32Array</code> and <code class="calibre18">BigInt64Array</code> instances, and they only make sense when used with <code class="calibre18">SharedArrayBuffer</code> instances.</p>
+
+<p class="author1">If you try to use these methods with the wrong type of <code class="calibre18">TypedArray</code>, you’ll get one of these errors:</p>
+
+<pre data-type="programlisting" class="calibre38"># Firefox v88
+Uncaught TypeError: invalid array type for the operation
+
+# Chrome v90 / Node.js v16
+Uncaught TypeError: [object Int8Array] is not an int32 or BigInt64 typed array.</pre>
+
+<p class="author1">As far as prior art goes, these <a data-type="indexterm" data-primary="futex (Linux)" id="idm45995918649976" class="calibre6"/><a data-type="indexterm" data-primary="Linux" data-secondary="futex" id="idm45995918649272" class="calibre6"/><a data-type="indexterm" data-primary="Linux" data-secondary="mutex" id="idm45995918648328" class="calibre6"/><a data-type="indexterm" data-primary="mutex (Linux)" id="idm45995918647384" class="calibre6"/>methods are modeled after a feature available in the Linux kernel called the <em class="calibre7">futex</em>, which is short for <em class="calibre7">fast userspace mutex</em>. <em class="calibre7">Mutex</em> itself is short for <em class="calibre7">mutual exclusion</em>, which is when a single thread of execution gets exclusive access to a particular piece of data. A mutex can <a data-type="indexterm" data-primary="locks" data-secondary="mutex" id="idm45995918644728" class="calibre6"/>also be referred to as a <em class="calibre7">lock</em>, where one thread locks access to the data, does its thing, and then unlocks access, allowing another thread to then touch the data. A futex is built on two basic operations, one being “wait” and the other being “wake.”</p>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Atomics.wait()" class="calibre4"><div class="preface" id="idm45995918643000">
+<h2 class="calibre37">Atomics.wait()</h2>
+
+<pre data-type="programlisting" data-code-language="javascript" class="calibre38"><code class="nx">status</code> <code class="o">=</code> <code class="nx">Atomics</code><code class="p">.</code><code class="nx">wait</code><code class="p">(</code><code class="nx">typedArray</code><code class="p">,</code> <code class="nx">index</code><code class="p">,</code> <code class="nx">value</code><code class="p">,</code> <code class="nx">timeout</code> <code class="o">=</code> <code class="kr">Infinity</code><code class="p">)</code></pre>
+
+<p class="author1">This method first checks <code class="calibre18">typedArray</code> to see <a data-type="indexterm" data-primary="Atomics object" data-secondary="Atomics.wait() method" id="idm45995918630760" class="calibre6"/>if the value at <code class="calibre18">index</code> is equal to <code class="calibre18">value</code>. If it is not, the function returns the value <code class="calibre18">not-equal</code>. If the value is equal, it will then freeze the thread for up to <code class="calibre18">timeout</code> milliseconds. If nothing happens during that time, the function returns the value <code class="calibre18">timed-out</code>. On the other hand, if another thread <a data-type="indexterm" data-primary="Atomics object" data-secondary="Atomics.notify() method" id="idm45995918620088" class="calibre6"/>calls <code class="calibre18">Atomics.notify()</code> for that same <code class="calibre18">index</code> within the time period, the function then returns with a value of <code class="calibre18">ok</code>. <a data-type="xref" href="#list_atomics_wait_return" class="calibre6">Table 5-1</a> lists these return values.</p>
+<table id="list_atomics_wait_return" class="calibre46">
+<caption class="calibre47"><span class="keep-together">Table 5-1. </span>Return values from <code class="calibre58">Atomics.wait()</code></caption>
+<thead class="calibre48">
+<tr class="calibre49">
+<th class="calibre50">Value</th>
+<th class="calibre50">Meaning</th>
+</tr>
+</thead>
+<tbody class="calibre51">
+<tr class="calibre49">
+<td class="calibre52"><p class="author1"><code class="calibre59">not-equal</code></p></td>
+<td class="calibre52"><p class="author1">The provided <code class="calibre59">value</code> didn’t equal the value present in the buffer.</p></td>
+</tr>
+<tr class="calibre53">
+<td class="calibre52"><p class="author1"><code class="calibre59">timed-out</code></p></td>
+<td class="calibre52"><p class="author1">Another thread didn’t call <code class="calibre59">Atomics.notify()</code> within the allotted <code class="calibre59">timeout</code>.</p></td>
+</tr>
+<tr class="calibre49">
+<td class="calibre52"><p class="author1"><code class="calibre59">ok</code></p></td>
+<td class="calibre52"><p class="author1">Another thread did call <code class="calibre59">Atomics.notify()</code> in time.</p></td>
+</tr>
+</tbody>
+</table>
+
+<p class="author1">You might be wondering why this method doesn’t throw an error for the first two conditions and silently succeed instead of returning an <code class="calibre18">ok</code>. Because multithreaded 
+<span class="keep-together">programming</span> is used for performance reasons, it stands to reason that calling these 
+<span class="keep-together"><code class="calibre18">Atomics</code></span> methods will be done <a data-type="indexterm" data-primary="hotpaths" id="idm45995918603832" class="calibre6"/>in the <em class="calibre7">hotpaths</em> of an application, which are areas where the application spends the most time. It’s less performant in JavaScript to instantiate <code class="calibre18">Error</code> objects and generate stack traces than to return a simple string, so the performance of this approach is pretty high. Another reason is that the <code class="calibre18">not-equal</code> case doesn’t really represent an error case but that something you’re waiting for has already happened.</p>
+
+<p class="author1">This blocking behavior might be a little shocking at first. Locking an entire thread sounds a bit intense, and in many cases it is. Another example of what can cause 
+<span class="keep-together">an entire</span> JavaScript <a data-type="indexterm" data-primary="alert() function" id="idm45995918577432" class="calibre6"/><a data-type="indexterm" data-primary="functions" data-secondary="alert()" id="idm45995918576792" class="calibre6"/>thread to lock is the <code class="calibre18">alert()</code> function in a browser. When that 
+<span class="keep-together">function</span> is called, the browser displays a dialog and nothing at all can run—not even any background tasks using the event loop—until the dialog is dismissed. The <code class="calibre18">Atomics.wait()</code> method similarly freezes the thread.</p>
+
+<p class="author1">This behavior is so extreme, in fact, that the “main” thread—the default thread that is available when running JavaScript, outside of a web worker—is not allowed to call this method, at least in a browser. The reason is that locking the main thread would be such a poor user experience that the API authors didn’t even want to allow it. If you do try to call this method in the main thread of a browser, you will get one of the following errors:</p>
+
+<pre data-type="programlisting" class="calibre38"># Firefox
+Uncaught TypeError: waiting is not allowed on this thread
+
+# Chrome v90
+Uncaught TypeError: Atomics.wait cannot be called in this context</pre>
+
+<p class="author1">Node.js, on the other hand, does <a data-type="indexterm" data-primary="Node.js" data-secondary="Atomics.wait() method" id="idm45995918571976" class="calibre6"/>allow <code class="calibre18">Atomics.wait()</code> to be called in the main thread. Since Node.js doesn’t have a UI, this isn’t necessarily a bad thing. Indeed, it can be useful when writing scripts where calling <code class="calibre18">fs.readFileSync()</code> is acceptable.</p>
+
+<p class="author1">If you’re a JavaScript developer who has ever worked at a company with mobile or desktop developers, you may have overheard them talk about “offloading work from the main thread” or “locking the main thread.” These concerns, which have traditionally belonged to developers of native apps, will be enjoyed by us JavaScript engineers more and more as the language advances. With regards to browsers this issue is 
+<span class="keep-together">often referred</span> <a data-type="indexterm" data-primary="scroll jank" id="idm45995918568296" class="calibre6"/>to as <em class="calibre7">scroll jank</em>, which is when a CPU is too busy to draw the UI while 
+<span class="keep-together">scrolling</span>.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Atomics.notify()" class="calibre4"><div class="preface" id="idm45995918642408">
+<h2 class="calibre37">Atomics.notify()</h2>
+
+<pre data-type="programlisting" data-code-language="javascript" class="calibre38"><code class="nx">awaken</code> <code class="o">=</code> <code class="nx">Atomics</code><code class="p">.</code><code class="nx">notify</code><code class="p">(</code><code class="nx">typedArray</code><code class="p">,</code> <code class="nx">index</code><code class="p">,</code> <code class="nx">count</code> <code class="o">=</code> <code class="kr">Infinity</code><code class="p">)</code></pre>
+
+<p class="author1">The <code class="calibre18">Atomics.notify()</code><sup class="calibre39"><a data-type="noteref" id="idm45995918555608-marker" href="ch05.xhtml#idm45995918555608" class="calibre40">1</a></sup> method attempts to awaken other threads <a data-type="indexterm" data-primary="Atomics object" data-secondary="Atomics.notify() method" id="idm45995918554216" class="calibre6"/>that have called <code class="calibre18">Atomics.wait()</code> on the same <code class="calibre18">typedArray</code> and at the same <code class="calibre18">index</code>. If any other threads are currently frozen, then they will wake up. Multiple threads can be frozen at the same time, each waiting to be notified. The <code class="calibre18">count</code> value then determines how many of them to awaken. The <code class="calibre18">count</code> value defaults to <code class="calibre18">Infinity</code>, meaning that every thread will be awakened. However, if you have four threads waiting and set the value to three, then all but one of them will be woken up. <a data-type="xref" href="#ch_adv_shared_mem_sec_timing" class="calibre6">“Timing and Nondeterminism”</a> examines the order of these waking threads.</p>
+
+<p class="author1">The return value is the number of threads that have been awoken once the method is complete. If you were to pass in a <code class="calibre18">TypedArray</code> instance that points to a nonshared <code class="calibre18">ArrayBuffer</code> instance, this will always return a <code class="calibre18">0</code>. If no threads happen to be listening at the time it will also return a <code class="calibre18">0</code>. Because this method doesn’t block the thread, it can always be called from a main JavaScript thread.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Atomics.waitAsync()" class="calibre4"><div class="preface" id="idm45995918540280">
+<h2 class="calibre37">Atomics.waitAsync()</h2>
+
+<pre data-type="programlisting" data-code-language="javascript" class="calibre38"><code class="nx">promise</code> <code class="o">=</code> <code class="nx">Atomics</code><code class="p">.</code><code class="nx">waitAsync</code><code class="p">(</code><code class="nx">typedArray</code><code class="p">,</code> <code class="nx">index</code><code class="p">,</code> <code class="nx">value</code><code class="p">,</code> <code class="nx">timeout</code> <code class="o">=</code> <code class="kr">Infinity</code><code class="p">)</code></pre>
+
+<p class="author1">This is essentially a promise-based <a data-type="indexterm" data-primary="Atomics object" data-secondary="Atomics.waitAsync() method" id="idm45995918529912" class="calibre6"/>version of <code class="calibre18">Atomics.wait()</code> and is the latest addition to the <code class="calibre18">Atomics</code> family. As of this writing it is available in Node.js v16 and Chrome v87 but not yet available in Firefox or Safari.</p>
+
+<p class="author1">This method is essentially a less-performant, nonblocking version of <code class="calibre18">Atomics.wait()</code> that returns a promise which resolves the status of the wait operation. Due to the loss of performance (a resolving promise is going to have more overhead than pausing a thread and returning a string), it isn’t necessarily as useful for the hotpath of a CPU-heavy algorithm. On the other hand, it can be useful in situations where a lock change is more convenient to signal another thread than to perform message-passing operations via <code class="calibre18">postMessage()</code>. Because this method doesn’t block the thread, it can be used in the main thread of an application.</p>
+
+<p class="author1">One of the driving factors for adding this method is so that code compiled using Emscripten (covered in <a data-type="xref" href="ch07.xhtml#ch_webassembly_sec_compile" class="calibre6">“Compiling C Programs to WebAssembly with Emscripten”</a>) that makes use of threading is allowed to execute in the main thread and <a data-type="indexterm" data-primary="Atomics object" data-secondary="coordination and" data-startref="atomcoord" id="idm45995918489288" class="calibre6"/>not just in worker threads.</p>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Timing and Nondeterminism" class="calibre4"><div class="preface" id="ch_adv_shared_mem_sec_timing">
+<h1 class="calibre13">Timing and Nondeterminism</h1>
+
+<p class="author1">In order for an application to be correct it usually needs to behave in a deterministic fashion. The <code class="calibre18">Atomics.notify()</code> function <a data-type="indexterm" data-primary="Atomics object" data-secondary="Atomics.notify() method" id="idm45995918485912" class="calibre6"/><a data-type="indexterm" data-primary="Atomics object" data-secondary="nondeterminism" id="atomnon" class="calibre6"/><a data-type="indexterm" data-primary="nondeterminism" id="nonex" class="calibre6"/>accepts an argument <code class="calibre18">count</code> that contains the number of threads to wake up. The glaring question in this situation is which threads get woken up and in which order?</p>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Example of Nondeterminism" class="calibre4"><div class="preface" id="idm45995918481912">
+<h2 class="calibre37">Example of Nondeterminism</h2>
+
+<p class="author1">Threads are woken up in <em class="calibre7">FIFO</em> (first in, first out) order, meaning the first thread that called <code class="calibre18">Atomics.wait()</code> is the first <a data-type="indexterm" data-primary="threads" data-secondary="waking up" id="idm45995918479016" class="calibre6"/>to be woken up, the second to call is the second to be woken up, and so on. Measuring this can be difficult, however, because log messages printed from different workers aren’t guaranteed to be displayed in the terminal in the true order that they were executed in. Ideally, you should build your application in such a way that it continues to work fine regardless of the order in which threads have been awoken.</p>
+
+<p class="author1">To test this for yourself, you can create a new application. First, create a new directory named <em class="calibre7">ch5-notify-order/</em>. In it, start off by creating another basic <em class="calibre7">index.html</em> file using the content from <a data-type="xref" href="#ex_timing_index" class="calibre6">Example 5-1</a>.</p>
+<div id="ex_timing_index" data-type="example" class="calibre26">
+<h5 class="calibre27"><span class="keep-together">Example 5-1. </span><em class="calibre7">ch5-notify-order/index.html</em></h5>
+
+<pre data-type="programlisting" data-code-language="html" class="calibre28"><code class="nt">&lt;html&gt;</code>
+  <code class="nt">&lt;head&gt;</code>
+    <code class="nt">&lt;title&gt;</code>Shared Memory for Coordination<code class="nt">&lt;/title&gt;</code>
+    <code class="nt">&lt;script </code><code class="na">src=</code><code class="s">"main.js"</code><code class="nt">&gt;&lt;/script&gt;</code>
+  <code class="nt">&lt;/head&gt;</code>
+<code class="nt">&lt;/html&gt;</code></pre></div>
+
+<p class="author1">Next, create another <em class="calibre7">main.js</em> file, containing the content from <a data-type="xref" href="#ex_timing_main" class="calibre6">Example 5-2</a>.</p>
+<div id="ex_timing_main" data-type="example" class="calibre26">
+<h5 class="calibre27"><span class="keep-together">Example 5-2. </span><em class="calibre7">ch5-notify-order/main.js</em></h5>
+
+<pre data-type="programlisting" data-code-language="javascript" class="calibre28"><code class="kr">if</code><code class="calibre18"> </code><code class="p">(</code><code class="o">!</code><code class="nx">crossOriginIsolated</code><code class="p">)</code><code class="calibre18"> </code><code class="kr">throw</code><code class="calibre18"> </code><code class="kr">new</code><code class="calibre18"> </code><code class="nb">Error</code><code class="p">(</code><code class="s">'Cannot use SharedArrayBuffer'</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+
+</code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">buffer</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="kr">new</code><code class="calibre18"> </code><code class="nx">SharedArrayBuffer</code><code class="p">(</code><code class="mi">4</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+</code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">view</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="kr">new</code><code class="calibre18"> </code><code class="nx">Int32Array</code><code class="p">(</code><code class="nx">buffer</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+
+</code><code class="kr">for</code><code class="calibre18"> </code><code class="p">(</code><code class="kr">let</code><code class="calibre18"> </code><code class="nx">i</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="mi">0</code><code class="p">;</code><code class="calibre18"> </code><code class="nx">i</code><code class="calibre18"> </code><code class="o">&lt;</code><code class="calibre18"> </code><code class="mi">4</code><code class="p">;</code><code class="calibre18"> </code><code class="nx">i</code><code class="o">++</code><code class="p">)</code><code class="calibre18"> </code><code class="p">{</code><code class="calibre18"> </code><a class="calibre6" id="co_advanced_shared_memory_CO1-1" href="#callout_advanced_shared_memory_CO1-1"><img src="Images/1.png" alt="1" class="calibre32"/></a><code class="calibre18">
+  </code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">worker</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="kr">new</code><code class="calibre18"> </code><code class="nx">Worker</code><code class="p">(</code><code class="s">'worker.js'</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+  </code><code class="nx">worker</code><code class="p">.</code><code class="nx">postMessage</code><code class="p">(</code><code class="p">{</code><code class="nx">buffer</code><code class="p">,</code><code class="calibre18"> </code><code class="nx">name</code><code class="o">:</code><code class="calibre18"> </code><code class="nx">i</code><code class="p">}</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+</code><code class="p">}</code><code class="calibre18">
+
+</code><code class="nx">setTimeout</code><code class="p">(</code><code class="p">(</code><code class="p">)</code><code class="calibre18"> </code><code class="o">=&gt;</code><code class="calibre18"> </code><code class="p">{</code><code class="calibre18">
+  </code><code class="nx">Atomics</code><code class="p">.</code><code class="nx">notify</code><code class="p">(</code><code class="nx">view</code><code class="p">,</code><code class="calibre18"> </code><code class="mi">0</code><code class="p">,</code><code class="calibre18"> </code><code class="mi">3</code><code class="p">)</code><code class="p">;</code><code class="calibre18"> </code><a class="calibre6" id="co_advanced_shared_memory_CO1-2" href="#callout_advanced_shared_memory_CO1-2"><img src="Images/2.png" alt="2" class="calibre32"/></a><code class="calibre18">
+</code><code class="p">}</code><code class="p">,</code><code class="calibre18"> </code><code class="mi">500</code><code class="p">)</code><code class="p">;</code><code class="calibre18"> </code><a class="calibre6" id="co_advanced_shared_memory_CO1-3" href="#callout_advanced_shared_memory_CO1-3"><img src="Images/3.png" alt="3" class="calibre32"/></a></pre>
+<dl class="calibre14">
+<dt class="calibre15"><a class="calibre6" id="callout_advanced_shared_memory_CO1-1" href="#co_advanced_shared_memory_CO1-1"><img src="Images/1.png" alt="1" class="calibre32"/></a></dt>
+<dd class="calibre33"><p class="calibre34">Four dedicated workers are instantiated.</p></dd>
+<dt class="calibre15"><a class="calibre6" id="callout_advanced_shared_memory_CO1-2" href="#co_advanced_shared_memory_CO1-2"><img src="Images/2.png" alt="2" class="calibre32"/></a></dt>
+<dd class="calibre33"><p class="calibre34">The shared buffer is notified at index 0.</p></dd>
+<dt class="calibre15"><a class="calibre6" id="callout_advanced_shared_memory_CO1-3" href="#co_advanced_shared_memory_CO1-3"><img src="Images/3.png" alt="3" class="calibre32"/></a></dt>
+<dd class="calibre33"><p class="calibre34">The notification is sent at half a second.</p></dd>
+</dl></div>
+
+<p class="author1">This file first creates a 4-byte buffer, which is <a data-type="indexterm" data-primary="buffers" data-secondary="4-byte" id="idm45995918295816" class="calibre6"/>the smallest buffer that can support the needed <code class="calibre18">Int32Array</code> view. Next, it creates four different dedicated workers using a <code class="calibre18">for</code> loop. For each of the workers it immediately calls the appropriate <code class="calibre18">postMessage()</code> call to pass in both the buffer as well as the identifier for the thread. This results in five different threads that we care about; namely the main thread and threads that we’ve nicknamed 0, 1, 2, and 3.</p>
+
+<p class="author1">JavaScript creates those threads, and the underlying engine goes to work assembling resources, allocating memory, and otherwise doing a lot of magic for us behind the scenes. The amount of time that it takes to perform those tasks is nondeterministic, which is unfortunate. We can’t know that, for example, it always takes 100 ms to complete the preparation work. In fact, this number will change wildy across machines depending on things like core count and how busy the machine happens to be at the time the code is run. Lucky for us, the <code class="calibre18">postMessage()</code> call is essentially queued up for us; the JavaScript engine will call the worker’s <code class="calibre18">onmessage</code> function once it’s ready.</p>
+
+<p class="author1">After that, the main thread <a data-type="indexterm" data-primary="setTimeout() function" id="idm45995918255576" class="calibre6"/><a data-type="indexterm" data-primary="functions" data-secondary="setTimeout()" id="idm45995918254968" class="calibre6"/>finishes its work, then waits half a second (500 ms) using <code class="calibre18">setTimeout</code>, and finally calls <code class="calibre18">Atomics.notify()</code>. What would happen if the <code class="calibre18">setTimeout</code> value were too low, say 10 ms? Or even if it were called in the same stack outside of <code class="calibre18">setTimeout</code>? In that case the threads wouldn’t yet be initialized, the worker wouldn’t have had time to call <code class="calibre18">Atomics.wait()</code>, and the call would immediately return with a <code class="calibre18">0</code>. What would happen if the time value is too high? Well, the application might be painfully slow, or any <code class="calibre18">timeout</code> value used by <code class="calibre18">Atomics.wait()</code> might have been exceeded.</p>
+
+<p class="author1">On Thomas’s laptop the threshold of readiness seems to be somewhere around 120 ms. At that point some of the threads are ready and some aren’t. At about 100 ms usually none of the threads are ready, and at 180 ms usually all of the threads are ready. But <em class="calibre7">usually</em> is a word that we don’t like to use in programming. It is difficult to know an exact amount of time before a thread is ready. Often this is an issue when 
+<span class="keep-together">first starting</span> an application, not one that is present throughout the life cycle of the 
+<span class="keep-together">application</span>.</p>
+
+<p class="author1">To finish off the application, create a file named <em class="calibre7">worker.js</em>, and add the content from <a data-type="xref" href="#ex_timing_worker" class="calibre6">Example 5-3</a> to it.</p>
+<div id="ex_timing_worker" data-type="example" class="calibre26">
+<h5 class="calibre27"><span class="keep-together">Example 5-3. </span><em class="calibre7">ch5-notify-order/worker.js</em></h5>
+
+<pre data-type="programlisting" data-code-language="javascript" class="calibre28"><code class="nx">self</code><code class="p">.</code><code class="nx">onmessage</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="p">(</code><code class="p">{</code><code class="nx">data</code><code class="o">:</code><code class="calibre18"> </code><code class="p">{</code><code class="nx">buffer</code><code class="p">,</code><code class="calibre18"> </code><code class="nx">name</code><code class="p">}</code><code class="p">}</code><code class="p">)</code><code class="calibre18"> </code><code class="o">=&gt;</code><code class="calibre18"> </code><code class="p">{</code><code class="calibre18">
+  </code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">view</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="kr">new</code><code class="calibre18"> </code><code class="nx">Int32Array</code><code class="p">(</code><code class="nx">buffer</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+  </code><code class="nx">console</code><code class="p">.</code><code class="nx">log</code><code class="p">(</code><code class="s">`</code><code class="s">Worker </code><code class="si">${</code><code class="nx">name</code><code class="si">}</code><code class="s"> started</code><code class="s">`</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+  </code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">result</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="nx">Atomics</code><code class="p">.</code><code class="nx">wait</code><code class="p">(</code><code class="nx">view</code><code class="p">,</code><code class="calibre18"> </code><code class="mi">0</code><code class="p">,</code><code class="calibre18"> </code><code class="mi">0</code><code class="p">,</code><code class="calibre18"> </code><code class="mi">1000</code><code class="p">)</code><code class="p">;</code><code class="calibre18"> </code><a class="calibre6" id="co_advanced_shared_memory_CO2-1" href="#callout_advanced_shared_memory_CO2-1"><img src="Images/1.png" alt="1" class="calibre32"/></a><code class="calibre18">
+  </code><code class="nx">console</code><code class="p">.</code><code class="nx">log</code><code class="p">(</code><code class="s">`</code><code class="s">Worker </code><code class="si">${</code><code class="nx">name</code><code class="si">}</code><code class="s"> awoken with </code><code class="si">${</code><code class="nx">result</code><code class="si">}</code><code class="s">`</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+</code><code class="p">}</code><code class="p">;</code></pre>
+<dl class="calibre14">
+<dt class="calibre15"><a class="calibre6" id="callout_advanced_shared_memory_CO2-1" href="#co_advanced_shared_memory_CO2-1"><img src="Images/1.png" alt="1" class="calibre32"/></a></dt>
+<dd class="calibre33"><p class="calibre34">Wait on 0th entry in buffer, assuming initial value of <code class="calibre18">0</code>, for up to 1 second.</p></dd>
+</dl></div>
+
+<p class="author1">The worker accepts the shared buffer and the name of the worker thread and stores the values, printing a message that the thread has been initialized. It then calls <code class="calibre18">Atomics.wait()</code> using the 0th index of the buffer. It assumes an initial value of <code class="calibre18">0</code> is present in the buffer (which it is, since we haven’t modified the value). The method call also uses a <code class="calibre18">timeout</code> value of one second (1,000 ms). Finally, once the method call is complete, the value is printed in the terminal.</p>
+
+<p class="author1">Once you’ve finished creating these files, switch to a terminal and run another web server to view the content. Again, you can do so by running the following command:</p>
+
+<pre data-type="programlisting" class="calibre38">$ npx MultithreadedJSBook/serve .</pre>
+
+<p class="author1">As usual, navigate to the URL printed in the terminal and open the console. If you don’t see any output, you may need to refresh the page to run the application again. <a data-type="xref" href="#table_coordination_determinism" class="calibre6">Table 5-2</a> contains the output from a test run.</p>
+<table id="table_coordination_determinism" class="calibre46">
+<caption class="calibre47"><span class="keep-together">Table 5-2. </span>Example nondeterministic output</caption>
+<thead class="calibre48">
+<tr class="calibre49">
+<th class="calibre50">Log</th>
+<th class="calibre50">Location</th>
+</tr>
+</thead>
+<tbody class="calibre51">
+<tr class="calibre49">
+<td class="calibre52"><p class="author1">Worker 1 started</p></td>
+<td class="calibre52"><p class="author1">worker.js:4:11</p></td>
+</tr>
+<tr class="calibre53">
+<td class="calibre52"><p class="author1">Worker 0 started</p></td>
+<td class="calibre52"><p class="author1">worker.js:4:11</p></td>
+</tr>
+<tr class="calibre49">
+<td class="calibre52"><p class="author1">Worker 3 started</p></td>
+<td class="calibre52"><p class="author1">worker.js:4:11</p></td>
+</tr>
+<tr class="calibre53">
+<td class="calibre52"><p class="author1">Worker 2 started</p></td>
+<td class="calibre52"><p class="author1">worker.js:4:11</p></td>
+</tr>
+<tr class="calibre49">
+<td class="calibre52"><p class="author1">Worker 0 awoken with ok</p></td>
+<td class="calibre52"><p class="author1">worker.js:7:11</p></td>
+</tr>
+<tr class="calibre53">
+<td class="calibre52"><p class="author1">Worker 3 awoken with ok</p></td>
+<td class="calibre52"><p class="author1">worker.js:7:11</p></td>
+</tr>
+<tr class="calibre49">
+<td class="calibre52"><p class="author1">Worker 1 awoken with ok</p></td>
+<td class="calibre52"><p class="author1">worker.js:7:11</p></td>
+</tr>
+<tr class="calibre53">
+<td class="calibre52"><p class="author1">Worker 2 awoken with timed-out</p></td>
+<td class="calibre52"><p class="author1">worker.js:7:11</p></td>
+</tr>
+</tbody>
+</table>
+
+<p class="author1">You will most likely get different output. In fact, if you refresh the page again, you may get different output once again. Or you may even get consistent output across multiple runs. Ideally, though, the final worker name that is printed with the “started” messages will also be the worker that fails with the “timed-out” message.</p>
+
+<p class="author1">This output might be a little confusing. Earlier we stated that the order seems to be FIFO ordered, but the numbers here aren’t from 0 to 3. The reason is that the order doesn’t depend on the order that the threads were created (0, 1, 2, 3), but the order in which the threads executed the <code class="calibre18">Atomics.wait()</code> call (1, 0, 3, 2 in this case). Even with that in mind the order of the “awoken” messages is confusing (0, 3, 1, 2 in this case). This is likely due to a race condition in the JavaScript engine where different threads print messages, likely at almost the exact same moment.</p>
+
+<p class="author1">Once printed, the messages don’t get displayed directly to the screen. If that could happen, then the messages could overwrite each other, and you’d end up with visual tearing of pixels. Instead, the engine queues up the messages to be printed, and some other mechanism internal to the browser, but hidden away from us developers, determines the order in which they’re taken from the queue and printed to the screen. For that reason, the order of the two sets of messages won’t necessarily correlate. But the only way to truly tell any order is that the message that times out happens to be from the final thread that was started. Indeed, in this case the “timed-out” message <a data-type="indexterm" data-primary="nondeterminism" data-secondary="example" data-startref="nonex" id="idm45995918105176" class="calibre6"/>is always from the last worker that was started.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Detecting Thread Preparedness" class="calibre4"><div class="preface" id="idm45995918480968">
+<h2 class="calibre37">Detecting Thread Preparedness</h2>
+
+<p class="author1">This experiment begs the question: how can an <a data-type="indexterm" data-primary="threads" data-secondary="preparedness" id="thr_prep" class="calibre6"/>application deterministically know when a thread has finished going through initial setup and is thus prepared to take on work?</p>
+
+<p class="author1">A simple way to do so is to call <code class="calibre18">postMessage()</code> from within the worker threads to post back to the <a data-type="indexterm" data-primary="onmessage event" id="idm45995918100600" class="calibre6"/>parent thread at some point during the <code class="calibre18">onmessage()</code> handler. This works because once the <code class="calibre18">onmessage()</code> handler has been called the worker thread has finished its initial setup and is now running JavaScript code.</p>
+
+<p class="author1">Here’s an example of the quickest way to pull this off. First, copy the <em class="calibre7">ch5-notify-order/</em> directory you created and paste it as a new <em class="calibre7">ch5-notify-when-ready/</em> directory. Inside this directory the <em class="calibre7">index.html</em> file will remain the same, though the two JavaScript files will be updated. First, update <em class="calibre7">main.js</em> to contain the content from <a data-type="xref" href="#ex_timing_ready_main" class="calibre6">Example 5-4</a>.</p>
+<div id="ex_timing_ready_main" data-type="example" class="calibre26">
+<h5 class="calibre27"><span class="keep-together">Example 5-4. </span><em class="calibre7">ch5-notify-when-ready/main.js</em></h5>
+
+<pre data-type="programlisting" data-code-language="javascript" class="calibre28"><code class="kr">if</code><code class="calibre18"> </code><code class="p">(</code><code class="o">!</code><code class="nx">crossOriginIsolated</code><code class="p">)</code><code class="calibre18"> </code><code class="kr">throw</code><code class="calibre18"> </code><code class="kr">new</code><code class="calibre18"> </code><code class="nb">Error</code><code class="p">(</code><code class="s">'Cannot use SharedArrayBuffer'</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+
+</code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">buffer</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="kr">new</code><code class="calibre18"> </code><code class="nx">SharedArrayBuffer</code><code class="p">(</code><code class="mi">4</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+</code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">view</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="kr">new</code><code class="calibre18"> </code><code class="nx">Int32Array</code><code class="p">(</code><code class="nx">buffer</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+</code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">now</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="nb">Date</code><code class="p">.</code><code class="nx">now</code><code class="p">(</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+</code><code class="kr">let</code><code class="calibre18"> </code><code class="nx">count</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="mi">4</code><code class="p">;</code><code class="calibre18">
+
+</code><code class="kr">for</code><code class="calibre18"> </code><code class="p">(</code><code class="kr">let</code><code class="calibre18"> </code><code class="nx">i</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="mi">0</code><code class="p">;</code><code class="calibre18"> </code><code class="nx">i</code><code class="calibre18"> </code><code class="o">&lt;</code><code class="calibre18"> </code><code class="mi">4</code><code class="p">;</code><code class="calibre18"> </code><code class="nx">i</code><code class="o">++</code><code class="p">)</code><code class="calibre18"> </code><code class="p">{</code><code class="calibre18"> </code><a class="calibre6" id="co_advanced_shared_memory_CO3-1" href="#callout_advanced_shared_memory_CO3-1"><img src="Images/1.png" alt="1" class="calibre32"/></a><code class="calibre18">
+  </code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">worker</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="kr">new</code><code class="calibre18"> </code><code class="nx">Worker</code><code class="p">(</code><code class="s">'worker.js'</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+  </code><code class="nx">worker</code><code class="p">.</code><code class="nx">postMessage</code><code class="p">(</code><code class="p">{</code><code class="nx">buffer</code><code class="p">,</code><code class="calibre18"> </code><code class="nx">name</code><code class="o">:</code><code class="calibre18"> </code><code class="nx">i</code><code class="p">}</code><code class="p">)</code><code class="p">;</code><code class="calibre18"> </code><a class="calibre6" id="co_advanced_shared_memory_CO3-2" href="#callout_advanced_shared_memory_CO3-2"><img src="Images/2.png" alt="2" class="calibre32"/></a><code class="calibre18">
+  </code><code class="nx">worker</code><code class="p">.</code><code class="nx">onmessage</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="p">(</code><code class="p">)</code><code class="calibre18"> </code><code class="o">=&gt;</code><code class="calibre18"> </code><code class="p">{</code><code class="calibre18">
+    </code><code class="nx">console</code><code class="p">.</code><code class="nx">log</code><code class="p">(</code><code class="s">`</code><code class="s">Ready; id=</code><code class="si">${</code><code class="nx">i</code><code class="si">}</code><code class="s">, count=</code><code class="si">${</code><code class="o">--</code><code class="nx">count</code><code class="si">}</code><code class="s">, time=</code><code class="si">${</code><code class="nb">Date</code><code class="p">.</code><code class="nx">now</code><code class="p">(</code><code class="p">)</code><code class="calibre18"> </code><code class="o">-</code><code class="calibre18"> </code><code class="nx">now</code><code class="si">}</code><code class="s">ms</code><code class="s">`</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+    </code><code class="kr">if</code><code class="calibre18"> </code><code class="p">(</code><code class="nx">count</code><code class="calibre18"> </code><code class="o">===</code><code class="calibre18"> </code><code class="mi">0</code><code class="p">)</code><code class="calibre18"> </code><code class="p">{</code><code class="calibre18"> </code><a class="calibre6" id="co_advanced_shared_memory_CO3-3" href="#callout_advanced_shared_memory_CO3-3"><img src="Images/3.png" alt="3" class="calibre32"/></a><code class="calibre18">
+      </code><code class="nx">Atomics</code><code class="p">.</code><code class="nx">notify</code><code class="p">(</code><code class="nx">view</code><code class="p">,</code><code class="calibre18"> </code><code class="mi">0</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+    </code><code class="p">}</code><code class="calibre18">
+  </code><code class="p">}</code><code class="p">;</code><code class="calibre18">
+</code><code class="p">}</code></pre>
+<dl class="calibre14">
+<dt class="calibre15"><a class="calibre6" id="callout_advanced_shared_memory_CO3-1" href="#co_advanced_shared_memory_CO3-1"><img src="Images/1.png" alt="1" class="calibre32"/></a></dt>
+<dd class="calibre33"><p class="calibre34">Instantiate four workers.</p></dd>
+<dt class="calibre15"><a class="calibre6" id="callout_advanced_shared_memory_CO3-2" href="#co_advanced_shared_memory_CO3-2"><img src="Images/2.png" alt="2" class="calibre32"/></a></dt>
+<dd class="calibre33"><p class="calibre34">Immediately post a message to the workers.</p></dd>
+<dt class="calibre15"><a class="calibre6" id="callout_advanced_shared_memory_CO3-3" href="#co_advanced_shared_memory_CO3-3"><img src="Images/3.png" alt="3" class="calibre32"/></a></dt>
+<dd class="calibre33"><p class="calibre34">Notify on the 0th entry once all four workers reply.</p></dd>
+</dl></div>
+
+<p class="author1">The script has been modified so that <code class="calibre18">Atomics.notify()</code> will be called after each of the four workers has <a data-type="indexterm" data-primary="Atomics object" data-secondary="Atomics.notify() method" id="idm45995917884680" class="calibre6"/>posted a message back to the main thread. Once the fourth and final worker has posted a message, the notification is then sent. This allows the application to post a message as soon as it’s ready, likely saving hundreds of milliseconds in the best case, and preventing a failure in the worst case (like when running the code on a very slow single-core computer).</p>
+
+<p class="author1">The <code class="calibre18">Atomics.notify()</code> call has also been updated to simply wake up all threads instead of just three, and the timeout has been set back to the default of <code class="calibre18">Infinity</code>. This was done to show that every thread will receive the message on time.</p>
+
+<p class="author1">Next, update <em class="calibre7">worker.js</em> to contain the content from <a data-type="xref" href="#ex_timing_ready_worker" class="calibre6">Example 5-5</a>.</p>
+<div id="ex_timing_ready_worker" data-type="example" class="calibre26">
+<h5 class="calibre27"><span class="keep-together">Example 5-5. </span><em class="calibre7">ch5-notify-when-ready/worker.js</em></h5>
+
+<pre data-type="programlisting" data-code-language="javascript" class="calibre28"><code class="nx">self</code><code class="p">.</code><code class="nx">onmessage</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="p">(</code><code class="p">{</code><code class="nx">data</code><code class="o">:</code><code class="calibre18"> </code><code class="p">{</code><code class="nx">buffer</code><code class="p">,</code><code class="calibre18"> </code><code class="nx">name</code><code class="p">}</code><code class="p">}</code><code class="p">)</code><code class="calibre18"> </code><code class="o">=&gt;</code><code class="calibre18"> </code><code class="p">{</code><code class="calibre18">
+  </code><code class="nx">postMessage</code><code class="p">(</code><code class="s">'ready'</code><code class="p">)</code><code class="p">;</code><code class="calibre18"> </code><a class="calibre6" id="co_advanced_shared_memory_CO4-1" href="#callout_advanced_shared_memory_CO4-1"><img src="Images/1.png" alt="1" class="calibre32"/></a><code class="calibre18">
+  </code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">view</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="kr">new</code><code class="calibre18"> </code><code class="nx">Int32Array</code><code class="p">(</code><code class="nx">buffer</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+  </code><code class="nx">console</code><code class="p">.</code><code class="nx">log</code><code class="p">(</code><code class="s">`</code><code class="s">Worker </code><code class="si">${</code><code class="nx">name</code><code class="si">}</code><code class="s"> started</code><code class="s">`</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+  </code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">result</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="nx">Atomics</code><code class="p">.</code><code class="nx">wait</code><code class="p">(</code><code class="nx">view</code><code class="p">,</code><code class="calibre18"> </code><code class="mi">0</code><code class="p">,</code><code class="calibre18"> </code><code class="mi">0</code><code class="p">)</code><code class="p">;</code><code class="calibre18"> </code><a class="calibre6" id="co_advanced_shared_memory_CO4-2" href="#callout_advanced_shared_memory_CO4-2"><img src="Images/2.png" alt="2" class="calibre32"/></a><code class="calibre18">
+  </code><code class="nx">console</code><code class="p">.</code><code class="nx">log</code><code class="p">(</code><code class="s">`</code><code class="s">Worker </code><code class="si">${</code><code class="nx">name</code><code class="si">}</code><code class="s"> awoken with </code><code class="si">${</code><code class="nx">result</code><code class="si">}</code><code class="s">`</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+</code><code class="p">}</code><code class="p">;</code></pre>
+<dl class="calibre14">
+<dt class="calibre15"><a class="calibre6" id="callout_advanced_shared_memory_CO4-1" href="#co_advanced_shared_memory_CO4-1"><img src="Images/1.png" alt="1" class="calibre32"/></a></dt>
+<dd class="calibre33"><p class="calibre34">Post message back to parent thread to signal readiness.</p></dd>
+<dt class="calibre15"><a class="calibre6" id="callout_advanced_shared_memory_CO4-2" href="#co_advanced_shared_memory_CO4-2"><img src="Images/2.png" alt="2" class="calibre32"/></a></dt>
+<dd class="calibre33"><p class="calibre34">Wait for notification on the 0th entry.</p></dd>
+</dl></div>
+
+<p class="author1">This time the <code class="calibre18">onmessage</code> handler immediately calls <code class="calibre18">postMessage()</code> to send a message back to the parent. Then, the wait call happens shortly afterward. Technically, if the parent thread were to somehow receive the message before the <code class="calibre18">Atomics.wait()</code> call were made, then <a data-type="indexterm" data-primary="Atomics object" data-secondary="Atomics.wait() method" id="idm45995917784904" class="calibre6"/>the application could conceivably break. But the code is relying on the fact that message passing is far slower than iterating over lines of code within a synchronous JavaScript function.</p>
+
+<p class="author1">One thing to keep in mind is that calling <code class="calibre18">Atomics.wait()</code> will pause the thread. This means <code class="calibre18">postMessage()</code> can’t be called afterward.</p>
+
+<p class="author1">When you run this code, the new logs print out three pieces of information: the name of the thread, the countdown (always in the order of 3, 2, 1, 0), and finally the amount of time it took for the thread to be ready since the start of the script. Run the same command that you ran before and open the resulting URL in your browser. <a data-type="xref" href="#table_thread_start_timing" class="calibre6">Table 5-3</a> contains the log output from some sample runs.</p>
+<table id="table_thread_start_timing" class="calibre46">
+<caption class="calibre47"><span class="keep-together">Table 5-3. </span>Thread start timing</caption>
+<thead class="calibre48">
+<tr class="calibre49"><th class="calibre50">Firefox v88</th><th class="calibre50">Chrome v90</th></tr>
+</thead>
+<tbody class="calibre51">
+<tr class="calibre49"><td class="calibre52">T1, 86ms</td><td class="calibre52">T0, 21ms</td></tr>
+<tr class="calibre53"><td class="calibre52">T0, 99ms</td><td class="calibre52">T1, 24ms</td></tr>
+<tr class="calibre49"><td class="calibre52">T2, 101ms</td><td class="calibre52">T2, 26ms</td></tr>
+<tr class="calibre53"><td class="calibre52">T3, 108ms</td><td class="calibre52">T3, 29ms</td></tr>
+</tbody>
+</table>
+
+<p class="author1">In this case, with a 16-core laptop, Firefox seems to take around four times as long to initialize the worker threads as Chrome does. Also, Firefox gives a more random thread order than Chrome. Each time the page is refreshed the order of threads for Firefox changes but the order in Chrome does not. This then suggests that the V8 engine used by Chrome is more optimized for starting new JavaScript environments or instantiating browser APIs than the SpiderMonkey engine used by Firefox.</p>
+
+<p class="author1">Be sure to test this code in multiple browsers to compare the results that you get. Another thing to keep in mind is that the speed that it takes to initialize threads will also likely depend on the number of cores available on your computer. In fact, to have some additional fun with this program, change the value of <code class="calibre18">4</code> that is assigned to the <code class="calibre18">count</code> variable and in the <code class="calibre18">for</code> loop to a higher number, then run the code and see what happens. Upon increasing the value to <code class="calibre18">128</code>, the amount of time it took both browsers to initialize threads jumped a lot. This also consistently breaks the order in which the threads are prepared on Chrome. Generally, performance is lost when using too many threads, and this is examined in <a data-type="indexterm" data-primary="Atomics object" data-secondary="nondeterminism" data-startref="atomnon" id="idm45995917726840" class="calibre6"/>more detail in <a data-type="xref" href="ch08.xhtml#ch_benchmarks_sec_avoid_ss_lowcore" class="calibre6">“Low Core Count”</a>.</p>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Example Application: Conway’s Game of Life" class="calibre4"><div class="preface" id="ch_adv_shared_mem_sec_app">
+<h1 class="calibre13">Example Application: Conway’s Game of Life</h1>
+
+<p class="author1">Now that we’ve had a look at <code class="calibre18">Atomics.wait()</code> and <code class="calibre18">Atomics.notify()</code>, it’s time to look at a <a data-type="indexterm" data-primary="Conway's Game of Life" id="idm45995917722440" class="calibre6"/>concrete example. We’ll use Conway’s Game of Life, a well-established concept that naturally lends itself to parallel programming.
+The “game” is actually a simulation of population growth and decay. The “world” this simulation exists in is a grid of cells that are in one of two states: alive or dead. The simulation works iteratively, and on each iteration, the following algorithm is performed for each cell.</p>
+<ol class="calibre35">
+<li class="calibre36">
+<p class="author1">If the cell is alive:</p>
+<ol class="calibre65">
+<li class="calibre66">
+<p class="author1">If there are 2 or 3 neighbors alive, the cell remains alive.</p>
+</li>
+<li class="calibre66">
+<p class="author1">If there are 0 or 1 neighbors alive, the cell dies (this simulates underpopulation as a cause of death).</p>
+</li>
+<li class="calibre66">
+<p class="author1">If there are 4 or more neighbors alive, the cell dies (this simulates overpopulation as a cause of death).</p>
+</li>
+
+</ol>
+</li>
+<li class="calibre36">
+<p class="author1">If the cell is dead:</p>
+<ol class="calibre65">
+<li class="calibre66">
+<p class="author1">If there are exactly 3 neighbors alive, the cell becomes alive (this simulates reproduction).</p>
+</li>
+<li class="calibre66">
+<p class="author1">In any other case, the cell remains dead.</p>
+</li>
+
+</ol>
+</li>
+
+</ol>
+
+<p class="author1">When talking about “neighbors alive,” we’re referring to any cell that’s at most one unit away from the current cell, including diagonals, and we’re referring to the state prior to the current iteration. We can simplify these rules to the following.</p>
+<ol class="calibre35">
+<li class="calibre36">
+<p class="author1">If there are exactly 3 neighbors alive, the new cell state is alive (regardless of how it started).</p>
+</li>
+<li class="calibre36">
+<p class="author1">If the cell is alive and exactly 2 neighbors are alive, the cell remains alive.</p>
+</li>
+<li class="calibre36">
+<p class="author1">In all other cases, the new cell state is dead.</p>
+</li>
+
+</ol>
+
+<p class="author1">For our implementation, we’ll make the following assumptions:</p>
+
+<ul class="printings">
+<li class="calibre10">
+<p class="author1">The grid is a square. This is a slight simplification so that there’s one less dimension to worry about.</p>
+</li>
+<li class="calibre10">
+<p class="author1">The grid wraps around itself like a torus. This means that when we’re at an edge, and we need to evaluate a neighboring cell outside the bounds, we’ll look at the cell at the other end.</p>
+</li>
+</ul>
+
+<p class="author1">We’ll write our code for web browsers, since they give us a handy canvas element with which to plot the state of the Game of Life world. That being said, it’s relatively straightforward to adapt the example to other environments that have some kind of image <a data-type="indexterm" data-primary="threads" data-secondary="preparedness" data-startref="thr_prep" id="idm45995917707624" class="calibre6"/>rendering. In Node.js you could even write to the terminal using ANSI escape codes.</p>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Single-Threaded Game of Life" class="calibre4"><div class="preface" id="idm45995917706280">
+<h2 class="calibre37">Single-Threaded Game of Life</h2>
+
+<p class="author1">To start off, we’ll build up a <code class="calibre18">Grid</code> class, which <a data-type="indexterm" data-primary="Conway's Game of Life" data-secondary="single-threaded" id="congame" class="calibre6"/><a data-type="indexterm" data-primary="Grid class" id="grdcl" class="calibre6"/><a data-type="indexterm" data-primary="classes" data-secondary="Grid" id="clgrd" class="calibre6"/>holds our Game of Life world as an array and handles each iteration. We’ll build it in a frontend-agnostic way, and we’ll even make it usable without any changes in our multithreaded example. To properly simulate the Game of Life, we’ll need a multidimensional array to represent our grid of cells. We could use arrays of arrays, but to make things easier later on, we’ll store it in a one-dimensional array (in fact, a <code class="calibre18">Uint8Array</code>), and then for any cell with coordinates <code class="calibre18">x</code> and <code class="calibre18">y</code>, we’ll store it in the array at <code class="calibre18">cells[size * x + y]</code>. We’ll also need two of these, since one will be for the current state, and one for the previous state. In another attempt to simplify things for later on, we’ll store both of them sequentially in the same <code class="calibre18">ArrayBuffer</code>.</p>
+
+<p class="author1">Make a directory called <em class="calibre7">ch5-game-of-life/</em> and add the contents of <a data-type="xref" href="#ex_ch5_gol_1" class="calibre6">Example 5-6</a> to <em class="calibre7">gol.js</em> in that directory.</p>
+<div id="ex_ch5_gol_1" data-type="example" class="calibre26">
+<h5 class="calibre27"><span class="keep-together">Example 5-6. </span><em class="calibre7">ch5-game-of-life/gol.js</em> (part 1)</h5>
+
+<pre data-type="programlisting" data-code-language="javascript" class="calibre28"><code class="kr">class</code> <code class="nx">Grid</code> <code class="p">{</code>
+  <code class="nx">constructor</code><code class="p">(</code><code class="nx">size</code><code class="p">,</code> <code class="nx">buffer</code><code class="p">,</code> <code class="nx">paint</code> <code class="o">=</code> <code class="p">()</code> <code class="o">=&gt;</code> <code class="p">{})</code> <code class="p">{</code>
+    <code class="kr">const</code> <code class="nx">sizeSquared</code> <code class="o">=</code> <code class="nx">size</code> <code class="o">*</code> <code class="nx">size</code><code class="p">;</code>
+    <code class="kr">this</code><code class="p">.</code><code class="nx">buffer</code> <code class="o">=</code> <code class="nx">buffer</code><code class="p">;</code>
+    <code class="kr">this</code><code class="p">.</code><code class="nx">size</code> <code class="o">=</code> <code class="nx">size</code><code class="p">;</code>
+    <code class="kr">this</code><code class="p">.</code><code class="nx">cells</code> <code class="o">=</code> <code class="kr">new</code> <code class="nx">Uint8Array</code><code class="p">(</code><code class="kr">this</code><code class="p">.</code><code class="nx">buffer</code><code class="p">,</code> <code class="mi">0</code><code class="p">,</code> <code class="nx">sizeSquared</code><code class="p">);</code>
+    <code class="kr">this</code><code class="p">.</code><code class="nx">nextCells</code> <code class="o">=</code> <code class="kr">new</code> <code class="nx">Uint8Array</code><code class="p">(</code><code class="kr">this</code><code class="p">.</code><code class="nx">buffer</code><code class="p">,</code> <code class="nx">sizeSquared</code><code class="p">,</code> <code class="nx">sizeSquared</code><code class="p">);</code>
+    <code class="kr">this</code><code class="p">.</code><code class="nx">paint</code> <code class="o">=</code> <code class="nx">paint</code><code class="p">;</code>
+  <code class="p">}</code></pre></div>
+
+<p class="author1">Here we’ve started off the <code class="calibre18">Grid</code> class with a constructor. It takes in a <code class="calibre18">size</code>, which is the width of our square, <a data-type="indexterm" data-primary="ArrayBuffer" data-secondary="Grid class" id="idm45995917620936" class="calibre6"/>an <code class="calibre18">ArrayBuffer</code> called <code class="calibre18">buffer</code>, and a <code class="calibre18">paint</code> function which we’ll use later on. We then establish our <code class="calibre18">cells</code> and <code class="calibre18">nextCells</code> as instances of <code class="calibre18">Uint8Array</code> stored side-by-side in the <code class="calibre18">buffer</code>.</p>
+
+<p class="author1">Next, we can add the cell retrieval method we’ll need later on when performing iterations. Add the code in <a data-type="xref" href="#ex_ch5_gol_2" class="calibre6">Example 5-7</a>.</p>
+<div id="ex_ch5_gol_2" data-type="example" class="calibre26">
+<h5 class="calibre27"><span class="keep-together">Example 5-7. </span><em class="calibre7">ch5-game-of-life/gol.js</em> (part 2)</h5>
+
+<pre data-type="programlisting" data-code-language="javascript" class="calibre28">  <code class="nx">getCell</code><code class="p">(</code><code class="nx">x</code><code class="p">,</code> <code class="nx">y</code><code class="p">)</code> <code class="p">{</code>
+    <code class="kr">const</code> <code class="nx">size</code> <code class="o">=</code> <code class="kr">this</code><code class="p">.</code><code class="nx">size</code><code class="p">;</code>
+    <code class="kr">const</code> <code class="nx">sizeM1</code> <code class="o">=</code> <code class="nx">size</code> <code class="o">-</code> <code class="mi">1</code><code class="p">;</code>
+    <code class="nx">x</code> <code class="o">=</code> <code class="nx">x</code> <code class="o">&lt;</code> <code class="mi">0</code> <code class="o">?</code> <code class="nx">sizeM1</code> <code class="o">:</code> <code class="nx">x</code> <code class="o">&gt;</code> <code class="nx">sizeM1</code> <code class="o">?</code> <code class="mi">0</code> <code class="o">:</code> <code class="nx">x</code><code class="p">;</code>
+    <code class="nx">y</code> <code class="o">=</code> <code class="nx">y</code> <code class="o">&lt;</code> <code class="mi">0</code> <code class="o">?</code> <code class="nx">sizeM1</code> <code class="o">:</code> <code class="nx">y</code> <code class="o">&gt;</code> <code class="nx">sizeM1</code> <code class="o">?</code> <code class="mi">0</code> <code class="o">:</code> <code class="nx">y</code><code class="p">;</code>
+    <code class="kr">return</code> <code class="kr">this</code><code class="p">.</code><code class="nx">cells</code><code class="p">[</code><code class="nx">size</code> <code class="o">*</code> <code class="nx">x</code> <code class="o">+</code> <code class="nx">y</code><code class="p">];</code>
+  <code class="p">}</code></pre></div>
+
+<p class="author1">To retrieve a cell with a given set of coordinates, we need to normalize the indices. Recall that we’re saying the grid wraps around. The normalization we’ve done here makes sure that if we’re one unit above or below the range, we instead retrieve the cell at the other end of the range.</p>
+
+<p class="author1">Now, we’ll add the actual algorithm that runs on every iteration. Add the code in <a data-type="xref" href="#ex_ch5_gol_3" class="calibre6">Example 5-8</a>.</p>
+<div id="ex_ch5_gol_3" data-type="example" class="calibre26">
+<h5 class="calibre27"><span class="keep-together">Example 5-8. </span><em class="calibre7">ch5-game-of-life/gol.js</em> (part 3)</h5>
+
+<pre data-type="programlisting" data-code-language="javascript" class="calibre28"><code class="calibre18">  </code><code class="kr">static</code><code class="calibre18"> </code><code class="nx">NEIGHBORS</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="p">[</code><code class="calibre18"> </code><a class="calibre6" id="co_advanced_shared_memory_CO5-1" href="#callout_advanced_shared_memory_CO5-1"><img src="Images/1.png" alt="1" class="calibre32"/></a><code class="calibre18">
+    </code><code class="p">[</code><code class="o">-</code><code class="mi">1</code><code class="p">,</code><code class="calibre18"> </code><code class="o">-</code><code class="mi">1</code><code class="p">]</code><code class="p">,</code><code class="calibre18"> </code><code class="p">[</code><code class="o">-</code><code class="mi">1</code><code class="p">,</code><code class="calibre18"> </code><code class="mi">0</code><code class="p">]</code><code class="p">,</code><code class="calibre18"> </code><code class="p">[</code><code class="o">-</code><code class="mi">1</code><code class="p">,</code><code class="calibre18"> </code><code class="mi">1</code><code class="p">]</code><code class="p">,</code><code class="calibre18"> </code><code class="p">[</code><code class="mi">0</code><code class="p">,</code><code class="calibre18"> </code><code class="o">-</code><code class="mi">1</code><code class="p">]</code><code class="p">,</code><code class="calibre18"> </code><code class="p">[</code><code class="mi">0</code><code class="p">,</code><code class="calibre18"> </code><code class="mi">1</code><code class="p">]</code><code class="p">,</code><code class="calibre18"> </code><code class="p">[</code><code class="mi">1</code><code class="p">,</code><code class="calibre18"> </code><code class="o">-</code><code class="mi">1</code><code class="p">]</code><code class="p">,</code><code class="calibre18"> </code><code class="p">[</code><code class="mi">1</code><code class="p">,</code><code class="calibre18"> </code><code class="mi">0</code><code class="p">]</code><code class="p">,</code><code class="calibre18"> </code><code class="p">[</code><code class="mi">1</code><code class="p">,</code><code class="calibre18"> </code><code class="mi">1</code><code class="p">]</code><code class="calibre18">
+  </code><code class="p">]</code><code class="p">;</code><code class="calibre18">
+
+  </code><code class="nx">iterate</code><code class="p">(</code><code class="nx">minX</code><code class="p">,</code><code class="calibre18"> </code><code class="nx">minY</code><code class="p">,</code><code class="calibre18"> </code><code class="nx">maxX</code><code class="p">,</code><code class="calibre18"> </code><code class="nx">maxY</code><code class="p">)</code><code class="calibre18"> </code><code class="p">{</code><code class="calibre18"> </code><a class="calibre6" id="co_advanced_shared_memory_CO5-2" href="#callout_advanced_shared_memory_CO5-2"><img src="Images/2.png" alt="2" class="calibre32"/></a><code class="calibre18">
+    </code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">size</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="kr">this</code><code class="p">.</code><code class="nx">size</code><code class="p">;</code><code class="calibre18">
+
+    </code><code class="kr">for</code><code class="calibre18"> </code><code class="p">(</code><code class="kr">let</code><code class="calibre18"> </code><code class="nx">x</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="nx">minX</code><code class="p">;</code><code class="calibre18"> </code><code class="nx">x</code><code class="calibre18"> </code><code class="o">&lt;</code><code class="calibre18"> </code><code class="nx">maxX</code><code class="p">;</code><code class="calibre18"> </code><code class="nx">x</code><code class="o">++</code><code class="p">)</code><code class="calibre18"> </code><code class="p">{</code><code class="calibre18">
+      </code><code class="kr">for</code><code class="calibre18"> </code><code class="p">(</code><code class="kr">let</code><code class="calibre18"> </code><code class="nx">y</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="nx">minY</code><code class="p">;</code><code class="calibre18"> </code><code class="nx">y</code><code class="calibre18"> </code><code class="o">&lt;</code><code class="calibre18"> </code><code class="nx">maxY</code><code class="p">;</code><code class="calibre18"> </code><code class="nx">y</code><code class="o">++</code><code class="p">)</code><code class="calibre18"> </code><code class="p">{</code><code class="calibre18">
+        </code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">cell</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="kr">this</code><code class="p">.</code><code class="nx">cells</code><code class="p">[</code><code class="nx">size</code><code class="calibre18"> </code><code class="o">*</code><code class="calibre18"> </code><code class="nx">x</code><code class="calibre18"> </code><code class="o">+</code><code class="calibre18"> </code><code class="nx">y</code><code class="p">]</code><code class="p">;</code><code class="calibre18">
+        </code><code class="kr">let</code><code class="calibre18"> </code><code class="nx">alive</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="mi">0</code><code class="p">;</code><code class="calibre18">
+        </code><code class="kr">for</code><code class="calibre18"> </code><code class="p">(</code><code class="kr">const</code><code class="calibre18"> </code><code class="p">[</code><code class="nx">i</code><code class="p">,</code><code class="calibre18"> </code><code class="nx">j</code><code class="p">]</code><code class="calibre18"> </code><code class="kr">of</code><code class="calibre18"> </code><code class="nx">Grid</code><code class="p">.</code><code class="nx">NEIGHBORS</code><code class="p">)</code><code class="calibre18"> </code><code class="p">{</code><code class="calibre18">
+          </code><code class="nx">alive</code><code class="calibre18"> </code><code class="o">+=</code><code class="calibre18"> </code><code class="kr">this</code><code class="p">.</code><code class="nx">getCell</code><code class="p">(</code><code class="nx">x</code><code class="calibre18"> </code><code class="o">+</code><code class="calibre18"> </code><code class="nx">i</code><code class="p">,</code><code class="calibre18"> </code><code class="nx">y</code><code class="calibre18"> </code><code class="o">+</code><code class="calibre18"> </code><code class="nx">j</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+        </code><code class="p">}</code><code class="calibre18">
+        </code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">newCell</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="nx">alive</code><code class="calibre18"> </code><code class="o">===</code><code class="calibre18"> </code><code class="mi">3</code><code class="calibre18"> </code><code class="o">||</code><code class="calibre18"> </code><code class="p">(</code><code class="nx">cell</code><code class="calibre18"> </code><code class="o">&amp;&amp;</code><code class="calibre18"> </code><code class="nx">alive</code><code class="calibre18"> </code><code class="o">===</code><code class="calibre18"> </code><code class="mi">2</code><code class="p">)</code><code class="calibre18"> </code><code class="o">?</code><code class="calibre18"> </code><code class="mi">1</code><code class="calibre18"> </code><code class="o">:</code><code class="calibre18"> </code><code class="mi">0</code><code class="p">;</code><code class="calibre18">
+        </code><code class="kr">this</code><code class="p">.</code><code class="nx">nextCells</code><code class="p">[</code><code class="nx">size</code><code class="calibre18"> </code><code class="o">*</code><code class="calibre18"> </code><code class="nx">x</code><code class="calibre18"> </code><code class="o">+</code><code class="calibre18"> </code><code class="nx">y</code><code class="p">]</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="nx">newCell</code><code class="p">;</code><code class="calibre18">
+        </code><code class="kr">this</code><code class="p">.</code><code class="nx">paint</code><code class="p">(</code><code class="nx">newCell</code><code class="p">,</code><code class="calibre18"> </code><code class="nx">x</code><code class="p">,</code><code class="calibre18"> </code><code class="nx">y</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+      </code><code class="p">}</code><code class="calibre18">
+    </code><code class="p">}</code><code class="calibre18">
+
+    </code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">cells</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="kr">this</code><code class="p">.</code><code class="nx">nextCells</code><code class="p">;</code><code class="calibre18">
+    </code><code class="kr">this</code><code class="p">.</code><code class="nx">nextCells</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="kr">this</code><code class="p">.</code><code class="nx">cells</code><code class="p">;</code><code class="calibre18">
+    </code><code class="kr">this</code><code class="p">.</code><code class="nx">cells</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="nx">cells</code><code class="p">;</code><code class="calibre18">
+  </code><code class="p">}</code><code class="calibre18">
+</code><code class="p">}</code></pre>
+<dl class="calibre14">
+<dt class="calibre15"><a class="calibre6" id="callout_advanced_shared_memory_CO5-1" href="#co_advanced_shared_memory_CO5-1"><img src="Images/1.png" alt="1" class="calibre32"/></a></dt>
+<dd class="calibre33"><p class="calibre34">The set of neighbors coordinates are used in the algorithm to look at neighboring cells in eight directions. We’ll keep this array handy because we’ll need to use it for every cell.</p></dd>
+<dt class="calibre15"><a class="calibre6" id="callout_advanced_shared_memory_CO5-2" href="#co_advanced_shared_memory_CO5-2"><img src="Images/2.png" alt="2" class="calibre32"/></a></dt>
+<dd class="calibre33"><p class="calibre34">The <code class="calibre18">iterate()</code> method takes in a <a data-type="indexterm" data-primary="iterate() method" id="idm45995917487400" class="calibre6"/><a data-type="indexterm" data-primary="methods" data-secondary="iterate()" id="idm45995917486664" class="calibre6"/>range to operate on in the form of minimum X and Y values (inclusive) and maximum X and Y values (exclusive). For our single-threaded example, it will always be <code class="calibre18">(0, 0, size, size)</code>, but putting a range here will make it easier to split up when we move to a multithreaded implementation, where we’ll use these X and Y boundaries to divide the whole grid into sections for each thread to work on.</p></dd>
+</dl></div>
+
+<p class="author1">We loop over every cell in the grid, and for each one get the number of neighbors that are alive. We’re using the number <code class="calibre18">1</code> to represent living cells and <code class="calibre18">0</code> to represent dead cells, so we can count the number of neighboring living cells by adding them all up. Once we have that, we can apply the simplified Game of Life algorithm. We store the new cell state in the <code class="calibre18">nextCells</code> array, and <a data-type="indexterm" data-primary="nextCells array" id="idm45995917292664" class="calibre6"/>then provide the new cell state and coordinates to the <code class="calibre18">paint</code> callback for visualization. Then we swap the <code class="calibre18">cells</code> and <code class="calibre18">nextCells</code> arrays for the subsequent iteration to use. That way, inside each iteration, <code class="calibre18">cells</code> always represents the previous <a data-type="indexterm" data-primary="Grid class" data-startref="grdcl" id="idm45995917250504" class="calibre6"/><a data-type="indexterm" data-primary="classes" data-secondary="Grid" data-startref="clgrd" id="idm45995917249640" class="calibre6"/>iteration’s result, and <code class="calibre18">newCells</code> always represents the current iteration’s result.</p>
+
+<p class="author1">All the code up until this point will be shared with our multithreaded implementation. With the <code class="calibre18">Grid</code> class complete, we can now move on to creating and initializing a <code class="calibre18">Grid</code> instance and tying it to our UI. Add the code from <a data-type="xref" href="#ex_ch5_gol_4" class="calibre6">Example 5-9</a>.</p>
+<div id="ex_ch5_gol_4" data-type="example" class="calibre26">
+<h5 class="calibre27"><span class="keep-together">Example 5-9. </span><em class="calibre7">ch5-game-of-life/gol.js</em> (part 4)</h5>
+
+<pre data-type="programlisting" data-code-language="javascript" class="calibre28"><code class="kr">const</code><code class="calibre18"> </code><code class="nx">BLACK</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="mi">0xFF000000</code><code class="p">;</code><code class="calibre18"> </code><a class="calibre6" id="co_advanced_shared_memory_CO6-1" href="#callout_advanced_shared_memory_CO6-1"><img src="Images/1.png" alt="1" class="calibre32"/></a><code class="calibre18">
+</code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">WHITE</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="mi">0xFFFFFFFF</code><code class="p">;</code><code class="calibre18">
+</code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">SIZE</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="mi">1000</code><code class="p">;</code><code class="calibre18">
+
+</code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">iterationCounter</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="nb">document</code><code class="p">.</code><code class="nx">getElementById</code><code class="p">(</code><code class="s">'iteration'</code><code class="p">)</code><code class="p">;</code><code class="calibre18"> </code><a class="calibre6" id="co_advanced_shared_memory_CO6-2" href="#callout_advanced_shared_memory_CO6-2"><img src="Images/2.png" alt="2" class="calibre32"/></a><code class="calibre18">
+</code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">gridCanvas</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="nb">document</code><code class="p">.</code><code class="nx">getElementById</code><code class="p">(</code><code class="s">'gridcanvas'</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+</code><code class="nx">gridCanvas</code><code class="p">.</code><code class="nx">height</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="nx">SIZE</code><code class="p">;</code><code class="calibre18">
+</code><code class="nx">gridCanvas</code><code class="p">.</code><code class="nx">width</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="nx">SIZE</code><code class="p">;</code><code class="calibre18">
+</code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">ctx</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="nx">gridCanvas</code><code class="p">.</code><code class="nx">getContext</code><code class="p">(</code><code class="s">'2d'</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+</code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">data</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="nx">ctx</code><code class="p">.</code><code class="nx">createImageData</code><code class="p">(</code><code class="nx">SIZE</code><code class="p">,</code><code class="calibre18"> </code><code class="nx">SIZE</code><code class="p">)</code><code class="p">;</code><code class="calibre18"> </code><a class="calibre6" id="co_advanced_shared_memory_CO6-3" href="#callout_advanced_shared_memory_CO6-3"><img src="Images/3.png" alt="3" class="calibre32"/></a><code class="calibre18">
+</code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">buf</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="kr">new</code><code class="calibre18"> </code><code class="nx">Uint32Array</code><code class="p">(</code><code class="nx">data</code><code class="p">.</code><code class="nx">data</code><code class="p">.</code><code class="nx">buffer</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+
+</code><code class="kr">function</code><code class="calibre18"> </code><code class="nx">paint</code><code class="p">(</code><code class="nx">cell</code><code class="p">,</code><code class="calibre18"> </code><code class="nx">x</code><code class="p">,</code><code class="calibre18"> </code><code class="nx">y</code><code class="p">)</code><code class="calibre18"> </code><code class="p">{</code><code class="calibre18"> </code><a class="calibre6" id="co_advanced_shared_memory_CO6-4" href="#callout_advanced_shared_memory_CO6-4"><img src="Images/4.png" alt="4" class="calibre32"/></a><code class="calibre18">
+  </code><code class="nx">buf</code><code class="p">[</code><code class="nx">SIZE</code><code class="calibre18"> </code><code class="o">*</code><code class="calibre18"> </code><code class="nx">x</code><code class="calibre18"> </code><code class="o">+</code><code class="calibre18"> </code><code class="nx">y</code><code class="p">]</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="nx">cell</code><code class="calibre18"> </code><code class="o">?</code><code class="calibre18"> </code><code class="nx">BLACK</code><code class="calibre18"> </code><code class="o">:</code><code class="calibre18"> </code><code class="nx">WHITE</code><code class="p">;</code><code class="calibre18">
+</code><code class="p">}</code><code class="calibre18">
+
+</code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">grid</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="kr">new</code><code class="calibre18"> </code><code class="nx">Grid</code><code class="p">(</code><code class="nx">SIZE</code><code class="p">,</code><code class="calibre18"> </code><code class="kr">new</code><code class="calibre18"> </code><code class="nx">ArrayBuffer</code><code class="p">(</code><code class="mi">2</code><code class="calibre18"> </code><code class="o">*</code><code class="calibre18"> </code><code class="nx">SIZE</code><code class="calibre18"> </code><code class="o">*</code><code class="calibre18"> </code><code class="nx">SIZE</code><code class="p">)</code><code class="p">,</code><code class="calibre18"> </code><code class="nx">paint</code><code class="p">)</code><code class="p">;</code><code class="calibre18"> </code><a class="calibre6" id="co_advanced_shared_memory_CO6-5" href="#callout_advanced_shared_memory_CO6-5"><img src="Images/5.png" alt="5" class="calibre32"/></a><code class="calibre18">
+</code><code class="kr">for</code><code class="calibre18"> </code><code class="p">(</code><code class="kr">let</code><code class="calibre18"> </code><code class="nx">x</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="mi">0</code><code class="p">;</code><code class="calibre18"> </code><code class="nx">x</code><code class="calibre18"> </code><code class="o">&lt;</code><code class="calibre18"> </code><code class="nx">SIZE</code><code class="p">;</code><code class="calibre18"> </code><code class="nx">x</code><code class="o">++</code><code class="p">)</code><code class="calibre18"> </code><code class="p">{</code><code class="calibre18"> </code><a class="calibre6" id="co_advanced_shared_memory_CO6-6" href="#callout_advanced_shared_memory_CO6-6"><img src="Images/6.png" alt="6" class="calibre32"/></a><code class="calibre18">
+  </code><code class="kr">for</code><code class="calibre18"> </code><code class="p">(</code><code class="kr">let</code><code class="calibre18"> </code><code class="nx">y</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="mi">0</code><code class="p">;</code><code class="calibre18"> </code><code class="nx">y</code><code class="calibre18"> </code><code class="o">&lt;</code><code class="calibre18"> </code><code class="nx">SIZE</code><code class="p">;</code><code class="calibre18"> </code><code class="nx">y</code><code class="o">++</code><code class="p">)</code><code class="calibre18"> </code><code class="p">{</code><code class="calibre18">
+    </code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">cell</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="nb">Math</code><code class="p">.</code><code class="nx">random</code><code class="p">(</code><code class="p">)</code><code class="calibre18"> </code><code class="o">&lt;</code><code class="calibre18"> </code><code class="mi">0.5</code><code class="calibre18"> </code><code class="o">?</code><code class="calibre18"> </code><code class="mi">0</code><code class="calibre18"> </code><code class="o">:</code><code class="calibre18"> </code><code class="mi">1</code><code class="p">;</code><code class="calibre18">
+    </code><code class="nx">grid</code><code class="p">.</code><code class="nx">cells</code><code class="p">[</code><code class="nx">SIZE</code><code class="calibre18"> </code><code class="o">*</code><code class="calibre18"> </code><code class="nx">x</code><code class="calibre18"> </code><code class="o">+</code><code class="calibre18"> </code><code class="nx">y</code><code class="p">]</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="nx">cell</code><code class="p">;</code><code class="calibre18">
+    </code><code class="nx">paint</code><code class="p">(</code><code class="nx">cell</code><code class="p">,</code><code class="calibre18"> </code><code class="nx">x</code><code class="p">,</code><code class="calibre18"> </code><code class="nx">y</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+  </code><code class="p">}</code><code class="calibre18">
+</code><code class="p">}</code><code class="calibre18">
+
+</code><code class="nx">ctx</code><code class="p">.</code><code class="nx">putImageData</code><code class="p">(</code><code class="nx">data</code><code class="p">,</code><code class="calibre18"> </code><code class="mi">0</code><code class="p">,</code><code class="calibre18"> </code><code class="mi">0</code><code class="p">)</code><code class="p">;</code><code class="calibre18"> </code><a class="calibre6" id="co_advanced_shared_memory_CO6-7" href="#callout_advanced_shared_memory_CO6-7"><img src="Images/7.png" alt="7" class="calibre32"/></a></pre>
+<dl class="calibre14">
+<dt class="calibre15"><a class="calibre6" id="callout_advanced_shared_memory_CO6-1" href="#co_advanced_shared_memory_CO6-1"><img src="Images/1.png" alt="1" class="calibre32"/></a></dt>
+<dd class="calibre33"><p class="calibre34">We assign some constants for the black-and-white pixels we’ll draw to the screen and set the size (actually, the width) of the grid we’re using. Feel free to play around with the size to see the Game of Life play out in different magnitudes.</p></dd>
+<dt class="calibre15"><a class="calibre6" id="callout_advanced_shared_memory_CO6-2" href="#co_advanced_shared_memory_CO6-2"><img src="Images/2.png" alt="2" class="calibre32"/></a></dt>
+<dd class="calibre33"><p class="calibre34">We grab an iteration counter and canvas element from the HTML (which we’ll write later on). We’ll set our canvas width and height to <code class="calibre18">SIZE</code>, and get a 2D context from it to work with.</p></dd>
+<dt class="calibre15"><a class="calibre6" id="callout_advanced_shared_memory_CO6-3" href="#co_advanced_shared_memory_CO6-3"><img src="Images/3.png" alt="3" class="calibre32"/></a></dt>
+<dd class="calibre33"><p class="calibre34">We’ll use an <code class="calibre18">ImageData</code> instance <a data-type="indexterm" data-primary="ImageData" id="idm45995917003080" class="calibre6"/>to modify the pixels on the canvas directly, via a <code class="calibre18">Uint32Array</code>.</p></dd>
+<dt class="calibre15"><a class="calibre6" id="callout_advanced_shared_memory_CO6-4" href="#co_advanced_shared_memory_CO6-4"><img src="Images/4.png" alt="4" class="calibre32"/></a></dt>
+<dd class="calibre33"><p class="calibre34">This <code class="calibre18">paint()</code> function will be used both in initialization of the grid and on each iteration to modify the buffer backing the <code class="calibre18">ImageData</code> instance. If a cell is alive, it’ll paint it black. Otherwise, it’ll paint it white.</p></dd>
+<dt class="calibre15"><a class="calibre6" id="callout_advanced_shared_memory_CO6-5" href="#co_advanced_shared_memory_CO6-5"><img src="Images/5.png" alt="5" class="calibre32"/></a></dt>
+<dd class="calibre33"><p class="calibre34">Now we create the grid instance, passing in the size, an <code class="calibre18">ArrayBuffer</code> big enough to hold both <code class="calibre18">cells</code> and <code class="calibre18">nextCells</code>, and our <code class="calibre18">paint()</code> function.</p></dd>
+<dt class="calibre15"><a class="calibre6" id="callout_advanced_shared_memory_CO6-6" href="#co_advanced_shared_memory_CO6-6"><img src="Images/6.png" alt="6" class="calibre32"/></a></dt>
+<dd class="calibre33"><p class="calibre34">To initialize the grid, we’ll loop over all the cells and assign each one a random dead or alive state. At the same time, we’ll pass the result to our <code class="calibre18">paint()</code> function to ensure that the image is updated.</p></dd>
+<dt class="calibre15"><a class="calibre6" id="callout_advanced_shared_memory_CO6-7" href="#co_advanced_shared_memory_CO6-7"><img src="Images/7.png" alt="7" class="calibre32"/></a></dt>
+<dd class="calibre33"><p class="calibre34">Whenever an <code class="calibre18">ImageData</code> is modified, we need to add it back to the canvas, so we’re doing it here now that we’re done initializing.</p></dd>
+</dl></div>
+
+<p class="author1">Finally, we’re ready to start running iterations. Add the code from <a data-type="xref" href="#ex_ch5_gol_5" class="calibre6">Example 5-10</a>.</p>
+<div id="ex_ch5_gol_5" data-type="example" class="calibre26">
+<h5 class="calibre27"><span class="keep-together">Example 5-10. </span><em class="calibre7">ch5-game-of-life/gol.js</em> (part 5)</h5>
+
+<pre data-type="programlisting" data-code-language="javascript" class="calibre28"><code class="kr">let</code> <code class="nx">iteration</code> <code class="o">=</code> <code class="mi">0</code><code class="p">;</code>
+<code class="kr">function</code> <code class="nx">iterate</code><code class="p">(...</code><code class="nx">args</code><code class="p">)</code> <code class="p">{</code>
+  <code class="nx">grid</code><code class="p">.</code><code class="nx">iterate</code><code class="p">(...</code><code class="nx">args</code><code class="p">);</code>
+  <code class="nx">ctx</code><code class="p">.</code><code class="nx">putImageData</code><code class="p">(</code><code class="nx">data</code><code class="p">,</code> <code class="mi">0</code><code class="p">,</code> <code class="mi">0</code><code class="p">);</code>
+  <code class="nx">iterationCounter</code><code class="p">.</code><code class="nx">innerHTML</code> <code class="o">=</code> <code class="o">++</code><code class="nx">iteration</code><code class="p">;</code>
+  <code class="nb">window</code><code class="p">.</code><code class="nx">requestAnimationFrame</code><code class="p">(()</code> <code class="o">=&gt;</code> <code class="nx">iterate</code><code class="p">(...</code><code class="nx">args</code><code class="p">));</code>
+<code class="p">}</code>
+
+<code class="nx">iterate</code><code class="p">(</code><code class="mi">0</code><code class="p">,</code> <code class="mi">0</code><code class="p">,</code> <code class="nx">SIZE</code><code class="p">,</code> <code class="nx">SIZE</code><code class="p">);</code></pre></div>
+
+<p class="author1">For each iteration, we start off by calling our <code class="calibre18">grid.iterate()</code> method, which modifies the cells as appropriate. Note that it calls the <code class="calibre18">paint()</code> function for each cell, so once that happens, our image data is already set, so we just need to add it to the canvas context with <code class="calibre18">putImageData()</code>. Then, we’ll update the iteration counter on the page and schedule another iteration to happen in a <code class="calibre18">requestAnimationFrame()</code> callback. Finally, we kick everything off with an initial call to <code class="calibre18">iterate()</code>.</p>
+
+<p class="author1">We’re done with the JavaScript, but now we need the supporting HTML. Fortunately, this is very short. Add the contents of <a data-type="xref" href="#ex_ch5_gol_6" class="calibre6">Example 5-11</a> to a file called <em class="calibre7">gol.html</em> in the same directory, and then open that file up in your browser.</p>
+<div id="ex_ch5_gol_6" data-type="example" class="calibre26">
+<h5 class="calibre27"><span class="keep-together">Example 5-11. </span><em class="calibre7">ch5-game-of-life/gol.html</em></h5>
+
+<pre data-type="programlisting" data-code-language="html" class="calibre28"><code class="nt">&lt;h3&gt;</code>Iteration: <code class="nt">&lt;span</code> <code class="na">id=</code><code class="s">"iteration"</code><code class="nt">&gt;</code>0<code class="nt">&lt;/span&gt;&lt;/h3&gt;</code>
+<code class="nt">&lt;canvas</code> <code class="na">id=</code><code class="s">"gridcanvas"</code><code class="nt">&gt;&lt;/canvas&gt;</code>
+<code class="nt">&lt;script </code><code class="na">src=</code><code class="s">"gol.js"</code><code class="nt">&gt;&lt;/script&gt;</code></pre></div>
+
+<p class="author1">You should now see a 1,000 by 1,000 image displaying Conway’s Game of Life, going through the iterations as fast as it can. It should look something like <a data-type="xref" href="#fig_gol1" class="calibre6">Figure 5-1</a>.</p>
+
+<p class="author1">Depending on your computer, you may find that this lags a little bit, rather than being crisp and smooth. Iterating over all of these cells and performing calculations on them takes a lot of computing power. To speed things up a bit, let’s take advantage of some more CPU cores on your <a data-type="indexterm" data-primary="Conway's Game of Life" data-secondary="single-threaded" data-startref="congame" id="idm45995916927032" class="calibre6"/>machine using web worker threads.</p>
+
+<figure class="calibre29"><div id="fig_gol1" class="figure">
+<img src="Images/mtjs_0501.png" alt="mtjs 0501" class="calibre67"/>
+<h6 class="calibre30"><span class="keep-together">Figure 5-1. </span>Conway’s Game of Life after 290 iterations</h6>
+</div></figure>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Multithreaded Game of Life" class="calibre4"><div class="preface" id="idm45995917705368">
+<h2 class="calibre37">Multithreaded Game of Life</h2>
+
+<p class="author1">For the multithreaded version of <a data-type="indexterm" data-primary="Conway's Game of Life" data-secondary="multithreaded" id="conmulti" class="calibre6"/>our Game of Life implementation, we can reuse a lot of the code. In particular, the HTML doesn’t change and neither does our <code class="calibre18">Grid</code> class. We’ll set up some worker threads and an additional one to coordinate and modify image data. We need that additional thread because we can’t use <code class="calibre18">Atomics.wait()</code> on the main browser thread. We’ll make use of <code class="calibre18">SharedArrayBuffer</code>, rather than <a data-type="indexterm" data-primary="SharedArrayBuffer" data-secondary="grid and" id="idm45995916595016" class="calibre6"/>the regular <code class="calibre18">ArrayBuffer</code> used in the single-threaded example. To coordinate the threads, we’ll need 8 bytes for coordination, specifically 4 to synchronize in each direction, since <code class="calibre18">Atomics.wait()</code> requires at least an <code class="calibre18">Int32Array</code>. Since our coordination thread will also be generating the image data, we’ll also need enough shared memory to hold that as well. For a grid of side length <code class="calibre18">SIZE</code>, this means a <code class="calibre18">SharedArrayBuffer</code> with memory laid out as in <a data-type="xref" href="#table_gol_sab_layout" class="calibre6">Table 5-4</a>.</p>
+<table id="table_gol_sab_layout" class="calibre46">
+<caption class="calibre47"><span class="keep-together">Table 5-4. </span>Memory layout for four worker threads</caption>
+<thead class="calibre48">
+<tr class="calibre49">
+<th class="calibre50">Purpose</th>
+<th class="calibre50"># of Bytes</th>
+</tr>
+</thead>
+<tbody class="calibre51">
+<tr class="calibre49">
+<td class="calibre52"><p class="author1">Cells (or next cells)</p></td>
+<td class="calibre52"><p class="author1"><code class="calibre59">SIZE * SIZE</code></p></td>
+</tr>
+<tr class="calibre53">
+<td class="calibre52"><p class="author1">Cells (or next cells)</p></td>
+<td class="calibre52"><p class="author1"><code class="calibre59">SIZE * SIZE</code></p></td>
+</tr>
+<tr class="calibre49">
+<td class="calibre52"><p class="author1">Image data</p></td>
+<td class="calibre52"><p class="author1"><code class="calibre59">4 * SIZE * SIZE</code></p></td>
+</tr>
+<tr class="calibre53">
+<td class="calibre52"><p class="author1">Worker thread wait</p></td>
+<td class="calibre52"><p class="author1"><code class="calibre59">4</code></p></td>
+</tr>
+<tr class="calibre49">
+<td class="calibre52"><p class="author1">Coordination thread wait</p></td>
+<td class="calibre52"><p class="author1"><code class="calibre59">4</code></p></td>
+</tr>
+</tbody>
+</table>
+
+<p class="author1">To get started here, copy the <em class="calibre7">.html</em> and <em class="calibre7">.js</em> files from the previous example to new files named <em class="calibre7">thread-gol.html</em> and <em class="calibre7">thread-gol.js</em>, respectively. Edit <em class="calibre7">thread-gol.html</em> to make reference to this new JavaScript file.</p>
+
+<p class="author1">Delete everything after the <code class="calibre18">Grid</code> class definition. The next thing we’ll do is set up some constants. Add <a data-type="xref" href="#ex_ch5_gol_thread_1" class="calibre6">Example 5-12</a> to <em class="calibre7">thread-gol.js</em>.</p>
+<div id="ex_ch5_gol_thread_1" data-type="example" class="calibre26">
+<h5 class="calibre27"><span class="keep-together">Example 5-12. </span><em class="calibre7">ch5-game-of-life/thread-gol.js</em> (part 1)</h5>
+
+<pre data-type="programlisting" data-code-language="javascript" class="calibre28"><code class="kr">const</code> <code class="nx">BLACK</code> <code class="o">=</code> <code class="mi">0xFF000000</code><code class="p">;</code>
+<code class="kr">const</code> <code class="nx">WHITE</code> <code class="o">=</code> <code class="mi">0xFFFFFFFF</code><code class="p">;</code>
+<code class="kr">const</code> <code class="nx">SIZE</code> <code class="o">=</code> <code class="mi">1000</code><code class="p">;</code>
+<code class="kr">const</code> <code class="nx">THREADS</code> <code class="o">=</code> <code class="mi">5</code><code class="p">;</code> <code class="c">// must be a divisor of SIZE</code>
+
+<code class="kr">const</code> <code class="nx">imageOffset</code> <code class="o">=</code> <code class="mi">2</code> <code class="o">*</code> <code class="nx">SIZE</code> <code class="o">*</code> <code class="nx">SIZE</code>
+<code class="kr">const</code> <code class="nx">syncOffset</code> <code class="o">=</code> <code class="nx">imageOffset</code> <code class="o">+</code> <code class="mi">4</code> <code class="o">*</code> <code class="nx">SIZE</code> <code class="o">*</code> <code class="nx">SIZE</code><code class="p">;</code>
+
+<code class="kr">const</code> <code class="nx">isMainThread</code> <code class="o">=</code> <code class="o">!!</code><code class="nx">self</code><code class="p">.</code><code class="nb">window</code><code class="p">;</code></pre></div>
+
+<p class="author1">The <code class="calibre18">BLACK</code>, <code class="calibre18">WHITE</code>, and <code class="calibre18">SIZE</code> constants have the same purpose as in the single-threaded example. We’ll set this <code class="calibre18">THREADS</code> constant to any number that’s a divisor of <code class="calibre18">SIZE</code>, and it will represent the number of worker threads we’ll spawn for doing the Game of Life calculation. We’ll be dividing the grid into chunks that can be handled by each thread. Feel free to play around with the <code class="calibre18">THREADS</code> and <code class="calibre18">SIZE</code> variables, so long as <code class="calibre18">THREADS</code> divides <code class="calibre18">SIZE</code>. We’ll need the offsets for where the image data and sync bytes are stored, so those are handled here as well. Finally, we’re going to use the same file to run on the main thread and any worker threads, so we’ll need a way of knowing whether we’re on the main thread or not.</p>
+
+<p class="author1">Next, we’ll start writing the code for the main thread. Add the contents of <a data-type="xref" href="#ex_ch5_gol_thread_2" class="calibre6">Example 5-13</a>.</p>
+<div id="ex_ch5_gol_thread_2" data-type="example" class="calibre26">
+<h5 class="calibre27"><span class="keep-together">Example 5-13. </span><em class="calibre7">ch5-game-of-life/thread-gol.js</em> (part 2)</h5>
+
+<pre data-type="programlisting" data-code-language="javascript" class="calibre28"><code class="kr">if</code><code class="calibre18"> </code><code class="p">(</code><code class="nx">isMainThread</code><code class="p">)</code><code class="calibre18"> </code><code class="p">{</code><code class="calibre18">
+  </code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">gridCanvas</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="nb">document</code><code class="p">.</code><code class="nx">getElementById</code><code class="p">(</code><code class="s">'gridcanvas'</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+  </code><code class="nx">gridCanvas</code><code class="p">.</code><code class="nx">height</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="nx">SIZE</code><code class="p">;</code><code class="calibre18">
+  </code><code class="nx">gridCanvas</code><code class="p">.</code><code class="nx">width</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="nx">SIZE</code><code class="p">;</code><code class="calibre18">
+  </code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">ctx</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="nx">gridCanvas</code><code class="p">.</code><code class="nx">getContext</code><code class="p">(</code><code class="s">'2d'</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+  </code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">iterationCounter</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="nb">document</code><code class="p">.</code><code class="nx">getElementById</code><code class="p">(</code><code class="s">'iteration'</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+
+  </code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">sharedMemory</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="kr">new</code><code class="calibre18"> </code><code class="nx">SharedArrayBuffer</code><code class="p">(</code><code class="calibre18"> </code><a class="calibre6" id="co_advanced_shared_memory_CO7-1" href="#callout_advanced_shared_memory_CO7-1"><img src="Images/1.png" alt="1" class="calibre32"/></a><code class="calibre18">
+    </code><code class="nx">syncOffset</code><code class="calibre18"> </code><code class="o">+</code><code class="calibre18"> </code><code class="c">// data + imageData
+</code><code class="calibre18">    </code><code class="nx">THREADS</code><code class="calibre18"> </code><code class="o">*</code><code class="calibre18"> </code><code class="mi">4</code><code class="calibre18"> </code><code class="c">// synchronization
+</code><code class="calibre18">  </code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+  </code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">imageData</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="kr">new</code><code class="calibre18"> </code><code class="nx">ImageData</code><code class="p">(</code><code class="nx">SIZE</code><code class="p">,</code><code class="calibre18"> </code><code class="nx">SIZE</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+  </code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">cells</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="kr">new</code><code class="calibre18"> </code><code class="nx">Uint8Array</code><code class="p">(</code><code class="nx">sharedMemory</code><code class="p">,</code><code class="calibre18"> </code><code class="mi">0</code><code class="p">,</code><code class="calibre18"> </code><code class="nx">imageOffset</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+  </code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">sharedImageBuf</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="kr">new</code><code class="calibre18"> </code><code class="nx">Uint32Array</code><code class="p">(</code><code class="nx">sharedMemory</code><code class="p">,</code><code class="calibre18"> </code><code class="nx">imageOffset</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+  </code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">sharedImageBuf8</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18">
+    </code><code class="kr">new</code><code class="calibre18"> </code><code class="nx">Uint8ClampedArray</code><code class="p">(</code><code class="nx">sharedMemory</code><code class="p">,</code><code class="calibre18"> </code><code class="nx">imageOffset</code><code class="p">,</code><code class="calibre18"> </code><code class="mi">4</code><code class="calibre18"> </code><code class="o">*</code><code class="calibre18"> </code><code class="nx">SIZE</code><code class="calibre18"> </code><code class="o">*</code><code class="calibre18"> </code><code class="nx">SIZE</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+
+  </code><code class="kr">for</code><code class="calibre18"> </code><code class="p">(</code><code class="kr">let</code><code class="calibre18"> </code><code class="nx">x</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="mi">0</code><code class="p">;</code><code class="calibre18"> </code><code class="nx">x</code><code class="calibre18"> </code><code class="o">&lt;</code><code class="calibre18"> </code><code class="nx">SIZE</code><code class="p">;</code><code class="calibre18"> </code><code class="nx">x</code><code class="o">++</code><code class="p">)</code><code class="calibre18"> </code><code class="p">{</code><code class="calibre18">
+    </code><code class="kr">for</code><code class="calibre18"> </code><code class="p">(</code><code class="kr">let</code><code class="calibre18"> </code><code class="nx">y</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="mi">0</code><code class="p">;</code><code class="calibre18"> </code><code class="nx">y</code><code class="calibre18"> </code><code class="o">&lt;</code><code class="calibre18"> </code><code class="nx">SIZE</code><code class="p">;</code><code class="calibre18"> </code><code class="nx">y</code><code class="o">++</code><code class="p">)</code><code class="calibre18"> </code><code class="p">{</code><code class="calibre18">
+      </code><code class="c">// 50% chance of cell being alive
+</code><code class="calibre18">      </code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">cell</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="nb">Math</code><code class="p">.</code><code class="nx">random</code><code class="p">(</code><code class="p">)</code><code class="calibre18"> </code><code class="o">&lt;</code><code class="calibre18"> </code><code class="mi">0.5</code><code class="calibre18"> </code><code class="o">?</code><code class="calibre18"> </code><code class="mi">0</code><code class="calibre18"> </code><code class="o">:</code><code class="calibre18"> </code><code class="mi">1</code><code class="p">;</code><code class="calibre18">
+      </code><code class="nx">cells</code><code class="p">[</code><code class="nx">SIZE</code><code class="calibre18"> </code><code class="o">*</code><code class="calibre18"> </code><code class="nx">x</code><code class="calibre18"> </code><code class="o">+</code><code class="calibre18"> </code><code class="nx">y</code><code class="p">]</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="nx">cell</code><code class="p">;</code><code class="calibre18">
+      </code><code class="nx">sharedImageBuf</code><code class="p">[</code><code class="nx">SIZE</code><code class="calibre18"> </code><code class="o">*</code><code class="calibre18"> </code><code class="nx">x</code><code class="calibre18"> </code><code class="o">+</code><code class="calibre18"> </code><code class="nx">y</code><code class="p">]</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="nx">cell</code><code class="calibre18"> </code><code class="o">?</code><code class="calibre18"> </code><code class="nx">BLACK</code><code class="calibre18"> </code><code class="o">:</code><code class="calibre18"> </code><code class="nx">WHITE</code><code class="p">;</code><code class="calibre18">
+    </code><code class="p">}</code><code class="calibre18">
+  </code><code class="p">}</code><code class="calibre18">
+
+  </code><code class="nx">imageData</code><code class="p">.</code><code class="nx">data</code><code class="p">.</code><code class="nx">set</code><code class="p">(</code><code class="nx">sharedImageBuf8</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+  </code><code class="nx">ctx</code><code class="p">.</code><code class="nx">putImageData</code><code class="p">(</code><code class="nx">imageData</code><code class="p">,</code><code class="calibre18"> </code><code class="mi">0</code><code class="p">,</code><code class="calibre18"> </code><code class="mi">0</code><code class="p">)</code><code class="p">;</code></pre>
+<dl class="calibre14">
+<dt class="calibre15"><a class="calibre6" id="callout_advanced_shared_memory_CO7-1" href="#co_advanced_shared_memory_CO7-1"><img src="Images/1.png" alt="1" class="calibre32"/></a></dt>
+<dd class="calibre33"><p class="calibre34">The <code class="calibre18">SharedArrayBuffer</code> ends 16 bytes later than the <code class="calibre18">syncOffset</code>, since we need 4 bytes for synchronization for each of our four threads.</p></dd>
+</dl></div>
+
+<p class="author1">The first part of this is roughly the same as in the single-threaded example. We’re just grabbing the DOM elements and setting the grid size. Next, we set up the <code class="calibre18">SharedArrayBuffer</code>, which we’re calling <code class="calibre18">sharedMemory</code>, and put views on it for the <code class="calibre18">cells</code> (which we’ll assign values to soon) and got the image data. We’ll use both a <code class="calibre18">Uint32Array</code> and a <code class="calibre18">Uint8ClampedArray</code> for the image data, for modification and assignment to the <code class="calibre18">ImageData</code> instance, respectively.</p>
+
+<p class="author1">Then we’ll initialize the grid randomly, and at the same time modify the image data accordingly and populate that image data to the canvas context. This sets up our initial state for the grid. At this point, we can start spawning worker threads. Add the contents of <a data-type="xref" href="#ex_ch5_gol_thread_3" class="calibre6">Example 5-14</a>.</p>
+<div id="ex_ch5_gol_thread_3" data-type="example" class="calibre26">
+<h5 class="calibre27"><span class="keep-together">Example 5-14. </span><em class="calibre7">ch5-game-of-life/thread-gol.js</em> (part 3)</h5>
+
+<pre data-type="programlisting" data-code-language="javascript" class="calibre28">  <code class="kr">const</code> <code class="nx">chunkSize</code> <code class="o">=</code> <code class="nx">SIZE</code> <code class="o">/</code> <code class="nx">THREADS</code><code class="p">;</code>
+  <code class="kr">for</code> <code class="p">(</code><code class="kr">let</code> <code class="nx">i</code> <code class="o">=</code> <code class="mi">0</code><code class="p">;</code> <code class="nx">i</code> <code class="o">&lt;</code> <code class="nx">THREADS</code><code class="p">;</code> <code class="nx">i</code><code class="o">++</code><code class="p">)</code> <code class="p">{</code>
+    <code class="kr">const</code> <code class="nx">worker</code> <code class="o">=</code> <code class="kr">new</code> <code class="nx">Worker</code><code class="p">(</code><code class="s">'thread-gol.js'</code><code class="p">,</code> <code class="p">{</code> <code class="nx">name</code><code class="o">:</code> <code class="s">`gol-worker-</code><code class="si">${</code><code class="nx">i</code><code class="si">}</code><code class="s">`</code> <code class="p">});</code>
+    <code class="nx">worker</code><code class="p">.</code><code class="nx">postMessage</code><code class="p">({</code>
+      <code class="nx">range</code><code class="o">:</code> <code class="p">[</code><code class="mi">0</code><code class="p">,</code> <code class="nx">chunkSize</code> <code class="o">*</code> <code class="nx">i</code><code class="p">,</code> <code class="nx">SIZE</code><code class="p">,</code> <code class="nx">chunkSize</code> <code class="o">*</code> <code class="p">(</code><code class="nx">i</code> <code class="o">+</code> <code class="mi">1</code><code class="p">)],</code>
+      <code class="nx">sharedMemory</code><code class="p">,</code>
+      <code class="nx">i</code>
+    <code class="p">});</code>
+  <code class="p">}</code>
+
+  <code class="kr">const</code> <code class="nx">coordWorker</code> <code class="o">=</code> <code class="kr">new</code> <code class="nx">Worker</code><code class="p">(</code><code class="s">'thread-gol.js'</code><code class="p">,</code> <code class="p">{</code> <code class="nx">name</code><code class="o">:</code> <code class="s">'gol-coordination'</code> <code class="p">});</code>
+  <code class="nx">coordWorker</code><code class="p">.</code><code class="nx">postMessage</code><code class="p">({</code> <code class="nx">coord</code><code class="o">:</code> <code class="kr">true</code><code class="p">,</code> <code class="nx">sharedMemory</code> <code class="p">});</code>
+
+  <code class="kr">let</code> <code class="nx">iteration</code> <code class="o">=</code> <code class="mi">0</code><code class="p">;</code>
+  <code class="nx">coordWorker</code><code class="p">.</code><code class="nx">addEventListener</code><code class="p">(</code><code class="s">'message'</code><code class="p">,</code> <code class="p">()</code> <code class="o">=&gt;</code> <code class="p">{</code>
+    <code class="nx">imageData</code><code class="p">.</code><code class="nx">data</code><code class="p">.</code><code class="nx">set</code><code class="p">(</code><code class="nx">sharedImageBuf8</code><code class="p">);</code>
+    <code class="nx">ctx</code><code class="p">.</code><code class="nx">putImageData</code><code class="p">(</code><code class="nx">imageData</code><code class="p">,</code> <code class="mi">0</code><code class="p">,</code> <code class="mi">0</code><code class="p">);</code>
+    <code class="nx">iterationCounter</code><code class="p">.</code><code class="nx">innerHTML</code> <code class="o">=</code> <code class="o">++</code><code class="nx">iteration</code><code class="p">;</code>
+    <code class="nb">window</code><code class="p">.</code><code class="nx">requestAnimationFrame</code><code class="p">(()</code> <code class="o">=&gt;</code> <code class="nx">coordWorker</code><code class="p">.</code><code class="nx">postMessage</code><code class="p">({}));</code>
+  <code class="p">});</code></pre></div>
+
+<p class="author1">We set up some worker threads in a loop. For each one, we give it a unique name for debugging purposes, post it a message telling it what range (i.e., the boundaries <code class="calibre18">minX</code>, <code class="calibre18">minY</code>, <code class="calibre18">maxX</code>, and <code class="calibre18">maxY</code>) of the grid we want it to operate in, and send it the <code class="calibre18">s⁠h⁠a⁠r⁠e⁠d⁠M⁠e⁠mo⁠r⁠y</code>. Then we add a coordination worker, pass it the <code class="calibre18">sharedMemory</code>, and let it know that it’s the coordination worker via a message.</p>
+
+<p class="author1">From the main browser thread, we’re only going to talk to this coordination worker. We’ll set it up so that it loops by posting a message every time it receives one, but only after grabbing the image data from <code class="calibre18">SharedMemory</code>, making the appropriate UI updates, and requesting an animation frame.</p>
+
+<p class="author1">The rest of the code runs in the other threads. Add the contents of <a data-type="xref" href="#ex_ch5_gol_thread_4" class="calibre6">Example 5-15</a>.</p>
+<div id="ex_ch5_gol_thread_4" data-type="example" class="calibre26">
+<h5 class="calibre27"><span class="keep-together">Example 5-15. </span><em class="calibre7">ch5-game-of-life/thread-gol.js</em> (part 4)</h5>
+
+<pre data-type="programlisting" data-code-language="javascript" class="calibre28"><code class="p">}</code> <code class="kr">else</code> <code class="p">{</code>
+  <code class="kr">let</code> <code class="nx">sharedMemory</code><code class="p">;</code>
+  <code class="kr">let</code> <code class="nx">sync</code><code class="p">;</code>
+  <code class="kr">let</code> <code class="nx">sharedImageBuf</code><code class="p">;</code>
+  <code class="kr">let</code> <code class="nx">cells</code><code class="p">;</code>
+  <code class="kr">let</code> <code class="nx">nextCells</code><code class="p">;</code>
+
+  <code class="nx">self</code><code class="p">.</code><code class="nx">addEventListener</code><code class="p">(</code><code class="s">'message'</code><code class="p">,</code> <code class="nx">initListener</code><code class="p">);</code>
+
+  <code class="kr">function</code> <code class="nx">initListener</code><code class="p">(</code><code class="nx">msg</code><code class="p">)</code> <code class="p">{</code>
+    <code class="kr">const</code> <code class="nx">opts</code> <code class="o">=</code> <code class="nx">msg</code><code class="p">.</code><code class="nx">data</code><code class="p">;</code>
+    <code class="nx">sharedMemory</code> <code class="o">=</code> <code class="nx">opts</code><code class="p">.</code><code class="nx">sharedMemory</code><code class="p">;</code>
+    <code class="nx">sync</code> <code class="o">=</code> <code class="kr">new</code> <code class="nx">Int32Array</code><code class="p">(</code><code class="nx">sharedMemory</code><code class="p">,</code> <code class="nx">syncOffset</code><code class="p">);</code>
+    <code class="nx">self</code><code class="p">.</code><code class="nx">removeEventListener</code><code class="p">(</code><code class="s">'message'</code><code class="p">,</code> <code class="nx">initListener</code><code class="p">);</code>
+    <code class="kr">if</code> <code class="p">(</code><code class="nx">opts</code><code class="p">.</code><code class="nx">coord</code><code class="p">)</code> <code class="p">{</code>
+      <code class="nx">self</code><code class="p">.</code><code class="nx">addEventListener</code><code class="p">(</code><code class="s">'message'</code><code class="p">,</code> <code class="nx">runCoord</code><code class="p">);</code>
+      <code class="nx">cells</code> <code class="o">=</code> <code class="kr">new</code> <code class="nx">Uint8Array</code><code class="p">(</code><code class="nx">sharedMemory</code><code class="p">);</code>
+      <code class="nx">nextCells</code> <code class="o">=</code> <code class="kr">new</code> <code class="nx">Uint8Array</code><code class="p">(</code><code class="nx">sharedMemory</code><code class="p">,</code> <code class="nx">SIZE</code> <code class="o">*</code> <code class="nx">SIZE</code><code class="p">);</code>
+      <code class="nx">sharedImageBuf</code> <code class="o">=</code> <code class="kr">new</code> <code class="nx">Uint32Array</code><code class="p">(</code><code class="nx">sharedMemory</code><code class="p">,</code> <code class="nx">imageOffset</code><code class="p">);</code>
+      <code class="nx">runCoord</code><code class="p">();</code>
+    <code class="p">}</code> <code class="kr">else</code> <code class="p">{</code>
+      <code class="nx">runWorker</code><code class="p">(</code><code class="nx">opts</code><code class="p">);</code>
+    <code class="p">}</code>
+  <code class="p">}</code></pre></div>
+
+<p class="author1">We’re on the other side of that <code class="calibre18">isMainThread</code> condition now, so we know we’re in a worker thread or the coordination thread. Here, we declare some variables, and then add an initial listener to the <code class="calibre18">message</code> event. Regardless of whether this is a coordination thread or a worker thread, we’ll need the <code class="calibre18">sharedMemory</code> and <code class="calibre18">sync</code> variables populated, so we assign those in the listener. Then we remove the initialization listener, since we won’t need it anymore. The worker threads won’t rely on message passing at all, and the coordination thread will have a different listener, as we’ll see in a moment.</p>
+
+<p class="author1">If we’ve initialized a coordination thread we’ll add a new <code class="calibre18">message</code> listener; a <code class="calibre18">runCoord</code> function that we’ll define later. Then we’ll get references to <code class="calibre18">cells</code> and <code class="calibre18">nextCells</code> since we’ll need to keep track on the coordination thread separate from what’s going on in the <code class="calibre18">Grid</code> instances in the worker threads. Since we’re generating the image 
+<span class="keep-together">on the</span> coordination thread, we’ll need that too. Then we run the first iteration of 
+<span class="keep-together"><code class="calibre18">runCoord</code></span>. If we’ve initialized a worker thread, we simply go ahead and pass the options (containing the range to operate) to <code class="calibre18">runWorker()</code>.</p>
+
+<p class="author1">Let’s go ahead and define <code class="calibre18">runWorker()</code> right now. Add the contents of <a data-type="xref" href="#ex_ch5_gol_thread_5" class="calibre6">Example 5-16</a>.</p>
+<div id="ex_ch5_gol_thread_5" data-type="example" class="calibre26">
+<h5 class="calibre27"><span class="keep-together">Example 5-16. </span><em class="calibre7">ch5-game-of-life/thread-gol.js</em> (part 5)</h5>
+
+<pre data-type="programlisting" data-code-language="javascript" class="calibre28">  <code class="kr">function</code> <code class="nx">runWorker</code><code class="p">({</code> <code class="nx">range</code><code class="p">,</code> <code class="nx">i</code> <code class="p">})</code> <code class="p">{</code>
+    <code class="kr">const</code> <code class="nx">grid</code> <code class="o">=</code> <code class="kr">new</code> <code class="nx">Grid</code><code class="p">(</code><code class="nx">SIZE</code><code class="p">,</code> <code class="nx">sharedMemory</code><code class="p">);</code>
+    <code class="kr">while</code> <code class="p">(</code><code class="kr">true</code><code class="p">)</code> <code class="p">{</code>
+      <code class="nx">Atomics</code><code class="p">.</code><code class="nx">wait</code><code class="p">(</code><code class="nx">sync</code><code class="p">,</code> <code class="nx">i</code><code class="p">,</code> <code class="mi">0</code><code class="p">);</code>
+      <code class="nx">grid</code><code class="p">.</code><code class="nx">iterate</code><code class="p">(...</code><code class="nx">range</code><code class="p">);</code>
+      <code class="nx">Atomics</code><code class="p">.</code><code class="nx">store</code><code class="p">(</code><code class="nx">sync</code><code class="p">,</code> <code class="nx">i</code><code class="p">,</code> <code class="mi">0</code><code class="p">);</code>
+      <code class="nx">Atomics</code><code class="p">.</code><code class="nx">notify</code><code class="p">(</code><code class="nx">sync</code><code class="p">,</code> <code class="nx">i</code><code class="p">);</code>
+    <code class="p">}</code>
+  <code class="p">}</code></pre></div>
+
+<p class="author1">Worker threads are the only ones that need an instance of the <code class="calibre18">Grid</code> class, so first we instantiate it, passing in the <code class="calibre18">sharedMemory</code> as the backing buffer. This works because we decided that the first part of the <code class="calibre18">sharedMemory</code> would be the <code class="calibre18">cells</code> and <code class="calibre18">nextCells</code>, as it would be in the single-threaded example.</p>
+
+<p class="author1">Then we start an infinite loop. The loop performs the following operations:</p>
+<ol class="calibre35">
+<li class="calibre36">
+<p class="author1">It performs an <code class="calibre18">Atomics.wait()</code> on the <code class="calibre18">i</code>th element of the <code class="calibre18">sync</code> array. In the coordination thread, we’ll do the appropriate <code class="calibre18">Atomics.notify()</code> to allow this to proceed. We’re waiting for the coordination thread here because otherwise we may start changing data and swapping references to <code class="calibre18">cells</code> and <code class="calibre18">nextCells</code> before other threads are ready and data has made its way to the main browser thread.</p>
+
+<p class="author1">Then it performs the iteration on the <code class="calibre18">Grid</code> instance. Remember, we’re only operating on the range that the coordination thread said to operate on via the <code class="calibre18">range</code> property.</p>
+</li>
+<li class="calibre36">
+<p class="author1">Once that’s done, it notifies the main thread of having completed this task. This is done by setting the <code class="calibre18">i</code>th element of the <code class="calibre18">sync</code> array to <code class="calibre18">1</code> with <code class="calibre18">Atomics.store()</code>, and then waking the waiting thread via <code class="calibre18">Atomics.notify()</code>. We’re using the transition away from the <code class="calibre18">0</code> state as an indicator that we should do some work, and a transition back to the <code class="calibre18">0</code> state to notify that we’ve finished the work.</p>
+</li>
+
+</ol>
+
+<p class="author1">We’re using <code class="calibre18">Atomics.wait()</code> to stop the coordination thread from executing while the worker threads are modifying data, and then stop the worker threads with 
+<span class="keep-together"><code class="calibre18">Atomics.wait()</code></span> while the coordination thread does its work. On either side, we use 
+<span class="keep-together"><code class="calibre18">Atomics.notify()</code></span> to wake the other thread and immediately go back into a waiting state, waiting for the other thread to notify back. Because we use atomic operations to both modify data and control when it is modified, we know that all the data accesses are <em class="calibre7">sequentially consistent</em>. In the interleaving program flow across threads, a deadlock cannot occur, since we’re always flipping execution back and forth from the coordination thread to the worker threads. The worker threads never execute on the same parts of memory as each other, so we don’t have to worry about this concept from the perspective of solely the worker threads.</p>
+
+<p class="author1">Worker threads can just run infinitely. We don’t have to be worried about that infinite loop because it will only proceed if <code class="calibre18">Atomics.wait()</code> returns, which requires that another thread calls <code class="calibre18">Atomics.notify()</code> for that same array element.</p>
+
+<p class="author1">Let’s wrap up the code here with the <code class="calibre18">runCoord()</code> function, which is triggered via a message from the main browser thread after the initialization message. Add the contents of <a data-type="xref" href="#ex_ch5_gol_thread_6" class="calibre6">Example 5-17</a>.</p>
+<div id="ex_ch5_gol_thread_6" data-type="example" class="calibre26">
+<h5 class="calibre27"><span class="keep-together">Example 5-17. </span><em class="calibre7">ch5-game-of-life/thread-gol.js</em> (part 6)</h5>
+
+<pre data-type="programlisting" data-code-language="javascript" class="calibre28">  <code class="kr">function</code> <code class="nx">runCoord</code><code class="p">()</code> <code class="p">{</code>
+    <code class="kr">for</code> <code class="p">(</code><code class="kr">let</code> <code class="nx">i</code> <code class="o">=</code> <code class="mi">0</code><code class="p">;</code> <code class="nx">i</code> <code class="o">&lt;</code> <code class="nx">THREADS</code><code class="p">;</code> <code class="nx">i</code><code class="o">++</code><code class="p">)</code> <code class="p">{</code>
+      <code class="nx">Atomics</code><code class="p">.</code><code class="nx">store</code><code class="p">(</code><code class="nx">sync</code><code class="p">,</code> <code class="nx">i</code><code class="p">,</code> <code class="mi">1</code><code class="p">);</code>
+      <code class="nx">Atomics</code><code class="p">.</code><code class="nx">notify</code><code class="p">(</code><code class="nx">sync</code><code class="p">,</code> <code class="nx">i</code><code class="p">);</code>
+    <code class="p">}</code>
+    <code class="kr">for</code> <code class="p">(</code><code class="kr">let</code> <code class="nx">i</code> <code class="o">=</code> <code class="mi">0</code><code class="p">;</code> <code class="nx">i</code> <code class="o">&lt;</code> <code class="nx">THREADS</code><code class="p">;</code> <code class="nx">i</code><code class="o">++</code><code class="p">)</code> <code class="p">{</code>
+      <code class="nx">Atomics</code><code class="p">.</code><code class="nx">wait</code><code class="p">(</code><code class="nx">sync</code><code class="p">,</code> <code class="nx">i</code><code class="p">,</code> <code class="mi">1</code><code class="p">);</code>
+    <code class="p">}</code>
+    <code class="kr">const</code> <code class="nx">oldCells</code> <code class="o">=</code> <code class="nx">cells</code><code class="p">;</code>
+    <code class="nx">cells</code> <code class="o">=</code> <code class="nx">nextCells</code><code class="p">;</code>
+    <code class="nx">nextCells</code> <code class="o">=</code> <code class="nx">oldCells</code><code class="p">;</code>
+    <code class="kr">for</code> <code class="p">(</code><code class="kr">let</code> <code class="nx">x</code> <code class="o">=</code> <code class="mi">0</code><code class="p">;</code> <code class="nx">x</code> <code class="o">&lt;</code> <code class="nx">SIZE</code><code class="p">;</code> <code class="nx">x</code><code class="o">++</code><code class="p">)</code> <code class="p">{</code>
+      <code class="kr">for</code> <code class="p">(</code><code class="kr">let</code> <code class="nx">y</code> <code class="o">=</code> <code class="mi">0</code><code class="p">;</code> <code class="nx">y</code> <code class="o">&lt;</code> <code class="nx">SIZE</code><code class="p">;</code> <code class="nx">y</code><code class="o">++</code><code class="p">)</code> <code class="p">{</code>
+        <code class="nx">sharedImageBuf</code><code class="p">[</code><code class="nx">SIZE</code> <code class="o">*</code> <code class="nx">x</code> <code class="o">+</code> <code class="nx">y</code><code class="p">]</code> <code class="o">=</code> <code class="nx">cells</code><code class="p">[</code><code class="nx">SIZE</code> <code class="o">*</code> <code class="nx">x</code> <code class="o">+</code> <code class="nx">y</code><code class="p">]</code> <code class="o">?</code> <code class="nx">BLACK</code> <code class="o">:</code> <code class="nx">WHITE</code><code class="p">;</code>
+      <code class="p">}</code>
+    <code class="p">}</code>
+    <code class="nx">self</code><code class="p">.</code><code class="nx">postMessage</code><code class="p">({});</code>
+  <code class="p">}</code>
+<code class="p">}</code></pre></div>
+
+<p class="author1">The first thing that happens here is the coordination thread notifying the worker threads via the <code class="calibre18">i</code>th element of the <code class="calibre18">sync</code> array for each worker thread, waking them up to perform an iteration. When they’re done, they’ll notify via the same element of the <code class="calibre18">sync</code> array, so we’ll wait on those. The fact that each of these calls to <code class="calibre18">Atomics.wait()</code> blocks the thread execution is exactly why we need this coordination thread in the first place, rather than just doing it all on the main browser thread.</p>
+
+<p class="author1">Next, we swap the <code class="calibre18">cells</code> and <code class="calibre18">nextCells</code> references. The workers have already done this for themselves inside the <code class="calibre18">iterate()</code> method, so we need to follow suit here. Then we’re ready to iterate over all the <code class="calibre18">cells</code> and convert their values to pixels in the image data. Finally, we post a message back to the main browser thread, indicating that the data is ready to be displayed in the UI. The coordination thread has nothing to do until the next time it receives a message, at which point <code class="calibre18">runCoord</code> is run again. This method completes the conceptual loop started in <a data-type="xref" href="#ex_ch5_gol_thread_3" class="calibre6">Example 5-14</a>.</p>
+
+<p class="author1">Now we’re done! To view the HTML file, remember that in order to use <code class="calibre18">SharedArrayBuffer</code>, we need a server running with particular headers set. To do this, run the following in your <em class="calibre7">ch5-game-of-life</em> directory:</p>
+
+<pre data-type="programlisting" data-code-language="shell" class="calibre38"><code class="nv">$ </code>npx MultithreadedJSBook/serve .</pre>
+
+<p class="author1">Then, append <em class="calibre7">/thread-gol.html</em> to the URL provided to see our multithreaded implementation of Conway’s Game of Life running. Because we haven’t changed any UI code, it should look exactly the same as the single-threaded example in <a data-type="xref" href="#fig_gol1" class="calibre6">Figure 5-1</a>. The only difference you should see is in performance. The transitions between iterations likely appear to be much smoother and quicker. You’re not imagining things! We’ve moved the work of calculating cell states and plotting pixels into separate threads, so now the main thread is free to animate more smoothly, and iterations happen faster because we’re using more CPU cores in parallel to do the work.</p>
+
+<p class="author1">Most importantly, we’re avoiding most of the overhead of passing messages between threads for coordination by just using <code class="calibre18">Atomics.notify()</code> to let other threads know that they can continue <a data-type="indexterm" data-primary="Conway's Game of Life" data-secondary="multithreaded" data-startref="conmulti" id="idm45995915481384" class="calibre6"/>after having paused themselves with <code class="calibre18">Atomics.wait()</code>.</p>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Atomics and Events" class="calibre4"><div class="preface" id="ch_adv_shared_mem_sec_events">
+<h1 class="calibre13">Atomics and Events</h1>
+
+<p class="author1">At the heart of JavaScript lies the <a data-type="indexterm" data-primary="Atomics object" data-secondary="events and" id="atomevent" class="calibre6"/><a data-type="indexterm" data-primary="events" data-secondary="Atomics object" id="evenAtom" class="calibre6"/>event loop, which allows the language to create new call stacks and handle events. It’s always been there and we JavaScript engineers have always depended on it. This is true for both JavaScript that runs in the browser, where you might have jQuery that listens for a click event in the DOM, or JavaScript that runs on the server, where you might have the Fastify server that waits for an incoming TCP connection to be established.</p>
+
+<p class="author1">Enter the new kid on the block: <code class="calibre18">Atomics.wait()</code> and shared memory. This pattern now allows applications to halt the execution of JavaScript, thereby causing the event loop to completely stop working. Because of this you can’t simply start throwing calls to make use of multithreading into your application and expect it to work without problem. Instead, certain restrictions must be followed to make the application behave nicely.</p>
+
+<p class="author1">One such restriction is hinted at when it comes to browsers: the main thread of the application should not call <code class="calibre18">Atomics.wait()</code>. And, while it can be done in a simple Node.js script, you should really avoid doing so in a larger application. For example, if your main Node.js thread is handling incoming HTTP requests, or has a handler for receiving operating system signals, what’s going to happen when the event loop comes to a halt when a wait operation is started? <a data-type="xref" href="#ex_stutter" class="calibre6">Example 5-18</a> is an example of such a program.</p>
+<div id="ex_stutter" data-type="example" class="calibre26">
+<h5 class="calibre27"><span class="keep-together">Example 5-18. </span><em class="calibre7">ch5-node-block/main.js</em></h5>
+
+<pre data-type="programlisting" data-code-language="javascript" class="calibre28"><code class="calibre18">#!/usr/bin/env node
+</code><code class="calibre18">
+</code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">http</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="nx">require</code><code class="p">(</code><code class="s">'http'</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+
+</code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">view</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="kr">new</code><code class="calibre18"> </code><code class="nx">Int32Array</code><code class="p">(</code><code class="kr">new</code><code class="calibre18"> </code><code class="nx">SharedArrayBuffer</code><code class="p">(</code><code class="mi">4</code><code class="p">)</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+</code><code class="nx">setInterval</code><code class="p">(</code><code class="p">(</code><code class="p">)</code><code class="calibre18"> </code><code class="o">=&gt;</code><code class="calibre18"> </code><code class="nx">Atomics</code><code class="p">.</code><code class="nx">wait</code><code class="p">(</code><code class="nx">view</code><code class="p">,</code><code class="calibre18"> </code><code class="mi">0</code><code class="p">,</code><code class="calibre18"> </code><code class="mi">0</code><code class="p">,</code><code class="calibre18"> </code><code class="mi">1900</code><code class="p">)</code><code class="p">,</code><code class="calibre18"> </code><code class="mi">2000</code><code class="p">)</code><code class="p">;</code><code class="calibre18"> </code><a class="calibre6" id="co_advanced_shared_memory_CO8-1" href="#callout_advanced_shared_memory_CO8-1"><img src="Images/1.png" alt="1" class="calibre32"/></a><code class="calibre18">
+
+</code><code class="kr">const</code><code class="calibre18"> </code><code class="nx">server</code><code class="calibre18"> </code><code class="o">=</code><code class="calibre18"> </code><code class="nx">http</code><code class="p">.</code><code class="nx">createServer</code><code class="p">(</code><code class="p">(</code><code class="nx">req</code><code class="p">,</code><code class="calibre18"> </code><code class="nx">res</code><code class="p">)</code><code class="calibre18"> </code><code class="o">=&gt;</code><code class="calibre18"> </code><code class="p">{</code><code class="calibre18">
+  </code><code class="nx">res</code><code class="p">.</code><code class="nx">end</code><code class="p">(</code><code class="s">'Hello World'</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+</code><code class="p">}</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+
+</code><code class="nx">server</code><code class="p">.</code><code class="nx">listen</code><code class="p">(</code><code class="mi">1337</code><code class="p">,</code><code class="calibre18"> </code><code class="p">(</code><code class="nx">err</code><code class="p">,</code><code class="calibre18"> </code><code class="nx">addr</code><code class="p">)</code><code class="calibre18"> </code><code class="o">=&gt;</code><code class="calibre18"> </code><code class="p">{</code><code class="calibre18">
+  </code><code class="kr">if</code><code class="calibre18"> </code><code class="p">(</code><code class="nx">err</code><code class="p">)</code><code class="calibre18"> </code><code class="kr">throw</code><code class="calibre18"> </code><code class="nx">err</code><code class="p">;</code><code class="calibre18">
+  </code><code class="nx">console</code><code class="p">.</code><code class="nx">log</code><code class="p">(</code><code class="s">'http://localhost:1337/'</code><code class="p">)</code><code class="p">;</code><code class="calibre18">
+</code><code class="p">}</code><code class="p">)</code><code class="p">;</code></pre>
+<dl class="calibre14">
+<dt class="calibre15"><a class="calibre6" id="callout_advanced_shared_memory_CO8-1" href="#co_advanced_shared_memory_CO8-1"><img src="Images/1.png" alt="1" class="calibre32"/></a></dt>
+<dd class="calibre33"><p class="calibre34">Every 2 seconds the app pauses for 1.9 seconds</p></dd>
+</dl></div>
+
+<p class="author1">If you feel so inclined, create a directory for this file and execute the server by running the following command:</p>
+
+<pre data-type="programlisting" class="calibre38">$ node main.js</pre>
+
+<p class="author1">Once it’s running, execute the following command in your terminal several times, waiting a random amount of time between each invocation:</p>
+
+<pre data-type="programlisting" class="calibre38">$ time curl http://localhost:1337</pre>
+
+<p class="author1">What this application does is first create an HTTP server and listen for requests. Then, every two seconds, a call to <code class="calibre18">Atomics.wait()</code> is made. It’s configured in such a way that the application freezes for 1.9 seconds to exaggerate the effect of long pauses. The <code class="calibre18">curl</code> command you’re running is prefixed with the <code class="calibre18">time</code> command, which displays the amount of time the following command takes to run. Your output will then randomly vary between 0 and 1.9 seconds, which is a huge amount of time for a web request to pause for. Even as you reduce that timeout value closer and closer to 0, you’ll still end up with micro stutters that globally affect all incoming requests. If web browsers allowed <code class="calibre18">Atomics.wait()</code> calls in the main thread, you would definitely be encountering micro stutters from this in websites you visit today.</p>
+
+<p class="author1">Another question still remains: what sort of restrictions should come into play with each of the additional threads that an application spawns, considering that each thread has their own event loop?</p>
+
+<p class="author1">Our recommendation is to designate ahead of time what the main purpose of each spawned thread is. Each thread either becomes a CPU-heavy thread that makes heavy use of <code class="calibre18">Atomics</code> calls or an event-heavy thread that makes minimal <code class="calibre18">Atomics</code> calls. With such an approach, you might have a thread that is a worker in the truest sense, constantly performing complex calculations and writing the results to a shared array buffer. You would also have your main thread, which is then mostly communicating via message passing and doing event loop based work. It then might make sense to have simple intermediary threads that call <code class="calibre18">Atomics.wait()</code> as they wait for another thread to finish doing work, then call <code class="calibre18">postMessage()</code> to send the resulting <a data-type="indexterm" data-primary="Atomics object" data-secondary="events and" data-startref="atomevent" id="idm45995915280888" class="calibre6"/><a data-type="indexterm" data-primary="events" data-secondary="Atomics object" data-startref="evenAtom" id="idm45995915279608" class="calibre6"/>data back to the main thread to handle the result at a much higher level.</p>
+
+<p class="author1">To summarize the concepts in this section:</p>
+
+<ul class="printings">
+<li class="calibre10">
+<p class="author1">Don’t use <code class="calibre18">Atomics.wait()</code> in the main thread.</p>
+</li>
+<li class="calibre10">
+<p class="author1">Designate which threads are CPU-heavy and use lots of <code class="calibre18">Atomics</code> calls and which threads are evented.</p>
+</li>
+<li class="calibre10">
+<p class="author1">Consider using simple “bridge” threads to wait and post messages where 
+<span class="keep-together">appropriate</span>.</p>
+</li>
+</ul>
+
+<p class="author1">These are some very high-level guidelines that you can follow when designing your application. But sometimes some more concrete patterns really help drive the point home. <a data-type="xref" href="ch06.xhtml#ch_patterns" class="calibre6">Chapter 6</a> contains some such patterns you might find beneficial.</p>
+</div></section>
+
+
+
+
+
+
+
+<div data-type="footnotes" class="calibre41"><p data-type="footnote" id="idm45995918555608" class="calibre42"><sup class="calibre43"><a href="ch05.xhtml#idm45995918555608-marker" class="calibre40">1</a></sup> <code class="calibre18">Atomics.notify()</code> was originally going to be called <code class="calibre18">Atomics.wake()</code> like its Linux futex equivalent but was later renamed to prevent visual confusion between “wake” and “wait” methods.</p></div></div></section></div></body></html>

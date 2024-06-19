@@ -1,0 +1,347 @@
+<html><head></head><body><div id="sbo-rt-content"><section data-type="chapter" epub:type="chapter" data-pdf-bookmark="Chapter 12. Connecting to a Replica Set from Your&#10;  Application"><div class="chapter" id="chapter-repl-app"><h1><span class="label">Chapter 12. </span>Connecting to a Replica Set <span class="keep-together">from Your
+  Application</span></h1><p>This chapter covers how applications interact with replica sets,
+  including:</p><ul><li><p>How connections and failovers work</p></li><li><p>Waiting for replication on writes</p></li><li><p>Routing reads to the correct member</p></li></ul><section data-type="sect1" data-pdf-bookmark="Client−to−Replica Set Connection Behavior"><div class="sect1" id="idm45882354008648"><h1>Client−to−Replica Set Connection Behavior</h1><p>MongoDB<a data-type="indexterm" data-primary="replica sets, connecting to" data-secondary="client-to-replica set behavior" id="idm45882354007528"/><a data-type="indexterm" data-primary="client libraries, purpose of" id="idm45882354006312"/><a data-type="indexterm" data-primary="drivers, defined" id="idm45882354005464"/> client libraries (“drivers” in MongoDB parlance) are
+    designed to manage communication with MongoDB servers, regardless of
+    whether the server is a standalone MongoDB instance or a replica set. For
+    replica sets, by default, drivers will connect to the primary and route
+    all traffic to it. Your application can perform reads and writes as though
+    it were talking to a standalone server while your replica set quietly
+    keeps hot standbys ready in the background.</p><p>Connections to a replica set are similar to connections to a single
+    server. Use the <span class="keep-together"><code>MongoClient</code></span> class<a data-type="indexterm" data-primary="MongoClient class" id="idm45882354002792"/> (or equivalent) in your driver and provide a
+    <span class="firstterm">seed list</span><a data-type="indexterm" data-primary="seed lists" id="idm45882354001208"/> for the driver to connect to. A seed list is simply a list
+    of server addresses. <em>Seeds</em> are members of the replica
+    set your application will read from and write data to. You do not need to
+    list all members in the seed list (although you can). When the driver
+    connects to the seeds, it will discover the other members from them. A
+    connection string usually looks something like this:</p><pre data-type="programlisting" data-code-language="javascript"><code class="s2">"mongodb://server-1:27017,server-2:27017,server-3:27017"</code></pre><p>See your driver’s documentation for details.</p><p>To provide further resilience, you should also use the <a href="https://oreil.ly/Uq4za">DNS
+    Seedlist Connection format</a> to specify how your applications
+    connect to your replica set. The advantage to using DNS is that servers
+    hosting your MongoDB replica set members can be changed in rotation
+    without needing to reconfigure the clients (specifically, their connection
+    strings).</p><p>All MongoDB drivers adhere<a data-type="indexterm" data-primary="server discovery and monitoring (SDAM)&#10;        specification" id="idm45882353998408"/> to the <a href="https://oreil.ly/ZsS8p">server
+    discovery and monitoring (SDAM) spec</a>. They persistently monitor
+    the topology of your replica set to detect any changes in your
+    application’s ability to reach all members of the set. In addition, the
+    drivers monitor the set to maintain information on which member is the
+    primary.</p><p>The<a data-type="indexterm" data-primary="replica sets, connecting to" data-secondary="purpose of replica sets" id="idm45882353996392"/> purpose of replica sets is to make your data highly
+    available in the face of network partitions or servers going down. In
+    ordinary circumstances, replica sets respond gracefully to such problems
+    by electing a new primary so that applications can continue to read and
+    write data. If a primary goes down, the driver will automatically find the
+    new primary (once one is elected) and will route requests to it as soon as
+    possible. However, while there is no reachable primary, your application
+    will be unable to perform writes.</p><p>There may be no primary available for a brief time (during an
+    election) or for an extended period of time (if no reachable member can
+    become primary). By default, the driver will not service any requests—read
+    or write—during this period. If necessary to your application, you can
+    configure the driver to use secondaries for read requests.</p><p>A common desire is to have the driver hide the entire election
+    process (the primary going away and a new primary being elected) from the
+    user. However, no driver handles failover this way, for a few reasons.
+    First, a driver can only hide a lack of primary for so long. Second, a
+    driver often finds out that the primary went down because an operation
+    failed, which means that the driver doesn’t know whether or not the
+    primary processed the operation before going down. This is a fundamental
+    distributed systems problem that is impossible to avoid, so we need a
+    strategy for dealing with it when it emerges. Should we retry the
+    operation on the new primary, if one is elected quickly? Assume it got
+    through on the old primary? Check and see if the new primary has the
+    operation?</p><p>The<a data-type="indexterm" data-primary="replica sets, connecting to" data-secondary="retry strategy" id="idm45882353954936"/> correct strategy, it turns out, is to retry at most one
+    time. Huh? To explain, let’s consider our options. These boil down to the
+    following: don’t retry, give up after retrying some fixed number of times,
+    or retry at most once. We also need to consider the type of error that
+    could be the source of our problem. There are three types of errors we
+    might see in attempting to write to a replica set: a transient network
+    error, a persistent outage (either network or server), or an error caused
+    by a command the server rejects as incorrect (e.g., not authorized). For
+    each type of error, let’s consider our retry options.</p><p>For the sake of this discussion, let’s look at the example of a
+    write to simply increment a counter. If our application attempts to
+    increment our counter but gets no response from the server, we don’t know
+    whether the server received the message and performed the update. So, if
+    we follow a strategy of not retrying this write, for a transient network
+    error, we might undercount. For a persistent outage or a command error not
+    retrying is the correct strategy, because no amount of retrying the write
+    operation will have the desired effect.</p><p>If we follow a strategy of retrying some fixed number of times, for
+    transient network errors, we might overcount (in the case where our first
+    attempt succeeded). For a persistent outage or command error, retrying
+    multiple times will simply waste cycles.</p><p>Let’s look now at the strategy of retrying just once. For a
+    transient network error, we might overcount. For a persistent outage or
+    command error, this is the correct strategy. However, what if we could
+    ensure that our operations are idempotent? Idempotent operations are those
+    that have the same outcome whether we do them once or multiple times. With
+    idempotent operations, retrying network errors once has the best chance of
+    correctly dealing with all three types of errors.</p><p>As of MongoDB 3.6, the server and all MongoDB drivers support a
+    retryable writes option<a data-type="indexterm" data-primary="retryable writes option" id="idm45882353954312"/>. See your driver’s documentation for details on how to use
+    this option. With retryable writes, the driver will automatically follow
+    the retry-at-most-once strategy<a data-type="indexterm" data-primary="retry-at-most-once strategy" id="idm45882353953160"/>. Command errors will be returned to the application for
+    client-side handling. Network errors will be retried once after an
+    appropriate delay that should accommodate a primary election under
+    ordinary circumstances. With retryable writes turned on, the server
+    maintains a unique identifier for each write operation and can therefore
+    determine when the driver is attempting to retry a command that already
+    succeeded. Rather than apply the write again, it will simply return a
+    message indicating the write succeeded and thereby overcome the problem
+    caused by the transient network issue.</p></div></section><section data-type="sect1" data-pdf-bookmark="Waiting for Replication on Writes"><div class="sect1" id="idm45882354008344"><h1>Waiting for Replication on Writes</h1><p>Depending<a data-type="indexterm" data-primary="replication" data-secondary="waiting for on writes" id="idm45882353950520"/><a data-type="indexterm" data-primary="writes" data-secondary="waiting for replication on" id="idm45882353949384"/><a data-type="indexterm" data-primary="replica sets, connecting to" data-secondary="waiting for replication on writes" id="idm45882353948264"/> on the needs of your application, you might want to require
+    that all writes are replicated to a majority of the replica set before
+    they are acknowledged by the server. In the rare circumstance where the
+    primary of a set goes down and the newly elected primary (formerly a
+    secondary) did not replicate the very last writes to the former primary,
+    those writes will be rolled back when the former primary comes back up.
+    They can be recovered, but it requires manual intervention. For many
+    applications, having a small number of writes rolled back is not a
+    problem. In a blog application, for example, there is little real danger
+    in rolling back one or two comments from one reader.</p><p>However, for<a data-type="indexterm" data-primary="rollbacks" data-secondary="avoiding" id="idm45882353946008"/> other applications, rollback of any writes should be
+    avoided. Suppose your application sends a write to the primary. It
+    receives confirmation that the write was written, but the primary crashes
+    before any secondaries have had a chance to replicate that write. Your
+    application thinks that it’ll be able to access that write, but the
+    current members of the replica set don’t have a copy of it.</p><p>At some point, a secondary may be elected primary and start taking
+    new writes. When the former primary comes back up, it will discover that
+    it has writes that the current primary does not. To correct this, it will
+    undo any writes that do not match the sequence of operations on the
+    current primary. These operations are not lost, but they are written to
+    special <span class="firstterm">rollback</span> files that have to be manually
+    applied to the current primary. MongoDB cannot automatically apply these
+    writes, since they may conflict with other writes that have happened since
+    the crash. Thus, the writes essentially disappear until an admin gets a
+    chance to apply the rollback files to the current primary (see <a data-type="xref" href="ch11.xhtml#chapter-repl-comp">Chapter 11</a> for more details on rollbacks).</p><p>The requirement of writing to a majority prevents this situation: if
+    the application gets a confirmation that a write succeeded, then the new
+    primary will have to have a copy of the write to be elected (a member must
+    be up to date to be elected primary). If the application does not receive
+    acknowledgment from the server or receives an error, then it will know to
+    try again, because the write was not propagated to a majority of the set
+    before the primary crashed.</p><p>Thus, to ensure that writes will be persisted no matter what happens
+    to the set, we must ensure that each write propagates to a majority of the
+    members of the set. We can achieve this using <code>writeConcern</code>.<a data-type="indexterm" data-primary="write concern" data-secondary="assuring propagation to majority of members" id="idm45882353923736"/></p><p>As of MongoDB 2.6, <code>writeConcern</code> is integrated with write
+    operations. For example, in JavaScript, we can use <code>writeConcern</code> as
+    follows:</p><pre data-type="programlisting" data-code-language="javascript"><code class="k">try</code> <code class="p">{</code>
+   <code class="nx">db</code><code class="p">.</code><code class="nx">products</code><code class="p">.</code><code class="nx">insertOne</code><code class="p">(</code>
+       <code class="p">{</code> <code class="s2">"_id"</code><code class="o">:</code> <code class="mi">10</code><code class="p">,</code> <code class="s2">"item"</code><code class="o">:</code> <code class="s2">"envelopes"</code><code class="p">,</code> <code class="s2">"qty"</code><code class="o">:</code> <code class="mi">100</code><code class="p">,</code> <code class="nx">type</code><code class="o">:</code> <code class="s2">"Self-Sealing"</code> <code class="p">},</code>
+       <code class="p">{</code> <code class="nx">writeConcern</code><code class="o">:</code> <code class="p">{</code> <code class="s2">"w"</code> <code class="o">:</code> <code class="s2">"majority"</code><code class="p">,</code> <code class="s2">"wtimeout"</code> <code class="o">:</code> <code class="mi">100</code> <code class="p">}</code> <code class="p">}</code>
+   <code class="p">);</code>
+<code class="p">}</code> <code class="k">catch</code> <code class="p">(</code><code class="nx">e</code><code class="p">)</code> <code class="p">{</code>
+   <code class="nx">print</code> <code class="p">(</code><code class="nx">e</code><code class="p">);</code>
+<code class="p">}</code></pre><p>The specific syntax in your driver will vary depending on the
+    programming language, but the semantics remain the same. In the example
+    here, we specify a write concern of <code>"majority"</code>. Upon success, the server will
+    respond with a message such as the <span class="keep-together">following</span>:</p><pre data-type="programlisting" data-code-language="javascript"><code class="p">{</code> <code class="s2">"acknowledged"</code> <code class="o">:</code> <code class="kc">true</code><code class="p">,</code> <code class="s2">"insertedId"</code> <code class="o">:</code> <code class="mi">10</code> <code class="p">}</code></pre><p>But the server will not respond until this write operation has
+    replicated to a majority of the members of the replica set. Only then will
+    our application receive acknowledgment that this write succeeded. If the
+    write does not succeed within the timeout we’ve specified, the server will
+    respond with an error message:</p><pre data-type="programlisting" data-code-language="javascript"><code class="nx">WriteConcernError</code><code class="p">({</code>
+   <code class="s2">"code"</code> <code class="o">:</code> <code class="mi">64</code><code class="p">,</code>
+   <code class="s2">"errInfo"</code> <code class="o">:</code> <code class="p">{</code>
+      <code class="s2">"wtimeout"</code> <code class="o">:</code> <code class="kc">true</code>
+   <code class="p">},</code>
+   <code class="s2">"errmsg"</code> <code class="o">:</code> <code class="s2">"waiting for replication timed out"</code>
+<code class="p">})</code></pre><p>Write concern majority and the replica set election protocol ensure
+    that in the event of a primary election, only secondaries that are up to
+    date with acknowledged writes can be elected primary. In this way, we
+    guarantee that rollback will not happen. With the timeout option, we also
+    have a tunable setting that enables us to detect and flag any long-running
+    writes at the application layer.</p><section data-type="sect2" data-pdf-bookmark="Other Options for “w”"><div class="sect2" id="idm45882353845704"><h2>Other Options for “w”</h2><p><code>"majority"</code> is not the only
+      <code>writeConcern</code> option. MongoDB also lets you specify an arbitrary number
+      of servers to replicate to by passing <code>"w"</code> a number, as shown here:</p><pre data-type="programlisting" data-code-language="javascript"><code class="nx">db</code><code class="p">.</code><code class="nx">products</code><code class="p">.</code><code class="nx">insertOne</code><code class="p">(</code>
+    <code class="p">{</code> <code class="s2">"_id"</code><code class="o">:</code> <code class="mi">10</code><code class="p">,</code> <code class="s2">"item"</code><code class="o">:</code> <code class="s2">"envelopes"</code><code class="p">,</code> <code class="s2">"qty"</code><code class="o">:</code> <code class="mi">100</code><code class="p">,</code> <code class="nx">type</code><code class="o">:</code> <code class="s2">"Self-Sealing"</code> <code class="p">},</code>
+    <code class="p">{</code> <code class="nx">writeConcern</code><code class="o">:</code> <code class="p">{</code> <code class="s2">"w"</code> <code class="o">:</code> <code class="mi">2</code><code class="p">,</code> <code class="s2">"wtimeout"</code> <code class="o">:</code> <code class="mi">100</code> <code class="p">}</code> <code class="p">}</code>
+<code class="p">);</code></pre><p>This will wait until two members (the primary and one secondary)
+      have the write.</p><p>Note that the <code class="parameter">"w"</code> value
+      includes the primary. If you want the write propagated to
+      <code class="varname"><em><code>n</code></em></code> secondaries, you should
+      set <code>"w"</code> to
+      <code class="varname"><em><code>n</code></em></code>+1 (to include the
+      primary). Setting <code>"<code>w</code>" : 1</code> is the same as not passing
+      the <code>"w"</code> option at all because it just
+      checks that the write was successful on the primary.</p><p>The downside to using a literal number is that you have to change
+      your application if your replica set configuration changes.</p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="Custom Replication Guarantees"><div class="sect1" id="idm45882353951368"><h1>Custom Replication Guarantees</h1><p>Writing<a data-type="indexterm" data-primary="replication" data-secondary="custom guarantees" id="Rcustom12"/><a data-type="indexterm" data-primary="replica sets, connecting to" data-secondary="custom replication guarantees" id="RSCcustom12"/> to a majority of a set is considered “safe.” However, some
+    sets may have more complex requirements: you may want to make sure that a
+    write makes it to at least one server in each data center or a majority of
+    the nonhidden nodes. Replica sets allow you to create custom rules that
+    you can pass<a data-type="indexterm" data-primary="getLastError function" id="idm45882353705800"/> to <code>"getLastError"</code> to
+    guarantee replication to whatever combination of servers you need.</p><section data-type="sect2" data-pdf-bookmark="Guaranteeing One Server per Data Center"><div class="sect2" id="idm45882353704392"><h2>Guaranteeing One Server per Data Center</h2><p>Network issues between data centers are much more common than
+      within data centers, and it is more likely for an entire data center to
+      go dark than an equivalent smattering of servers across multiple data
+      centers. Thus, you might want some data center−specific logic for writes.
+      Guaranteeing a write to every data center before confirming success
+      means that, in the case of a write followed by the data center going
+      offline, every other data center will have at least one local
+      copy.</p><p>To set this up, we first classify the members by data center. We
+      do this by adding a <code>"tags"</code> field to
+      their replica set configuration:</p><pre data-type="programlisting" data-code-language="javascript"><code class="o">&gt;</code> <code class="kd">var</code> <code class="nx">config</code> <code class="o">=</code> <code class="nx">rs</code><code class="p">.</code><code class="nx">config</code><code class="p">()</code>
+<code class="o">&gt;</code> <code class="nx">config</code><code class="p">.</code><code class="nx">members</code><code class="p">[</code><code class="mi">0</code><code class="p">].</code><code class="nx">tags</code> <code class="o">=</code> <code class="p">{</code><code class="s2">"dc"</code> <code class="o">:</code> <code class="s2">"us-east"</code><code class="p">}</code>
+<code class="o">&gt;</code> <code class="nx">config</code><code class="p">.</code><code class="nx">members</code><code class="p">[</code><code class="mi">1</code><code class="p">].</code><code class="nx">tags</code> <code class="o">=</code> <code class="p">{</code><code class="s2">"dc"</code> <code class="o">:</code> <code class="s2">"us-east"</code><code class="p">}</code>
+<code class="o">&gt;</code> <code class="nx">config</code><code class="p">.</code><code class="nx">members</code><code class="p">[</code><code class="mi">2</code><code class="p">].</code><code class="nx">tags</code> <code class="o">=</code> <code class="p">{</code><code class="s2">"dc"</code> <code class="o">:</code> <code class="s2">"us-east"</code><code class="p">}</code>
+<code class="o">&gt;</code> <code class="nx">config</code><code class="p">.</code><code class="nx">members</code><code class="p">[</code><code class="mi">3</code><code class="p">].</code><code class="nx">tags</code> <code class="o">=</code> <code class="p">{</code><code class="s2">"dc"</code> <code class="o">:</code> <code class="s2">"us-east"</code><code class="p">}</code>
+<code class="o">&gt;</code> <code class="nx">config</code><code class="p">.</code><code class="nx">members</code><code class="p">[</code><code class="mi">4</code><code class="p">].</code><code class="nx">tags</code> <code class="o">=</code> <code class="p">{</code><code class="s2">"dc"</code> <code class="o">:</code> <code class="s2">"us-west"</code><code class="p">}</code>
+<code class="o">&gt;</code> <code class="nx">config</code><code class="p">.</code><code class="nx">members</code><code class="p">[</code><code class="mi">5</code><code class="p">].</code><code class="nx">tags</code> <code class="o">=</code> <code class="p">{</code><code class="s2">"dc"</code> <code class="o">:</code> <code class="s2">"us-west"</code><code class="p">}</code>
+<code class="o">&gt;</code> <code class="nx">config</code><code class="p">.</code><code class="nx">members</code><code class="p">[</code><code class="mi">6</code><code class="p">].</code><code class="nx">tags</code> <code class="o">=</code> <code class="p">{</code><code class="s2">"dc"</code> <code class="o">:</code> <code class="s2">"us-west"</code><code class="p">}</code></pre><p>The <code>"tags"</code> field is an object,
+      and each member can have multiple tags. It might be a “high quality”
+      server in the <code>"us-east"</code> data center,
+      for example, in which case we’d want a <code>"tags"</code> field such as <code>{"dc": "us-east", "quality" : "high"}</code>.</p><p>The second step is to add a rule by creating a <code>"getLastErrorModes<a data-type="indexterm" data-primary="getLastErrorModes field" id="idm45882353534456"/>"</code> field in our replica set config. The name
+      <code>"getLastErrorModes"</code> is vestigial in
+      the sense that prior to MongoDB 2.6, applications used a method called
+      <code>"getLastError"</code> to specify write
+      concern. In replica configs, for <code>"getLastErrorModes"</code> each rule is of the form
+      <code>"<em><code>name</code></em>" :
+      {"<em><code>key</code></em>" :
+      <em><code>number</code></em>}}</code>. <code>"<em><code>name</code></em>"</code> is the name
+      for the rule, which should describe what the rule does in a way that
+      clients can understand, as they’ll be using this name when they call
+      <code>getLastError</code>. In this example, we
+      might call this rule <code>"eachDC"</code> or
+      something more abstract such as <code>"user-level
+      safe"</code>.</p><p>The <code>"<em><code>key</code></em>"</code> field is the
+      key field from the tags, so in this example it will be <code>"dc"</code>. The <em><code>number</code></em> is
+      the number of groups that are needed to fulfill this rule. In this case,
+      <em><code>number</code></em> is 2 (because we want at least one
+      server from <code>"us-east"</code> and one from
+      <code>"us-west"</code>).
+      <em><code>number</code></em> always means “at least one server from
+      each of <em><code>number</code></em> groups.”</p><p>We add <code>"getLastErrorModes"</code> to
+      the replica set config as follows and reconfigure to create the
+      rule:</p><pre data-type="programlisting" data-code-language="javascript"><code class="o">&gt;</code> <code class="nx">config</code><code class="p">.</code><code class="nx">settings</code> <code class="o">=</code> <code class="p">{}</code>
+<code class="o">&gt;</code> <code class="nx">config</code><code class="p">.</code><code class="nx">settings</code><code class="p">.</code><code class="nx">getLastErrorModes</code> <code class="o">=</code> <code class="p">[{</code><code class="s2">"eachDC"</code> <code class="o">:</code> <code class="p">{</code><code class="s2">"dc"</code> <code class="o">:</code> <code class="mi">2</code><code class="p">}}]</code>
+<code class="o">&gt;</code> <code class="nx">rs</code><code class="p">.</code><code class="nx">reconfig</code><code class="p">(</code><code class="nx">config</code><code class="p">)</code></pre><p><code>"getLastErrorModes"</code> lives in
+      the <code>"settings"</code> subobject of a replica
+      set config, which contains a few set-level optional settings.</p><p>Now we can use this rule for writes:</p><pre data-type="programlisting" data-code-language="javascript"><code class="nx">db</code><code class="p">.</code><code class="nx">products</code><code class="p">.</code><code class="nx">insertOne</code><code class="p">(</code>
+    <code class="p">{</code> <code class="s2">"_id"</code><code class="o">:</code> <code class="mi">10</code><code class="p">,</code> <code class="s2">"item"</code><code class="o">:</code> <code class="s2">"envelopes"</code><code class="p">,</code> <code class="s2">"qty"</code><code class="o">:</code> <code class="mi">100</code><code class="p">,</code> <code class="nx">type</code><code class="o">:</code> <code class="s2">"Self-Sealing"</code> <code class="p">},</code>
+    <code class="p">{</code> <code class="nx">writeConcern</code><code class="o">:</code> <code class="p">{</code> <code class="s2">"w"</code> <code class="o">:</code> <code class="s2">"eachDC"</code><code class="p">,</code> <code class="nx">wtimeout</code> <code class="o">:</code> <code class="mi">1000</code> <code class="p">}</code> <code class="p">}</code>
+<code class="p">);</code></pre><p>Note that rules are somewhat abstracted away from the application
+      developer: they don’t have to know which servers are in <code>"eachDC"</code> to use the rule, and the rule can
+      change without their application having to change. We could add a data
+      center or change set members and the application would not have to
+      know.</p></div></section><section data-type="sect2" data-pdf-bookmark="Guaranteeing a Majority of Nonhidden Members"><div class="sect2" id="idm45882353704088"><h2>Guaranteeing a Majority of Nonhidden Members</h2><p>Often, hidden<a data-type="indexterm" data-primary="hidden members" id="idm45882353402952"/> members are somewhat second-class citizens: you’re never
+      going to fail over to them and they certainly aren’t taking any reads.
+      Thus, you may only care that nonhidden members received a write and let
+      the hidden members sort it out for <span class="keep-together">themselves</span>.</p><p>Suppose we have five members, <em class="filename">host0</em> through <em class="filename">host4</em>, <em class="filename">host4</em> being a hidden member. We want to make
+      sure that a majority of the nonhidden members have a write—that is, at
+      least three of <em class="filename">host0</em>, <em class="filename">host1</em>, <em class="filename">host2</em>, and <em class="filename">host3</em>. To create a rule for this, first we
+      tag each of the nonhidden members with its own tag:</p><pre data-type="programlisting" data-code-language="javascript"><code class="o">&gt;</code> <code class="kd">var</code> <code class="nx">config</code> <code class="o">=</code> <code class="nx">rs</code><code class="p">.</code><code class="nx">config</code><code class="p">()</code>
+<code class="o">&gt;</code> <code class="nx">config</code><code class="p">.</code><code class="nx">members</code><code class="p">[</code><code class="mi">0</code><code class="p">].</code><code class="nx">tags</code> <code class="o">=</code> <code class="p">[{</code><code class="s2">"normal"</code> <code class="o">:</code> <code class="s2">"A"</code><code class="p">}]</code>
+<code class="o">&gt;</code> <code class="nx">config</code><code class="p">.</code><code class="nx">members</code><code class="p">[</code><code class="mi">1</code><code class="p">].</code><code class="nx">tags</code> <code class="o">=</code> <code class="p">[{</code><code class="s2">"normal"</code> <code class="o">:</code> <code class="s2">"B"</code><code class="p">}]</code>
+<code class="o">&gt;</code> <code class="nx">config</code><code class="p">.</code><code class="nx">members</code><code class="p">[</code><code class="mi">2</code><code class="p">].</code><code class="nx">tags</code> <code class="o">=</code> <code class="p">[{</code><code class="s2">"normal"</code> <code class="o">:</code> <code class="s2">"C"</code><code class="p">}]</code>
+<code class="o">&gt;</code> <code class="nx">config</code><code class="p">.</code><code class="nx">members</code><code class="p">[</code><code class="mi">3</code><code class="p">].</code><code class="nx">tags</code> <code class="o">=</code> <code class="p">[{</code><code class="s2">"normal"</code> <code class="o">:</code> <code class="s2">"D"</code><code class="p">}]</code></pre><p>The hidden member, <em class="filename">host4</em>, is
+      not given a tag.</p><p>Now we add a rule for the majority of these servers:</p><pre data-type="programlisting" data-code-language="javascript"><code class="o">&gt;</code> <code class="nx">config</code><code class="p">.</code><code class="nx">settings</code><code class="p">.</code><code class="nx">getLastErrorModes</code> <code class="o">=</code> <code class="p">[{</code><code class="s2">"visibleMajority"</code> <code class="o">:</code> <code class="p">{</code><code class="s2">"normal"</code> <code class="o">:</code> <code class="mi">3</code><code class="p">}}]</code>
+<code class="o">&gt;</code> <code class="nx">rs</code><code class="p">.</code><code class="nx">reconfig</code><code class="p">(</code><code class="nx">config</code><code class="p">)</code></pre><p>Finally, we can use this rule in our application:</p><pre data-type="programlisting" data-code-language="javascript"><code class="nx">db</code><code class="p">.</code><code class="nx">products</code><code class="p">.</code><code class="nx">insertOne</code><code class="p">(</code>
+    <code class="p">{</code> <code class="s2">"_id"</code><code class="o">:</code> <code class="mi">10</code><code class="p">,</code> <code class="s2">"item"</code><code class="o">:</code> <code class="s2">"envelopes"</code><code class="p">,</code> <code class="s2">"qty"</code><code class="o">:</code> <code class="mi">100</code><code class="p">,</code> <code class="nx">type</code><code class="o">:</code> <code class="s2">"Self-Sealing"</code> <code class="p">},</code>
+    <code class="p">{</code> <code class="nx">writeConcern</code><code class="o">:</code> <code class="p">{</code> <code class="s2">"w"</code> <code class="o">:</code> <code class="s2">"visibleMajority"</code><code class="p">,</code> <code class="nx">wtimeout</code> <code class="o">:</code> <code class="mi">1000</code> <code class="p">}</code> <code class="p">}</code>
+<code class="p">);</code></pre><p>This will wait until at least three of the nonhidden members have
+      the write.</p></div></section><section data-type="sect2" data-pdf-bookmark="Creating Other Guarantees"><div class="sect2" id="idm45882353403832"><h2>Creating Other Guarantees</h2><p>The rules you can create are limitless. Remember that there are
+      two steps to creating a custom replication rule:</p><ol><li><p>Tag members by assigning them key/value pairs. The keys
+          describe classifications; for example, you might have keys such as
+          <code>"data_center"</code> or <code>"region"</code> or <code>"serverQuality"</code>. Values determine which
+          group a server belongs to within a classification. For example, for
+          the key <code>"data_center"</code>, you might
+          have some servers tagged <code>"us-east"</code>, some <code>"us-west"</code>, and others <code>"aust"</code>.</p></li><li><p>Create a <span class="firstterm">rule</span> based on the
+          classifications you create. Rules are always of the form <code>{"<em><code>name</code></em>" :
+          {"<em><code>key</code></em>" :
+          <em><code>number</code></em>}}</code>, where at least one
+          server from <em><code>number</code></em> groups must have a
+          write before it has succeeded. For example, you could create a rule
+          <code>{"twoDCs" : {"data_center" : 2}}</code>,
+          which would mean that at least one server in two of the data centers
+          tagged must confirm a write before it is successful.</p></li></ol><p>Then you can use this rule in <code>getLastErrorModes</code>.</p><p>Rules are immensely powerful ways to configure replication,
+      although they are complex to understand and set up. Unless you have
+      fairly involved replication requirements, you should<a data-type="indexterm" data-startref="RSCcustom12" id="idm45882353167816"/><a data-type="indexterm" data-startref="Rcustom12" id="idm45882353167016"/> be perfectly safe
+      sticking with <code>"w" :
+      "majority"</code>.</p></div></section></div></section><section data-type="sect1" data-pdf-bookmark="Sending Reads to Secondaries"><div class="sect1" id="idm45882353165640"><h1>Sending Reads to Secondaries</h1><p>By<a data-type="indexterm" data-primary="reads" data-secondary="sending to secondaries" id="Rsecond12"/><a data-type="indexterm" data-primary="replica sets, connecting to" data-secondary="sending reads to secondaries" id="RSCsend12"/> default, drivers will route all requests to the primary.
+    This is generally what you want, but you can configure other options by
+    setting <span class="firstterm">read preferences</span> in your driver. Read
+    preferences let you specify the types of servers queries should be sent
+    to.</p><p>Sending read requests to secondaries is generally a bad idea. There
+    are some specific situations in which it makes sense, but you should
+    generally send all traffic to the primary. If you are considering sending
+    reads to secondaries, make sure to weigh the pros and cons very carefully
+    before allowing it. This section covers why it’s a bad idea and the
+    specific conditions when it makes sense to do so.</p><section data-type="sect2" data-pdf-bookmark="Consistency Considerations"><div class="sect2" id="idm45882353160056"><h2>Consistency Considerations</h2><p>Applications that require strongly consistent reads should not
+      read from secondaries.</p><p>Secondaries should usually be within a few milliseconds of the
+      primary. However, there is no guarantee of this. Sometimes secondaries
+      can fall behind by minutes, hours, or even days due to load,
+      misconfiguration, network errors, or other issues. Client libraries
+      cannot tell how up to date a secondary is, so clients will cheerfully
+      send queries to secondaries that are far behind. Hiding a secondary from
+      client reads can be done but is a manual process. Thus, if your
+      application needs data that is predictably up to date, it should not
+      read from secondaries.</p><p>If your application needs to read its own writes (e.g., insert a
+      document and then query for it and find it) you should not send the read
+      to a secondary (unless the write waits for replication to all
+      secondaries using <code>"w"</code> as shown
+      earlier). Otherwise, an application may perform a successful write,
+      attempt to read the value, and not be able to find it (because it sent
+      the read to a secondary that hasn’t replicated yet). Clients can issue
+      requests faster than replication can copy operations.</p><p>To always send read requests to the primary, set your read
+      preference to <code class="option">primary</code> (or leave it alone, since
+      <code class="option">primary</code> is the default). If there is no primary,
+      queries will error out. This means that your application cannot perform
+      queries if the primary goes down. However, it is certainly an acceptable
+      option if your application can deal <span class="keep-together">with downtime</span> during failovers or
+      network partitions or if getting stale data is <span class="keep-together">unacceptable</span>.</p></div></section><section data-type="sect2" data-pdf-bookmark="Load Considerations"><div class="sect2" id="idm45882353153560"><h2>Load Considerations</h2><p>Many users send reads to secondaries to distribute load. For
+      example, if your servers can only handle 10,000 queries a second and you
+      need to handle 30,000, you might set up a couple of secondaries and have
+      them take some of the load. However, this is a dangerous way to scale
+      because it’s easy to accidentally overload your system and difficult to
+      recover from once you do.</p><p>For example, suppose that you have the situation just described:
+      30,000 reads per second. You decide to create a replica set with four
+      members (one of these would be configured as nonvoting, to prevent ties
+      in elections) to handle this: each secondary is well below its maximum
+      load and the system works perfectly.</p><p>Until one of the secondaries crashes.</p><p>Now each of the remaining members are handling 100% of their
+      possible load. If you need to rebuild the member that crashed, it may
+      need to copy data from one of the other servers, overwhelming the
+      remaining servers. Overloading a server often makes it perform slower,
+      lowering the set’s capacity even further and forcing other members to
+      take on more load, causing them to slow down in a death spiral.</p><p>Overloading can also cause replication to slow down, making the
+      remaining secondaries fall behind. Suddenly you have a member down and a
+      member lagging, and everything is too overloaded to have any wiggle
+      room.</p><p>If you have a good idea of how much load a server can take, you
+      might feel like you can plan this out better: use five servers instead
+      of four and the set won’t be overloaded if one goes down. However, even
+      if you plan it out perfectly (and only lose the number of servers you
+      expected), you still have to fix the situation with the other servers
+      under more stress than they would be otherwise.</p><p>A better choice is to use sharding to distribute load. We’ll cover
+      how to set sharding up in <a data-type="xref" href="ch14.xhtml#chapter_d1e10482">Chapter 14</a>.</p></div></section><section data-type="sect2" data-pdf-bookmark="Reasons to Read from Secondaries"><div class="sect2" id="idm45882353148024"><h2>Reasons to Read from Secondaries</h2><p>There are a few cases in which it’s reasonable to send application
+      reads to secondaries. For instance, you may want your application to
+      still be able to perform reads if the primary goes down (and you do not
+      care if those reads are somewhat stale). This is the most common case
+      for distributing reads to secondaries: you’d like a temporary read-only
+      mode when your set loses a primary. This read preference is called
+      <code>primaryPreferred</code>.</p><p>One common argument for reading from secondaries<a data-type="indexterm" data-primary="latency" data-secondary="reading from secondaries and" id="idm45882353145784"/> is to get low-latency reads. You can specify
+      <code class="option">nearest</code> as your read preference to route requests to
+      the lowest-latency member based on average ping time from the driver to
+      the replica set member. If your application needs to access the same
+      document with low latency in multiple data centers, this is the only way
+      to do it. If, however, your documents are more location-based
+      (application servers in this data center need low-latency access to some
+      of your data, or application servers in another data center need
+      low-latency access to other data), this should be done with sharding.
+      Note that you must use sharding if your application requires low-latency
+      reads <em>and</em> low-latency writes: replica sets only
+      allow writes to one location (wherever the primary is).</p><p>You must be willing to sacrifice consistency if you are reading
+      from members that may not have replicated all the writes yet.
+      Alternatively, you could sacrifice write speed if you wanted to wait
+      until writes had been replicated to all members.</p><p>If your application can truly function acceptably with arbitrarily
+      stale data, you can use the <code class="option">secondary</code> or
+      <code class="option">secondaryPreferred</code> read preferences.
+      <code class="option">secondary</code> will always send read requests to a
+      secondary. If there are no secondaries available, this will error out
+      rather than send reads to the primary. It can be used for applications
+      that do not care about stale data and want to use the primary for writes
+      only. If you have any concerns about staleness of data, this is not
+      recommended.</p><p><code class="option">secondaryPreferred</code> will send read requests to a
+      secondary if one is available. If no secondaries are available, requests
+      will be sent to the primary.</p><p>Sometimes, read load is drastically different than write
+      load—i.e., you’re reading entirely different data than you’re writing.
+      You might want dozens of indexes for offline processing that you don’t
+      want to have on the primary. In this case, you might want to set up a
+      secondary with different indexes than the primary. If you’d like to use
+      a secondary for this purpose, you’d probably create a connection
+      directly to it from the driver, instead of using a replica set
+      connection.</p><p>Consider which of the options makes sense for your application.
+      You can also combine options: if some read requests must be from the
+      primary, use <code class="option">primary</code> for those. If you are OK with
+      other reads not having the most up-to-date data, use
+      <code class="option">primaryPreferred</code> for those. And if certain requests
+      require low latency over consistency, use <code class="option">nearest</code>
+      for<a data-type="indexterm" data-startref="RSCsend12" id="idm45882353109528"/><a data-type="indexterm" data-startref="Rsecond12" id="idm45882353108664"/> those.</p></div></section></div></section></div></section></div>
+
+
+
+  </body></html>

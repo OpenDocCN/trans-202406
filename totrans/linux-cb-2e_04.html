@@ -1,0 +1,1631 @@
+<html><head></head><body><div id="sbo-rt-content"><section data-type="chapter" epub:type="chapter" data-pdf-bookmark="Chapter 4. Managing Services with systemd"><div class="chapter" id="cha-systemd">
+<h1><span class="label">Chapter 4. </span>Managing Services with systemd</h1>
+
+
+<p>Every time you start your Linux computer, its initialization system launches a batch
+of processes, from a few dozen to hundreds, depending on how the system is set up.
+You can see this on your startup screen (<a data-type="xref" href="#fig-startup-messages">Figure 4-1</a>; press
+the Escape key to hide your graphical startup screen and <a data-type="indexterm" data-primary="Linux" data-secondary="startup messages, displaying" id="idm46466162198904"/><a data-type="indexterm" data-primary="startup messages, displaying" id="idm46466162198056"/><a data-type="indexterm" data-primary="displaying" data-secondary="startup messages" id="idm46466162197448"/>see the startup messages).</p>
+
+<figure><div id="fig-startup-messages" class="figure">
+<img src="Images/lcb2_0401.png" alt="Linux startup messages" width="853" height="524"/>
+<h6><span class="label">Figure 4-1. </span>Linux startup messages</h6>
+</div></figure>
+
+<p>In olden times we <a data-type="indexterm" data-primary="init systems" data-secondary="legacy" id="init-legacy-compare-oldentimes"/><a data-type="indexterm" data-primary="init systems" data-secondary="systemd" data-see="systemd" id="idm46466162193528"/><a data-type="indexterm" data-primary="SysV init" id="idm46466162192440"/>had the Unix System V initialization system (SysV init), BSD
+init, and Linux Standard Base (LSB) init for launching processes at startup.
+SysV init was the most common. Those days are fading away, and now systemd is
+the shiny new init system for Linux. It has been adopted by all the major Linux
+distributions, though of course there are a number of distributions that still
+use the legacy init 
+<span class="keep-together">systems</span>.</p>
+
+<p>In this chapter you will learn if your Linux distribution uses systemd. You will
+learn what processes, threads, services, and daemons are, and how to use systemd
+to manage services: start, stop, enable, disable, and check status. You will
+become acquainted with the <em>systemctl</em> command, which is the systemd system and
+service manager.</p>
+
+<p>systemd is<a data-type="indexterm" data-primary="systemd" data-secondary="purpose of" id="idm46466162186904"/> designed to provide functionality suited to modern complex server
+and desktop systems, and it does considerably more than the legacy init systems.
+It provides complete service management from startup to shutdown, starting
+processes at boot, on-demand after boot, and shutting down services when they
+are not needed. It manages functions such as system logging, automounting
+filesystems, automatic service dependency resolution, name services, device
+management, network connection management, login management, and a host of other
+tasks.</p>
+
+<p>This sounds like a lot until you realize that processes do everything on a
+computer, and all of this functionality used to be provided by a large
+assortment of other programs. systemd brings it all together in an integrated
+software suite that should operate the same way on all Linux systems, though as
+always with Linux there are some minor exceptions, such as file locations and
+service names. Be aware that your particular Linux may have some differences
+from the examples in this chapter.</p>
+
+<p>systemd attempts to decrease boot times and parcel out system resources more
+efficiently by starting processes concurrently and in parallel, and starting
+only necessary services, leaving other services to start after boot as needed.
+A service that is dependent on other services no longer has to wait to start
+for those services to become available because all it needs is a waiting Unix
+socket to become available. <a data-type="xref" href="#rec-slow-startups">Recipe 4.9</a> shows how to find
+processes that are slowing down your system startup.</p>
+
+<p>systemd binaries are written in C, which provides some performance
+enhancement. The legacy inits are masses of shell scripts, and any compiled
+language operates faster than shell scripts.</p>
+
+<p>systemd <a data-type="indexterm" data-primary="init systems" data-secondary="legacy" id="init-legacy-compare"/><a data-type="indexterm" data-primary="systemd" data-secondary="legacy init systems comparison" id="systemd-legacy-compare"/><a data-type="indexterm" data-primary="SysV init" id="idm46466162187960"/>is backwards compatible with SysV init. Most Linux distributions retain
+the legacy SysV configuration files and scripts, including <em>/etc/inittab</em> and
+the <em>/etc/rc.d/</em> and <em>/etc/init.d/</em> directories. When a service does not have a
+systemd configuration file, systemd looks for a SysV configuration file.
+systemd is also backward compatible with Linux Standard Base (LSB) init.</p>
+
+<p>systemd service files are smaller and easier to understand than SysV init files.
+Compare a SysV init file for sshd with its systemd service file. This is a
+snippet of the sshd init file, <em>/etc/init.d/ssh</em>, from MX Linux:</p>
+<pre class="pagebreak-before">#! /bin/sh
+
+### BEGIN INIT INFO
+# Provides:		sshd
+# Required-Start:	$remote_fs $syslog
+# Required-Stop:	$remote_fs $syslog
+# Default-Start:	2 3 4 5
+# Default-Stop:
+# Short-Description:	OpenBSD Secure Shell server
+### END INIT INFO
+
+set -e
+
+# /etc/init.d/ssh: start and stop the OpenBSD "secure shell(tm)" daemon
+
+test -x /usr/sbin/sshd || exit 0
+
+umask 022
+
+if test -f /etc/default/ssh; then
+[...]</pre>
+
+<p>This goes on for a total of 162 lines. This is a complete systemd service file
+from Ubuntu 20.04, <em>/lib/systemd/system/ssh.service</em>:</p>
+<pre>[Unit]
+Description=OpenBSD Secure Shell server
+Documentation=man:sshd(8) man:sshd_config(5)
+After=network.target auditd.service
+ConditionPathExists=!/etc/ssh/sshd_not_to_be_run
+
+[Service]
+EnvironmentFile=-/etc/default/ssh
+ExecStartPre=/usr/sbin/sshd -t
+ExecStart=/usr/sbin/sshd -D $SSHD_OPTS
+ExecReload=/usr/sbin/sshd -t
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+Restart=on-failure
+RestartPreventExitStatus=255
+Type=notify
+RuntimeDirectory=sshd
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target
+Alias=sshd.service
+</pre>
+
+<p>Even without reading the documentation, or knowing anything about systemd, you
+can understand some of what this file is supposed<a data-type="indexterm" data-primary="init systems" data-secondary="legacy" data-startref="init-legacy-compare" id="idm46466162173464"/><a data-type="indexterm" data-primary="systemd" data-secondary="legacy init systems comparison" data-startref="systemd-legacy-compare" id="idm46466162172312"/> to do.</p>
+
+<p class="pagebreak-before less_space">See <a href="https://oreil.ly/dFz4K">Rethinking PID 1</a> for a
+detailed introduction to systemd by one of its inventors and maintainers,
+Lennart Poettering. <a data-type="indexterm" data-primary="Poettering, Lennart" id="idm46466162167512"/>Rethinking PID 1 details the rationale behind building a
+new init system, its architecture, advantages, and how it uses existing Linux
+kernel features in place of duplicating existing functionality.</p>
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="4.1 Learning if Your Linux Uses systemd"><div class="sect1" id="rec-is-systemd-present">
+<h1>4.1 Learning if Your Linux Uses systemd</h1>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm46466162167880">
+<h2>Problem</h2>
+
+<p>You <a data-type="indexterm" data-primary="systemd" data-secondary="determining availability" id="systemd-available"/><a data-type="indexterm" data-primary="SysV init" data-secondary="determining availability" id="sysv-available"/><a data-type="indexterm" data-primary="init systems" data-secondary="determining availability" id="init-available"/>need to know if your Linux distribution uses systemd or something else.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm46466162161544">
+<h2>Solution</h2>
+
+<p>Look for the <em>/run/systemd/system/</em> directory. If this exists, then your init
+system is systemd.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm46466162159192">
+<h2>Discussion</h2>
+
+<p>The <em>/run/systemd/</em> directory may be present on your system if your
+distribution supports multiple init systems. But systemd is not the active init
+unless you see <em>/run/systemd/system/</em>.</p>
+
+<p>There are several other ways to learn which init system your system is using.
+Try querying <em>/sbin/init</em>. Originally this was the SysV executable, and now
+most Linux distributions preserve the name and symlink it to the systemd
+executable. This example confirms that the init is systemd:</p>
+<pre>$ <strong>stat /sbin/init</strong>
+File: /sbin/init -&gt; /lib/systemd/systemd
+[...]</pre>
+
+<p>On a system using SysV init, it has no symlink:</p>
+<pre>$ <strong>stat /sbin/init</strong>
+File: /sbin/init
+[...]</pre>
+
+<p>The <em>/proc</em> pseudofilesystem<a data-type="indexterm" data-primary="/proc" id="proc"/> is an interface to your Linux kernel, and
+contains the current state of a running system. It is called a
+pseudofilesystem because it exists only in memory and not on disk. In this
+example, <em>/proc/1/exe</em> is symlinked to the systemd executable:</p>
+<pre>$ <strong>sudo stat /proc/1/exe</strong>
+File: /proc/1/exe -&gt; /lib/systemd/systemd
+[...]</pre>
+
+<p class="pagebreak-before less_space">On a SysV system, it links to <em>init</em>:</p>
+<pre>$ <strong>sudo stat /proc/1/exe</strong>
+File: /proc/1/exe -&gt; /sbin/init
+[...]</pre>
+
+<p>The <em>/proc/1/comm</em> file reports your active init system:</p>
+<pre>$ <strong>cat /proc/1/comm</strong>
+systemd</pre>
+
+<p>On a SysV system, it<a data-type="indexterm" data-primary="/proc" data-startref="proc" id="idm46466162144488"/> reports <em>init</em>:</p>
+<pre>$ <strong>cat /proc/1/comm</strong>
+init</pre>
+
+<p>The <a data-type="indexterm" data-primary="PID (process ID) 1" id="idm46466162141560"/><a data-type="indexterm" data-primary="ps command" id="idm46466162140952"/>command attached to process ID (PID) 1 is your init. PID 1 is the first
+process launched at startup, which then starts all other processes. You can see
+this with the <em>ps</em> command:</p>
+<pre>$ <strong>ps -p 1</strong>
+  PID TTY          TIME CMD
+    1 ?        00:00:00 systemd</pre>
+
+<p>When the init is SysV, it looks like this:</p>
+<pre>$ <strong>ps -p 1</strong>
+  PID TTY          TIME CMD
+    1 ?        00:00:00 init</pre>
+
+<p>See <a data-type="xref" href="#rec-pid-1">Recipe 4.2</a> for more information on PID 1.</p>
+
+<p>Linux support for systemd varies. Most of the major Linux distributions have adoped systemd,
+including Fedora, Red Hat, CentOS, openSUSE, SUSE Linux Enterprise, Debian,
+Ubuntu, Linux Mint, Arch, Manjaro, Elementary, and Mageia Linux.</p>
+
+<p>Some popular distributions that do not support systemd, or include it but
+not as the default init, are Slackware, PCLinuxOS, Gentoo Linux, MX Linux, <a data-type="indexterm" data-primary="systemd" data-secondary="determining availability" data-startref="systemd-available" id="idm46466162133224"/><a data-type="indexterm" data-primary="SysV init" data-secondary="determining availability" data-startref="sysv-available" id="idm46466162131960"/><a data-type="indexterm" data-primary="init systems" data-secondary="determining availability" data-startref="init-available" id="idm46466162134712"/>and
+antiX.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="See Also"><div class="sect2" id="idm46466162133400">
+<h2>See Also</h2>
+
+<ul>
+<li>
+<p><a href="https://distrowatch.com">Distrowatch</a> for information on hundreds of
+Linux 
+<span class="keep-together">distributions</span></p>
+</li>
+<li>
+<p><em>man 5 proc</em></p>
+</li>
+<li>
+<p><em>man 1 pstree</em></p>
+</li>
+<li>
+<p><em>man 1 ps</em></p>
+</li>
+</ul>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" class="pagebreak-before less_space" data-pdf-bookmark="4.2 Understanding PID 1, the Mother of All Processes"><div class="sect1" id="rec-pid-1">
+<h1>4.2 Understanding PID 1, the Mother of All Processes</h1>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm46466162122408">
+<h2>Problem</h2>
+
+<p>You<a data-type="indexterm" data-primary="processes" data-secondary="explained" id="process-explain"/> want a better understanding of services and processes on Linux.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm46466162119704">
+<h2>Solution</h2>
+
+<p>PID 1 is the mother of all processes on Linux systems. This is the first
+process to start, and then it launches all other processes.</p>
+
+<p>Processes are one or more running instances of a program. Every task in a Linux
+system is performed by a process. Processes can create independent copies of
+themselves, that is, they<a data-type="indexterm" data-primary="forked processes" id="idm46466162117864"/><a data-type="indexterm" data-primary="child processes" id="idm46466162114856"/><a data-type="indexterm" data-primary="parent processes" id="idm46466162114248"/> can <em>fork</em>. The forked copies are called
+<em>children</em>, and the original is the <em>parent</em>. Each child has its own
+unique PID, and its own allocation of system resources, such as CPU and
+memory. <em>Threads</em> are<a data-type="indexterm" data-primary="threads" id="idm46466162112840"/> lightweight processes that run in parallel and share
+system resources with their parents.</p>
+
+<p>Some processes run in the background and do not interact with users. Linux calls
+these <a data-type="indexterm" data-primary="services" id="idm46466162111544"/><a data-type="indexterm" data-primary="daemons" id="idm46466162109720"/>processes <em>services</em> or <em>daemons</em>, and their names tend to end with the
+letter D, such as httpd, sshd, and systemd.</p>
+
+<p>Every Linux system starts PID 1 first, which then launches all other processes.
+Use the <em>ps</em> command <a data-type="indexterm" data-primary="ps command" id="idm46466162108504"/>to list all running processes in PID order:</p>
+<pre>$ <strong>ps -ef</strong>
+UID        PID  PPID  C STIME TTY          TIME CMD
+root         1     0  0 10:06 ?        00:00:01 /sbin/init splash
+root         2     0  0 10:06 ?        00:00:00 [kthreadd]
+root         3     2  0 10:06 ?        00:00:00 [rcu_gp]
+root         4     2  0 10:06 ?        00:00:00 [rcu_par_gp]
+[...]</pre>
+
+<p>The <em>pstree</em> command<a data-type="indexterm" data-primary="pstree command" id="pstree"/> organizes this mass of information into a tree diagram.
+This example shows all processes, their child processes, PIDs, and threads, which
+are enclosed in curly braces:</p>
+<pre>$ <strong>pstree -p</strong>
+systemd(1)─┬─ModemManager(925)─┬─{ModemManager}(944)
+           │                   └─{ModemManager}(949)
+           ├─NetworkManager(950)─┬─dhclient(1981)
+           │                     ├─{NetworkManager}(989)
+           │                     └─{NetworkManager}(991)
+           ├─accounts-daemon(927)─┬─{accounts-daemon}(938)
+           │                      └─{accounts-daemon}(948)
+           ├─acpid(934)
+           ├─agetty(1103)
+           ├─avahi-daemon(953)───avahi-daemon(970)
+[...]</pre>
+
+<p>The full <em>pstree</em> output is quite large. You can view a single process,
+identified by its PID, and its parents, children, and threads, like the
+following example for the Kate text editor:</p>
+<pre>$ <strong>pstree -sp 5193</strong>
+systemd(1)───kate(5193)─┬─bash(5218)
+                        ├─{kate}(5195)
+                        ├─{kate}(5196)
+                        ├─{kate}(5197)
+                        ├─{kate}(5198)
+                        ├─{kate}(5199)
+[...]</pre>
+
+<p>This shows that <code>systemd(1)</code> is Kate’s parent, <code>bash(5218)</code> is Kate’s child,
+and all the processes in curly braces are Kate’s threads.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm46466162119288">
+<h2>Discussion</h2>
+
+<p>Processes always exist in one of several states, and these states change
+according to system activity. The following <em>pstree</em> example displays the PID, user,
+state, and command fields:</p>
+<pre>$ <strong>ps -eo pid,user,stat,comm</strong>
+  PID USER       STAT COMMAND
+    1 root       Ss   systemd
+    2 root       S    kthreadd
+   32 root       I&lt;   kworker/3:0H-kb
+   68 root       SN   khugepaged
+11222 duchess    Rl   konsole</pre>
+
+<ul>
+<li>
+<p><em>R</em> is either currently running or waiting in the run queue.</p>
+</li>
+<li>
+<p><em>l</em> means the process is multithreaded.</p>
+</li>
+<li>
+<p><em>S</em> is interruptable sleep; the process is waiting for an event to complete.</p>
+</li>
+<li>
+<p><em>s</em> is a session leader. Sessions are related processes managed as a unit.</p>
+</li>
+<li>
+<p><em>I</em> is an idle kernel thread.</p>
+</li>
+<li>
+<p><em>&lt;</em> means high priority.</p>
+</li>
+<li>
+<p><em>N</em> is low priority.</p>
+</li>
+</ul>
+
+<p>There are several rarely used states you can read about <a data-type="indexterm" data-primary="processes" data-secondary="explained" data-startref="process-explain" id="idm46466162084616"/><a data-type="indexterm" data-primary="pstree command" data-startref="pstree" id="idm46466162083528"/>in <em>man 1 ps</em>.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="See Also"><div class="sect2" id="idm46466162085240">
+<h2>See Also</h2>
+<ul>
+<li> <a data-type="xref" href="#rec-kill-processes">Recipe 4.7</a> </li>
+<li> <em>man 5 proc</em> </li>
+<li class="pagebreak-before"> <em>man 1 pstree</em> </li>
+<li> <em>man 1 ps</em> </li>
+</ul>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="4.3 Listing Services and Their States with systemctl"><div class="sect1" id="rec-list-services">
+<h1>4.3 Listing Services and Their States with systemctl</h1>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm46466162075848">
+<h2>Problem</h2>
+
+<p>You<a data-type="indexterm" data-primary="systemctl command" data-secondary="services" data-tertiary="listing" id="systemctl-service-list"/><a data-type="indexterm" data-primary="services" data-secondary="listing" id="service-list"/><a data-type="indexterm" data-primary="listing" data-secondary="services" id="list-service"/> want to list all services installed on your system, and you want to know
+the states of the services: whether they are running, not running, or in an
+error state.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm46466162069816">
+<h2>Solution</h2>
+
+<p><em>systemctl</em>, the systemd manager command, tells all. Run it with no options to
+see a detailed list of all loaded units. A systemd unit is any related batch
+of processes defined in a unit configuration file and managed by systemd:</p>
+<pre>$ <strong>systemctl</strong></pre>
+
+<p>This prints a giant pile of information: 177 active loaded units on my test
+system with the full unit names, status, and long descriptions. Redirect the
+the output to a text file for easier study:</p>
+<pre>$ <strong>systemctl &gt; /tmp/systemctl-units.txt</strong></pre>
+
+<p>Treat yourself to more information overload by listing all units, active and
+inactive:</p>
+<pre>$ <strong>systemctl --all</strong></pre>
+
+<p>This results in 349 loaded units listed on my test system, including
+<em>not-found</em> and <em>inactive</em> units. How many total unit files? The following
+example shows 5 out of 322:</p>
+<pre>$ <strong>systemctl list-unit-files</strong>
+UNIT FILE                                      STATE
+proc-sys-fs-binfmt_misc.automount              static
+-.mount                                        generated
+mount                                          generated
+dev-hugepages.mount                            static
+home.mount                                     generated
+[...]
+322 unit files listed.</pre>
+
+<p>We are interested in service files because Linux users and administrators
+interact mainly with service files and rarely need to bother with any other
+type of unit file. How many are installed? Let’s see:</p>
+<pre>$ <strong>systemctl list-unit-files --type=service</strong>
+UNIT FILE                                  STATE
+accounts-daemon.service                    enabled
+acpid.service                              disabled
+alsa-state.service                         static
+alsa-utils.service                         masked
+anacron.service                            enabled
+[...]
+212 unit files listed.</pre>
+
+<p>The <a data-type="indexterm" data-primary="services" data-secondary="states" id="service-states"/>preceding example displays the four most common states that a service can be
+in: enabled, disabled, static, or masked.</p>
+
+<p>List only <a data-type="indexterm" data-primary="enabled services" data-secondary="listing" id="idm46466162055896"/>enabled services:</p>
+<pre>$ <strong>systemctl list-unit-files --type=service --state=enabled</strong>
+UNIT FILE                                  STATE
+accounts-daemon.service                    enabled
+anacron.service                            enabled
+apparmor.service                           enabled
+autovt@.service                            enabled
+avahi-daemon.service                       enabled
+[...]
+62 unit files listed.</pre>
+
+<p>List only<a data-type="indexterm" data-primary="disabled services" data-secondary="listing" id="idm46466162053864"/> disabled services:</p>
+<pre>$ <strong>systemctl list-unit-files --type=service --state=disabled</strong>
+UNIT FILE                            STATE
+acpid.service                        disabled
+brltty.service                       disabled
+console-getty.service                disabled
+mariadb@.service                     disabled
+[...]
+12 unit files listed.</pre>
+
+<p>List only <a data-type="indexterm" data-primary="static services" data-secondary="listing" id="idm46466162051112"/>static services:</p>
+<pre>$ <strong>systemctl list-unit-files --type=service --state=static</strong>
+UNIT FILE                              STATE
+alsa-restore.service                   static
+alsa-state.service                     static
+apt-daily-upgrade.service              static
+apt-daily.service                      static
+[...]
+106 unit files listed.</pre>
+
+<p>List only<a data-type="indexterm" data-primary="masked services" data-secondary="listing" id="idm46466162048408"/> masked services:</p>
+<pre>$ <strong>systemctl list-unit-files --type=service --state=masked</strong>
+UNIT FILE                    STATE
+alsa-utils.service           masked
+bootlogd.service             masked
+bootlogs.service             masked
+checkfs.service              masked
+[...]
+36 unit files listed.</pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm46466162068952">
+<h2>Discussion</h2>
+
+<p>Service unit files are in <em>/usr/lib/systemd/system/</em> or
+<em>/lib/systemd/system/</em>, according to where your Linux distribution puts them.
+These are plain-text files you can read.</p>
+<dl>
+<dt>enabled</dt>
+<dd>
+<div class="openblock">
+<p>This <a data-type="indexterm" data-primary="enabled services" data-secondary="explained" id="idm46466162041608"/>shows that the service has become available and is managed by
+systemd. When a service is enabled, systemd creates a symlink in
+<em>/etc/systemd/system/</em> from the unit file in <em>/lib/systemd/system/</em>. It
+can be started, stopped, reloaded, and disabled by the user with the
+<em>systemctl</em> command.</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>Enabling a service does not immediately start it, and disabling a service does
+not immediately stop it (see <a data-type="xref" href="#rec-enable-services">Recipe 4.6</a>).</p>
+</div>
+</div>
+
+</dd>
+<dt>disabled</dt>
+<dd>
+<p>Diabled <a data-type="indexterm" data-primary="disabled services" data-secondary="explained" id="idm46466162035272"/>means that there is no symlink in <em>/etc/systemd/system/</em>, and it will
+not start automatically at boot. You can stop and start it manually.</p>
+</dd>
+<dt>masked</dt>
+<dd>
+<p>This <a data-type="indexterm" data-primary="masked services" data-secondary="explained" id="idm46466162032440"/>means the service is linked to <em>/dev/null/</em>. It is completely
+disabled and cannot be started by any means.</p>
+</dd>
+<dt>static</dt>
+<dd>
+<p>This<a data-type="indexterm" data-primary="static services" data-secondary="explained" id="idm46466162029528"/> means that the unit file is a dependency of other unit files, and cannot be
+started or stopped by the user.</p>
+</dd>
+</dl>
+
+<p>Some less-common service states you will see:</p>
+<dl>
+<dt>indirect</dt>
+<dd>
+<p>Indirect <a data-type="indexterm" data-primary="indirect services" id="idm46466162026152"/>states belong to services that are not meant to be managed by
+users, but are meant to be used by other services.</p>
+</dd>
+<dt>generated</dt>
+<dd>
+<p>Generated states <a data-type="indexterm" data-primary="generated services" id="idm46466162024136"/>indicate that the service has been converted from a
+nonnative systemd initialization configuration file, either SysV or<a data-type="indexterm" data-primary="services" data-secondary="states" data-startref="service-states" id="idm46466162023240"/><a data-type="indexterm" data-primary="systemctl command" data-secondary="services" data-tertiary="listing" data-startref="systemctl-service-list" id="idm46466162022600"/><a data-type="indexterm" data-primary="services" data-secondary="listing" data-startref="service-list" id="idm46466162021832"/><a data-type="indexterm" data-primary="listing" data-secondary="services" data-startref="list-service" id="idm46466162019288"/> LSB init.</p>
+</dd>
+</dl>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="See Also"><div class="sect2" id="idm46466162068648">
+<h2>See Also</h2>
+
+<ul>
+<li>
+<p><em>man 1 systemctl</em></p>
+</li>
+</ul>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="4.4 Querying the Status of Selected Services"><div class="sect1" id="idm46466162014696">
+<h1>4.4 Querying the Status of Selected Services</h1>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm46466162013688">
+<h2>Problem</h2>
+
+<p>You <a data-type="indexterm" data-primary="systemctl command" data-secondary="services" data-tertiary="querying status" id="systemctl-service-status"/><a data-type="indexterm" data-primary="services" data-secondary="querying status" id="service-status-query"/>want to know the status of one service or a few specific services.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm46466162009208">
+<h2>Solution</h2>
+
+<p><em>systemctl status</em> provides a nice little bundle of useful status information.
+The following example queries the CUPS service. CUPS, the Common Unix Printing
+System, should be on all Linux systems:</p>
+<pre>$ <strong>systemctl status cups.service</strong>
+● cups.service - CUPS Scheduler
+     Loaded: loaded (/lib/systemd/system/cups.service; enabled; vendor preset:
+             enabled)
+     Active: active (running) since Sun 2021-11-22 11:01:48 PST; 4h 17min ago
+TriggeredBy: ● cups.path
+             ● cups.socket
+       Docs: man:cupsd(8)
+   Main PID: 1403 (cupsd)
+      Tasks: 2 (limit: 18760)
+     Memory: 3.8M
+     CGroup: /system.slice/cups.service
+             ├─1403 /usr/sbin/cupsd -l
+             └─1421 /usr/lib/cups/notifier/dbus dbus://
+
+Nov 22 11:01:48 host1 systemd[1]: Started CUPS Scheduler.</pre>
+
+<p>Query multiple services with a space-delimited list:</p>
+<pre>$ <strong>systemctl status mariadb.service bluetooth.service lm-sensors.service</strong></pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm46466162008952">
+<h2>Discussion</h2>
+
+<p>There is a lot of useful information in this little bit of output (<a data-type="xref" href="#fig-startup-1">Figure 4-2</a>).</p>
+
+<figure><div id="fig-startup-1" class="figure">
+<img src="Images/lcb2_0402.png" alt="systemctl status output for the CUPS printer service." width="739" height="233"/>
+<h6><span class="label">Figure 4-2. </span>systemctl status output for the CUPS printer service</h6>
+</div></figure>
+
+<p>The dot next to the service name is a quick status indicator. It appears in
+colors on most terminals. White is an <em>inactive</em> or <em>deactivating</em> state.
+Red is a <em>failed</em> or <em>error</em> state. Green indicates an <em>active</em>,
+<em>reloading</em>, or <em>activating</em> state. The rest of the information in the output is described in the following:</p>
+<dl>
+<dt>Loaded</dt>
+<dd>
+<p>Verifies that the unit file has been loaded into memory, displays
+its full path, 
+<span class="keep-together">the service</span> is enabled (see the Discussion about states in
+<a data-type="xref" href="#rec-list-services">Recipe 4.3</a>), and 
+<span class="keep-together"><code>vendor preset: disabled/enabled</code></span>
+indicates if the installation default is to start at boot or not. When it is
+disabled, the vendor default is to not start at boot. This only shows the
+vendor preference and does not indicate if it is currently enabled or disabled.</p>
+</dd>
+<dt>Active</dt>
+<dd>
+<p>Tells you if the service is active or inactive, and how long it
+has been in that state.</p>
+</dd>
+<dt>Process</dt>
+<dd>
+<p>Reports the PIDs and their commands and daemons.</p>
+</dd>
+<dt>Main PID</dt>
+<dd>
+<p>This is the process number for the cgroup slice.</p>
+</dd>
+<dt>Tasks</dt>
+<dd>
+<p>Reports how many tasks the service has started. Tasks are PIDs.</p>
+</dd>
+<dt>CGroup</dt>
+<dd>
+<div class="openblock">
+<p>Shows which unit slice the service belongs to and its PID. The
+three default unit slices are <em>user.slice</em>, <em>system.slice</em>, and
+<em>machine.slice</em>.</p>
+
+<p>Linux control groups (cgroups) are sets of related processes and all of their
+future children. In systemd, a <em>slice</em> is a subdivision of a cgroup, and each
+slice manages a particular group of processes. Run <em>systemctl status</em> to
+see a diagram of the cgroup hierarchy.</p>
+
+<p>By default, service and scope units are grouped in
+<em>/lib/systemd/system/system.slice</em>.</p>
+
+<p>User sessions are grouped in <em>/lib/systemd/system/user.slice</em>.</p>
+
+<p>Virtual machines and containers registered with systemd are grouped in
+<em>/lib/systemd/system/machine.slice</em>.</p>
+</div>
+
+</dd>
+</dl>
+
+<p>The remaining lines are the most recent log entries from <em>journalctl</em>, the
+systemd log <a data-type="indexterm" data-primary="systemctl command" data-secondary="services" data-tertiary="querying status" data-startref="systemctl-service-status" id="idm46466161976488"/><a data-type="indexterm" data-primary="services" data-secondary="querying status" data-startref="service-status-query" id="idm46466161974952"/>manager.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" class="pagebreak-before less_space" data-pdf-bookmark="See Also"><div class="sect2" id="idm46466161973608">
+<h2>See Also</h2>
+
+<ul>
+<li>
+<p><em>man 1 systemctl</em></p>
+</li>
+<li>
+<p><em>man 5 systemd.slice</em></p>
+</li>
+<li>
+<p><em>man 1 journalctl</em></p>
+</li>
+<li>
+<p><a href="https://oreil.ly/FfUb3">Kernel cgroups documentation</a></p>
+</li>
+</ul>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="4.5 Starting and Stopping Services"><div class="sect1" id="idm46466161967256">
+<h1>4.5 Starting and Stopping Services</h1>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm46466161966152">
+<h2>Problem</h2>
+
+<p>You<a data-type="indexterm" data-primary="systemctl command" data-secondary="services" data-tertiary="starting/stopping" id="systemctl-service-startstop"/><a data-type="indexterm" data-primary="services" data-secondary="starting/stopping" id="service-startstop"/><a data-type="indexterm" data-primary="starting" data-secondary="services" id="start-service"/><a data-type="indexterm" data-primary="stopping" data-secondary="services" id="stop-service"/> want to stop and start services with systemd.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm46466161959576">
+<h2>Solution</h2>
+
+<p>This is a job for <em>systemctl</em>. The following examples use the SSH service to
+demonstrate service management.</p>
+
+<p>Start a service:</p>
+<pre>$ <strong>sudo systemctl start sshd.service</strong></pre>
+
+<p>Stop a service:</p>
+<pre>$ <strong>sudo systemctl stop sshd.service</strong></pre>
+
+<p>Stop and then restart a service:</p>
+<pre>$ <strong>sudo systemctl restart sshd.service</strong></pre>
+
+<p>Reload the service’s configuration. For example, you made a change to
+<em>sshd_config</em> and want to load the new configuration without restarting the
+service:</p>
+<pre>$ <strong>sudo systemctl reload sshd.service</strong></pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm46466161952072">
+<h2>Discussion</h2>
+
+<p>All of these commands also work with multiple services, space-delimited, for
+
+<span class="keep-together">example</span>:</p>
+<pre>$ <strong>sudo systemctl start sshd.service mariadb.service firewalld.service</strong></pre>
+
+<p>If you’re curious about the commands that systemd runs behind the scenes to start,
+reload, or stop the individual daemons, look in their unit files. Some services
+have start, reload, stop, and other instructions in their unit files, like this
+example for httpd:</p>
+<pre>ExecStart=/usr/sbin/httpd/ $OPTIONS -DFOREGROUND
+ExecReload=/usr/sbin/httpd $OPTIONS -k graceful
+ExecStop=/bin/kill -WINCH ${MAINPID}</pre>
+
+<p>You don’t have to do anything special with this information; it is there when
+you want to know how <em>systemctl</em> is managing a particular <a data-type="indexterm" data-primary="systemctl command" data-secondary="services" data-tertiary="starting/stopping" data-startref="systemctl-service-startstop" id="idm46466161945000"/><a data-type="indexterm" data-primary="services" data-secondary="starting/stopping" data-startref="service-startstop" id="idm46466161943784"/><a data-type="indexterm" data-primary="starting" data-secondary="services" data-startref="start-service" id="idm46466161946584"/><a data-type="indexterm" data-primary="stopping" data-secondary="services" data-startref="stop-service" id="idm46466161942632"/><a data-type="indexterm" data-primary="systemd" data-secondary="systemctl command" data-see="systemctl command" id="idm46466161941288"/>service.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="See Also"><div class="sect2" id="idm46466161939688">
+<h2>See Also</h2>
+
+<ul>
+<li>
+<p><a data-type="xref" href="#rec-enable-services">Recipe 4.6</a></p>
+</li>
+<li>
+<p><em>man 1 systemctl</em></p>
+</li>
+</ul>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="4.6 Enabling and Disabling Services"><div class="sect1" id="rec-enable-services">
+<h1>4.6 Enabling and Disabling Services</h1>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm46466161934168">
+<h2>Problem</h2>
+
+<p>You<a data-type="indexterm" data-primary="systemctl command" data-secondary="services" data-tertiary="enabling/disabling" id="systemctl-service-enabledisable"/><a data-type="indexterm" data-primary="services" data-secondary="enabling/disabling" id="service-enabledisable"/><a data-type="indexterm" data-primary="enabling" data-secondary="services" id="enable-service"/><a data-type="indexterm" data-primary="disabling" data-secondary="services" id="disable-service"/><a data-type="indexterm" data-primary="systemctl command" data-secondary="services" data-tertiary="masking/unmasking" id="systemctl-service-mask"/><a data-type="indexterm" data-primary="services" data-secondary="masking/unmasking" id="service-mask"/><a data-type="indexterm" data-primary="masking services" id="mask-service"/><a data-type="indexterm" data-primary="unmasking services" id="unmask-service"/> want a service or services to automatically start at boot, or you want to
+prevent a service from starting at boot, or to disable it completely.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm46466161921784">
+<h2>Solution</h2>
+
+<p>Enabling a service configures it to automatically start at boot.</p>
+
+<p>Disabling a service stops it from starting at boot, but it can be started and
+stopped manually.</p>
+
+<p>Masking a service disables it so that it cannot be started at all.</p>
+
+<p>The following example enables the <em>sshd</em> service:</p>
+<pre>$ <strong>sudo systemctl enable sshd.service</strong>
+Created symlink /etc/systemd/system/multi-user.target.wants/sshd.service →
+/usr/lib/systemd/system/sshd.service</pre>
+
+<p>The output shows that enabling a service means creating a symlink from the
+service file in <em>/lib/systemd/system/</em> to <em>/etc/systemd/system/</em>. This does
+not start the service. You can start the service with <em>systemctl start</em>, or
+enable and start the service in one command with the <em>--now</em> option:</p>
+<pre>$ <strong>sudo systemctl enable --now sshd.service</strong></pre>
+
+<p>This command disables the <em>sshd</em> service. It does not stop the service, so you must
+stop it manually after disabling it:</p>
+<pre>$ <strong>sudo systemctl disable sshd.service</strong>
+Removed /etc/systemd/system/multi-user.target.wants/sshd.service
+$ <strong>sudo systemctl stop sshd.service</strong>
+</pre>
+
+<p class="pagebreak-before less_space">Or, disable and stop it with one command:</p>
+<pre>$ <strong>sudo systemctl disable --now sshd.service</strong></pre>
+
+<p>This command reenables the <em>mariadb</em> service, which disables and then enables
+it. If you have created the symlinks manually for a service, this is useful for
+quickly resetting them to the defaults:</p>
+<pre>$ <strong>sudo systemctl reenable mariadb.service</strong>
+Removed /etc/systemd/system/multi-user.target.wants/mariadb.service.
+Removed /etc/systemd/system/mysqld.service.
+Removed /etc/systemd/system/mysql.service.
+Created symlink /etc/systemd/system/mysql.service →
+/lib/systemd/system/mariadb.service.
+Created symlink /etc/systemd/system/mysqld.service →
+/lib/systemd/system/mariadb.service.
+Created symlink /etc/systemd/system/multi-user.target.wants/mariadb.service →
+/lib/systemd/system/mariadb.service.</pre>
+
+<p>The following command disables the <em>bluetooth</em> service completely by masking
+it, so that it cannot be started at all:</p>
+<pre>$ <strong>sudo systemctl mask bluetooth.service</strong>
+Created symlink /etc/systemd/system/bluetooth.service → /dev/null.</pre>
+
+<p>Unmasking the <em>bluetooth</em> service does not enable it, so it must be started
+manually:</p>
+<pre>$ <strong>sudo systemctl unmask bluetooth.service</strong>
+Removed /etc/systemd/system/bluetooth.service.
+$ <strong>sudo systemctl start bluetooth.service</strong>
+</pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm46466161921272">
+<h2>Discussion</h2>
+
+<p>When you enable, disable, mask, or unmask a service, it remains in its
+current state unless you use the <em>--now</em> option. The <em>--now</em> option works with
+<em>enable</em>, <em>disable</em>, and <em>mask</em> to immediately stop or start the service,
+but it does not work with <em>unmask</em>.</p>
+
+<p>See the Discussion in <a data-type="xref" href="#rec-list-services">Recipe 4.3</a> to learn more about how systemd uses
+symlinks to manage<a data-type="indexterm" data-primary="systemctl command" data-secondary="services" data-tertiary="enabling/disabling" data-startref="systemctl-service-enabledisable" id="idm46466161897320"/><a data-type="indexterm" data-primary="services" data-secondary="enabling/disabling" data-startref="service-enabledisable" id="idm46466161895992"/><a data-type="indexterm" data-primary="enabling" data-secondary="services" data-startref="enable-service" id="idm46466161894904"/><a data-type="indexterm" data-primary="disabling" data-secondary="services" data-startref="disable-service" id="idm46466161893784"/><a data-type="indexterm" data-primary="systemctl command" data-secondary="services" data-tertiary="masking/unmasking" data-startref="systemctl-service-mask" id="idm46466161892440"/><a data-type="indexterm" data-primary="services" data-secondary="masking/unmasking" data-startref="service-mask" id="idm46466161890824"/><a data-type="indexterm" data-primary="masking services" data-startref="mask-service" id="idm46466161889480"/><a data-type="indexterm" data-primary="unmasking services" data-startref="unmask-service" id="idm46466161888408"/> services.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="See Also"><div class="sect2" id="idm46466161898376">
+<h2>See Also</h2>
+
+<ul>
+<li>
+<p><em>man 1 systemctl</em></p>
+</li>
+<li>
+<p>The Discussion in <a data-type="xref" href="#rec-list-services">Recipe 4.3</a> to learn how systemd uses
+symlinks to manage services</p>
+</li>
+</ul>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="4.7 Stopping Troublesome Processes"><div class="sect1" id="rec-kill-processes">
+<h1>4.7 Stopping Troublesome Processes</h1>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm46466161882648">
+<h2>Problem</h2>
+
+<p>You <a data-type="indexterm" data-primary="systemctl command" data-secondary="services" data-tertiary="killing" id="systemctl-service-kill"/><a data-type="indexterm" data-primary="services" data-secondary="killing" id="service-kill"/><a data-type="indexterm" data-primary="processes" data-secondary="killing" id="process-kill"/><a data-type="indexterm" data-primary="killing processes" id="kill-process"/><a data-type="indexterm" data-primary="kill command" id="kill-command"/><a data-type="indexterm" data-primary="troubleshooting" data-secondary="processes, killing" id="troubleshoot-process-kill"/>want to know how to stop troublesome processes. A certain service may be
+unresponsive or running away, spawning forks and causing your system to hang.
+Your normal stop command is not working. What do you do?</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm46466161873032">
+<h2>Solution</h2>
+
+<p>Stopping a process is called killing the process. On Linux systems with systemd,
+you should use <em>systemctl kill</em>. On systems without systemd, use the legacy
+<em>kill</em> command.</p>
+
+<p><em>systemctl kill</em> is preferable because it stops all processes that belong to
+a service and leaves no orphan processes, nor any processes that might restart
+the service and continue to make trouble. First, try it with no options other
+than the service name, then check the status:</p>
+<pre>$ <strong>sudo systemctl kill mariadb</strong>
+
+$ <strong>systemctl status mariadb</strong>
+● mariadb.service - MariaDB 10.1.44 database server
+   Loaded: loaded (/lib/systemd/system/mariadb.service; enabled; vendor preset:
+enabled)
+   Active: inactive (dead) since Sun 2020-06-28 19:57:49 PDT; 6s ago
+[...]</pre>
+
+<p>The service has cleanly stopped. If this does not work, then try the nuclear
+option:</p>
+<pre>$ <strong>sudo systemctl kill -9 mariadb</strong></pre>
+
+<p>The legacy <em>kill</em> command does not recognize service or command names, but
+rather requires the PID of the offending process:</p>
+<pre>$ <strong>sudo kill 1234</strong></pre>
+
+<p>If this does not stop it, use the nuclear option:</p>
+<pre>$ <strong>sudo kill -9 1234</strong></pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm46466161872408">
+<h2>Discussion</h2>
+
+<p>Use<a data-type="indexterm" data-primary="top command" id="idm46466161862408"/> the <em>top</em> command to identify runaway processes. Run it with no options,
+and the processes using up the most CPU resources are listed at the top.
+Press the q key to exit <em>top</em>.</p>
+<pre>$ <strong>top</strong>
+top - 20:30:13 up  4:24,  6 users,  load average: 0.00, 0.03, 0.06
+Tasks: 246 total,   1 running, 170 sleeping,   0 stopped,   0 zombie
+%Cpu(s):  0.4 us,  0.2 sy,  0.0 ni, 99.4 id,  0.0 wa,  0.0 hi,  0.0 si,  0.0 st
+KiB Mem : 16071016 total,  7295284 free,  1911276 used,  6864456 buff/cache
+KiB Swap:  8928604 total,  8928604 free,        0 used. 13505600 avail Mem
+
+  PID USER       PR  NI    VIRT    RES    SHR S  %CPU %MEM     TIME+ COMMAND
+ 3504 madmax     20   0 99.844g 177588  88712 S   2.6  1.1   0:08.68 evolution
+ 2081 madmax     20   0 3818636 517756 177744 S   0.7  3.2   5:07.56 firefox
+ 1064 root       20   0  567244 148432 125572 S   0.3  0.9  12:54.75 Xorg
+ 2362 stash      20   0 2997732 230508 145444 S   0.3  1.4   0:40.72 Web Content
+[...]</pre>
+
+<p><em>kill</em> sends signals to processes, and the default signal<a data-type="indexterm" data-primary="SIGTERM" id="idm46466161857016"/> is SIGTERM (signal
+terminate). SIGTERM is gentle, allowing processes to shut down cleanly. SIGTERM
+is also ignorable, and processes don’t have to pay attention to it. Signals can
+be identified by name or number; for most folks the numbers are easier to
+remember, so spelling out the default looks like this:</p>
+<pre>$ <strong>sudo kill -1 1234</strong></pre>
+
+<p><em>kill -9</em> is SIGKILL. SIGKILL <a data-type="indexterm" data-primary="SIGKILL" id="idm46466161851800"/>stops processes immediately and uncleanly, and
+also attempts to stop all child processes.</p>
+
+<p>Killing services with <em>systemctl kill</em> is easier than with <em>kill</em>, and more
+reliable. You only need the service name, and you don’t have to hunt down PIDs. It
+ensures that all processes belonging to the service are stopped, which <em>kill</em>
+cannot ensure.</p>
+
+<p>There are a ton of signals that have accumulated over the years, and you can
+read all about them in <em>man 7 signal</em>.  In my experience, the most relevant
+signals are SIGTERM and SIGKILL, but don’t let that stop you from learning more
+about the others.</p>
+
+<p>If you are uncomfortable with terminology like kill, parents, children, and orphans,
+so am I. Maybe someday it will<a data-type="indexterm" data-primary="systemctl command" data-secondary="services" data-tertiary="killing" data-startref="systemctl-service-kill" id="idm46466161851112"/><a data-type="indexterm" data-primary="services" data-secondary="killing" data-startref="service-kill" id="idm46466161850344"/><a data-type="indexterm" data-primary="processes" data-secondary="killing" data-startref="process-kill" id="idm46466161849496"/><a data-type="indexterm" data-primary="killing processes" data-startref="kill-process" id="idm46466161847368"/><a data-type="indexterm" data-primary="kill command" data-startref="kill-command" id="idm46466161846424"/><a data-type="indexterm" data-primary="troubleshooting" data-secondary="processes, killing" data-startref="troubleshoot-process-kill" id="idm46466161845352"/> change.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="See Also"><div class="sect2" id="idm46466161843624">
+<h2>See Also</h2>
+
+<ul>
+<li>
+<p><em>man 5 systemd.kill</em></p>
+</li>
+<li>
+<p><em>man 1 systemctl</em></p>
+</li>
+<li>
+<p><em>man 1 kill</em></p>
+</li>
+<li>
+<p><em>man 7 signal</em></p>
+</li>
+</ul>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="4.8 Managing Runlevels with systemd"><div class="sect1" id="rec-systemd-runlevels">
+<h1>4.8 Managing Runlevels with systemd</h1>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm46466161836696">
+<h2>Problem</h2>
+
+<p>You<a data-type="indexterm" data-primary="systemd" data-secondary="targets" id="systemd-target"/><a data-type="indexterm" data-primary="targets (systemd)" id="targets"/><a data-type="indexterm" data-primary="SysV init" data-secondary="runlevels" id="sysv-runlevel"/><a data-type="indexterm" data-primary="runlevels (SysV)" id="runlevels"/><a data-type="indexterm" data-primary="init systems" data-secondary="runlevel management" id="init-runlevels"/><a data-type="indexterm" data-primary="systemctl command" data-secondary="targets (runlevels)" id="systemctl-target"/><a data-type="indexterm" data-primary="rebooting" data-secondary="to different system states" data-secondary-sortas="different system states" id="reboot-system-state"/><a data-type="indexterm" data-primary="system states, rebooting to" id="system-state-reboot"/> want to reboot to different system states in a manner similar to using SysV
+
+<span class="keep-together">runlevels</span>.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm46466161825448">
+<h2>Solution</h2>
+
+<p>systemd <em>targets</em> are similar to SysV runlevels. These are boot profiles that
+start your system with different options, such as multiuser mode with a
+graphical desktop, multiuser mode with no graphical desktop, and emergency
+and rescue modes to use when your current target will not boot. (See the
+Discussion for more information on runlevels.)</p>
+
+<p>The following command checks if the system is running and reports its state:</p>
+<pre>$ <strong>systemctl is-system-running</strong>
+running</pre>
+
+<p>What is the default target?</p>
+<pre>$ <strong>systemctl get-default</strong>
+graphical.target</pre>
+
+<p>Get the current runlevel:</p>
+<pre>$ <strong>runlevel</strong>
+N 5</pre>
+
+<p>Reboot to rescue mode:</p>
+<pre>$ <strong>sudo systemctl rescue</strong></pre>
+
+<p>Reboot to emergency mode:</p>
+<pre>$ <strong>sudo systemctl emergency</strong></pre>
+
+<p>Reboot to the default mode:</p>
+<pre>$ <strong>sudo systemctl reboot</strong></pre>
+
+<p>Reboot to a different target without changing the default:</p>
+<pre>$ <strong>sudo systemctl isolate multi-user.target</strong></pre>
+
+<p>Set a different default runlevel:</p>
+<pre>$ <strong>sudo systemctl set-default multi-user.target</strong></pre>
+
+<p>List the runlevel target files and their symlinks on your system:</p>
+<pre>$ <strong>ls -l /lib/systemd/system/runlevel*</strong></pre>
+
+<p>List the dependencies in a runlevel target:</p>
+<pre>$ <strong>systemctl list-dependencies graphical.target</strong></pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" class="pagebreak-before less_space" data-pdf-bookmark="Discussion"><div class="sect2" id="idm46466161822712">
+<h2>Discussion</h2>
+
+<p>SysV runlevels are different states that your system can boot to, for example,
+with a graphical desktop, without a graphical desktop, and with emergency runlevels
+to use when your default runlevel has problems and will not boot.</p>
+
+<p>systemd <em>targets</em> approximately correspond to the legacy SysV runlevels:</p>
+
+<ul>
+<li>
+<p><em>runlevel0.target</em>, <em>poweroff.target</em>, halt</p>
+</li>
+<li>
+<p><em>runlevel1.target</em>, <em>rescue.target</em>, single-user text mode, all local
+filesystems mounted, root user only, no networking</p>
+</li>
+<li>
+<p><em>runlevel3.target</em>, <em>multi-user.target</em>, multiuser text mode (no graphical
+environment)</p>
+</li>
+<li>
+<p><em>runlevel5.target</em>, <em>graphical.target</em>, multiuser graphical mode</p>
+</li>
+<li>
+<p><em>runlevel6.target</em>, <em>reboot.target</em>, reboot</p>
+</li>
+</ul>
+
+<p><em>systemctl emergency</em> is a special target that is more restricted than <em>rescue</em>
+mode: no services, no mount points other than the root filesystem, no
+networking, root user only. It is the most minimal running system for
+debugging problems. You may see options to boot into a rescue or emergency mode
+in your GRUB2 bootloader screen.</p>
+
+<p><em>systemctl is-system-running</em> reports various system states:</p>
+
+<ul>
+<li>
+<p><em>initializing</em> means the system has not completed startup.</p>
+</li>
+<li>
+<p><em>starting</em> means the system is in the final stages of startup.</p>
+</li>
+<li>
+<p><em>running</em> is fully operational, and all processes are started.</p>
+</li>
+<li>
+<p><em>degraded</em> means the system is operational, but one or more systemd units
+have failed. Run <em>systemctl | grep failed</em> to see which units failed.</p>
+</li>
+<li>
+<p><em>maintenance</em> means that either the <em>rescue</em> or <em>emergency</em> target is active.</p>
+</li>
+<li>
+<p><em>stopping</em> means that systemd is shutting down.</p>
+</li>
+<li>
+<p><em>offline</em> means that systemd is not running.</p>
+</li>
+<li>
+<p><em>unknown</em> means that there is a problem preventing systemd from determining
+the operational <a data-type="indexterm" data-primary="systemd" data-secondary="targets" data-startref="systemd-target" id="idm46466161784056"/><a data-type="indexterm" data-primary="targets (systemd)" data-startref="targets" id="idm46466161781224"/><a data-type="indexterm" data-primary="SysV init" data-secondary="runlevels" data-startref="sysv-runlevel" id="idm46466161780376"/><a data-type="indexterm" data-primary="runlevels (SysV)" data-startref="runlevels" id="idm46466161779288"/><a data-type="indexterm" data-primary="init systems" data-secondary="runlevel management" data-startref="init-runlevels" id="idm46466161778440"/><a data-type="indexterm" data-primary="systemctl command" data-secondary="targets (runlevels)" data-startref="systemctl-target" id="idm46466161777352"/><a data-type="indexterm" data-primary="rebooting" data-secondary="to different system states" data-secondary-sortas="different system states" data-startref="reboot-system-state" id="idm46466161776168"/><a data-type="indexterm" data-primary="system states, rebooting to" data-startref="system-state-reboot" id="idm46466161774680"/>state.</p>
+</li>
+</ul>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="See Also"><div class="sect2" id="idm46466161783064">
+<h2>See Also</h2>
+
+<ul>
+<li>
+<p><em>man 1 systemctl</em></p>
+</li>
+<li>
+<p><em>man 8 systemd-halt.service</em></p>
+</li>
+</ul>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="4.9 Diagnosing Slow Startups"><div class="sect1" id="rec-slow-startups">
+<h1>4.9 Diagnosing Slow Startups</h1>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Problem"><div class="sect2" id="idm46466161769096">
+<h2>Problem</h2>
+
+<p>systemd <a data-type="indexterm" data-primary="systemd" data-secondary="slow startups, troubleshooting" id="systemd-slow-troubleshoot"/><a data-type="indexterm" data-primary="starting" data-secondary="slow startups, troubleshooting" id="start-slow-troubleshoot"/><a data-type="indexterm" data-primary="slow startups, troubleshooting" id="slow-start-troubleshoot"/><a data-type="indexterm" data-primary="troubleshooting" data-secondary="slow startups" id="troubleshoot-slow-start"/><a data-type="indexterm" data-primary="systemd-analyze blame command" id="systemd-analyze-blame"/>promises faster startups, but your system starts up slowly, and you
+want to find out why.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Solution"><div class="sect2" id="idm46466161761288">
+<h2>Solution</h2>
+
+<p>You want <em>systemd-analyze blame</em>. Run it with no options to see a list of
+system processes and how long they took to start:</p>
+<pre>$ <strong>systemd-analyze blame</strong>
+         34.590s apt-daily.service
+          6.782s NetworkManager-wait-online.service
+          6.181s dev-sda2.device
+          4.444s systemd-journal-flush.service
+          3.609s udisks2.service
+          2.450s snapd.service
+          [...]</pre>
+
+<p>Analyze only user processes:</p>
+<pre>$ <strong>systemd-analyze blame --user</strong>
+          3.991s pulseaudio.service
+           553ms at-spi-dbus-bus.service
+           380ms evolution-calendar-factory.service
+           331ms evolution-addressbook-factory.service
+           280ms xfce4-notifyd.service
+           [...]</pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Discussion"><div class="sect2" id="idm46466161760984">
+<h2>Discussion</h2>
+
+<p>It is useful to review everything that starts at boot and perhaps find services
+you don’t want starting at boot. My favorite to disable is Bluetooth because
+I don’t use it on my servers or PCs, but many Linux distros enable it by  default.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="See Also"><div class="sect2" id="idm46466161751416">
+<h2>See Also</h2>
+
+<ul>
+<li>
+<p><em>man 1 systemd-analyze</em></p>
+</li>
+</ul>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+</div></section></div></body></html>
