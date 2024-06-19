@@ -1,1160 +1,2541 @@
-- en: Chapter 5\. Networking
+- en: Chapter 4\. Applications and Supply Chain
+  id: totrans-0
   prefs:
   - PREF_H1
   type: TYPE_NORMAL
-- en: In this chapter we will focus on networking aspects of your workloads. We will
-    first review the defaults that Kubernetes proper comes equipped with and what
-    else is readily available due to integrations. We cover networking topics including
-    East-West and North-South traffic—that is, intra-pod and inter-pod communication,
-    communication with the worker node (hosts), cluster-external communication, workload
-    identity, and encryption on the wire.
+- en: The [SUNBURST](https://oreil.ly/19FGs) [supply-chain compromise](https://oreil.ly/coa9p)
+    was a hostile intrusion of US Government and Fortune-500 networks via malware
+    hidden in a legitimately signed, compromised server monitoring agent. The [Cozy
+    Bear hacking group](https://oreil.ly/gADiF) used techniques described in this
+    chapter to compromise many billion-dollar companies simultaneously. High value
+    targets were prioritized by the attackers, so smaller organizations may have escaped
+    the potentially devastating consequences of the breach.
+  id: totrans-1
   prefs: []
   type: TYPE_NORMAL
-- en: 'In the second part of this chapter we have a look at two more recent additions
-    to the Kubernetes networking toolbox: service meshes and the Linux kernel extension
-    mechanism eBPF. We try to give you a rough idea if, how, and where you can, going
-    forward, benefit from both.'
+- en: 'Organizations targeted by the attackers suffered losses of data and may have
+    been used as a springboard for further attacks against their own customers. This
+    is the essential risk of a “trusted” supply chain: anybody who consumes something
+    you produce becomes a potential target when you are compromised. The established
+    trust relationship is exploited, and so malicious software is inadvertently trusted.'
+  id: totrans-2
   prefs: []
   type: TYPE_NORMAL
-- en: As you can see in [Figure 5-1](#fig-networking-layer-model), there are many
-    moving parts in the networking space.
+- en: Often vulnerabilities for which an exploit exists don’t have a corresponding
+    software patch or workaround. Palo Alto research determined this is the case for
+    80% of new, public exploits. With this level of risk exposure for all running
+    software, denying malicious actors access to your internal networks is the primary
+    line of defense.
+  id: totrans-3
   prefs: []
   type: TYPE_NORMAL
-- en: '![Network layer model](Images/haku_0501.png)'
+- en: The SUNBURST attack infected SolarWinds build pipelines and altered source code
+    immediately before it was built, then hid the evidence of tampering and ensured
+    the binary was signed by the CI/CD system so consumers would trust it.
+  id: totrans-4
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'These techniques were previously unseen on the [Mitre ATT&CK Framework](https://oreil.ly/BV0mN),
+    and the attacks compromised networks plundered for military, government, and company
+    secrets—all enabled by the initial supply chain attack. Preventing the ignoble,
+    crafty Captain Hashjack and their pals from covertly entering the organization’s
+    network via any dependencies (libraries, tooling or otherwise) is the job of *supply
+    chain security*: protecting our sources.'
+  id: totrans-5
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![captain](Images/haku_0000.png)'
+  id: totrans-6
   prefs: []
   type: TYPE_IMG
-- en: Figure 5-1\. Network layer model
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: The good news is that most if not all of the protocols should be familiar to
-    you, since Kubernetes uses the standard Internet Engineering Task Force (IETF)
-    suite of networking protocols, from the [Internet Protocol](https://oreil.ly/xp1b4)
-    to the Domain Name System ([DNS](https://oreil.ly/nzOlg)). What changes, really,
-    is the scope and generally the assumptions about how the protocols are used. For
-    example, when deployed on a worldwide scale, it makes sense to make the time-to-live
-    (TTL) of a DNS record months or longer.
+- en: 'In this chapter we dive into supply chain attacks by looking at some historical
+    issues and how they were exploited, then see how containers can either usefully
+    compartmentalize or dangerously exacerbate supply chain risks. In [“Defending
+    Against SUNBURST”](#defending_against_sunburst), we’ll ask: could we have secured
+    a cloud native system from SUNBURST?'
+  id: totrans-7
   prefs: []
   type: TYPE_NORMAL
-- en: In the context of a container that may run for hours or days at best, this assumption
-    doesn’t hold anymore. Clever adversaries can exploit such assumptions and as you
-    should know by now, that’s exactly what the Captain would do.
-  prefs: []
-  type: TYPE_NORMAL
-- en: In this chapter we will focus on the protocols most often used in Kubernetes—and
-    their weak points with respect to workloads. As Captain Hashjack likes to say,
-    “loose lips sink ships,” so we’ll first explore for permissive networking defaults,
-    then show how to attack them as well as discuss the controls you can implement
-    to detect and mitigate these attacks.
+- en: 'For career criminals like Captain Hashjack, the supply chain provides a fresh
+    vector to assault BCTL’s systems: attack by proxy to gain trusted access to your
+    systems. This means attacking container software supply chains to gain remote
+    control of vulnerable workloads and servers, and daisy-chain exploits and backdoors
+    throughout an organization.'
+  id: totrans-8
   prefs: []
   type: TYPE_NORMAL
 - en: Defaults
+  id: totrans-9
   prefs:
   - PREF_H1
   type: TYPE_NORMAL
-- en: 'With defaults we mean the default values of configurations of components that
-    you get when you use Kubernetes from source, in an unmodified manner. From a networking
-    perspective, workloads in Kubernetes have the following setup:'
+- en: 'Unless targeted and mitigated, supply chain attacks are relatively simple:
+    they impact trusted parts of our system that we would not normally directly observe,
+    like the CI/CD patterns of our suppliers.'
+  id: totrans-10
   prefs: []
   type: TYPE_NORMAL
-- en: Flat topology. Every pod can see and talk to every other pod in the cluster.
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: No securityContext. Workloads can escalate to host network interface controller
-    (NIC).
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: No environmental restrictions. Workloads can query their host and cloud metadata.
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: No identity for workloads.
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: No encryption on the wire (between pods and cluster-external traffic).
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: 'While the preceding list might look scary, a different way to look at it might
-    make it easier to assess the risks present. As depicted in [Figure 5-2](#fig-networking-overview),
-    the main communication paths in Kubernetes are as follows:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'Intra-pod traffic: containers within a pod communicating (see the next section)'
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: 'Inter-pod traffic: pods in the same cluster communicating (see [“Inter-Pod
-    Traffic”](#workload-networking-inter-pod))'
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: Pod-to-worker node traffic (see [“Pod-to-Worker Node Traffic”](#workload-networking-env))
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: 'Cluster-external traffic: communication of pods with the outside world (see
-    [“Cluster-External Traffic”](#workload-networking-external))'
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: '![Kubernetes networking overview](Images/haku_0502.png)'
-  prefs: []
-  type: TYPE_IMG
-- en: Figure 5-2\. Kubernetes networking overview
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: Let’s now have a closer look at the communication paths and other networking-relevant
-    defaults in Kubernetes. Among other things, we’ll discuss [“The State of the ARP”](#workload-networking-arp),
-    [“No securityContext”](#workload-networking-sec-ctx), [“No Workload Identity”](#workload-networking-identity),
-    and [“No Encryption on the Wire”](#workload-networking-encryption).
-  prefs: []
-  type: TYPE_NORMAL
-- en: Note
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: 'There are some aspects of the networking space that depend heavily on the environment
-    in which Kubernetes is used. For example, when using hosted Kubernetes from one
-    of the cloud providers, the control plane and/or data plane may or may not be
-    publicly available. If you are interested in learning more how the big three handle
-    this, have a look at:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: Amazon [EKS private clusters](https://oreil.ly/Q8VkK)
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: Azure [AKS private clusters](https://oreil.ly/7XD3l)
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: Google [GKE private clusters](https://oreil.ly/lNCG3)
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: Since this is not an intrinsic property of Kubernetes and many combinations
-    are possible, we decided to exclude this topic from our discussion in this chapter.
-  prefs: []
-  type: TYPE_NORMAL
-- en: So, are you ready to learn about the Kubernetes networking defaults?
-  prefs: []
-  type: TYPE_NORMAL
-- en: Intra-Pod Networking
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: The way intra-pod networking in Kubernetes works is as follows. An implicit
-    so-called [pause](https://oreil.ly/VRjJQ) container in a pod (`cp` in [Figure 5-3](#fig-networking-pod))
-    spans a Linux [network namespace](https://oreil.ly/rr1RM).
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![Internals of a Kubernetes pod](Images/haku_0503.png)'
-  prefs: []
-  type: TYPE_IMG
-- en: Figure 5-3\. Internals of a Kubernetes pod
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: Other containers in the pod, such as init containers (like `ci1` and `ci2`),
-    and the main application container and sidecars, such as proxies or logging containers
-    (for example, `c1` to `c3`), then join the pause container’s network and IPC namespace.
-  prefs: []
-  type: TYPE_NORMAL
-- en: The pause container has the network bridge mode enabled and all the other containers
-    in the pod are sharing their namespace via container mode.
-  prefs: []
-  type: TYPE_NORMAL
-- en: As discussed in [Chapter 2](ch02.xhtml#ch-pod-level-resources), pods were designed
-    to make it easy to lift and shift existing applications into Kubernetes, which
-    has sobering security implications. Ideally, you rewrite the application so that
-    the tight coupling of containers in a pod are not necessary or deploy traditional
-    tooling in the context of a pod.
-  prefs: []
-  type: TYPE_NORMAL
-- en: While the latter seems like a good idea initially, do remember that this is
-    a stopgap measure at best. Once the boundaries are clear and effectively every
-    microservice is deployed in its own pod, you can go ahead and use the techniques
-    discussed in the next sections.
-  prefs: []
-  type: TYPE_NORMAL
-- en: In addition, no matter if you’re looking at defense in depth in the context
-    of a pod or cluster-wide, you can employ a range of dedicated container security
-    open source and commercial offerings. See also respective section [“Networking”](app02.xhtml#apx-networking)
-    in [Appendix B](app02.xhtml#appendix-resources).
-  prefs: []
-  type: TYPE_NORMAL
-- en: Inter-Pod Traffic
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: In a Kubernetes cluster, by default every pod can see and talk to every other
-    pod. This default is a nightmare from a security perspective (or a free ride,
-    depending on which side you’re on) and we can not emphasize enough how dangerous
-    this fact is.
-  prefs: []
-  type: TYPE_NORMAL
-- en: No matter what your threat model is, this “all traffic is allowed” policy for
-    both inter-pod and external traffic represents one giant attack vector. In other
-    words, you should never rely on the Kubernetes defaults in the networking space.
-    You should never, ever run a Kubernetes cluster without restricting network traffic
-    in some form or shape. For a practical example on how you can go about this, have
-    a look at [“Traffic Flow Control”](#workload-network-policies).
-  prefs: []
-  type: TYPE_NORMAL
-- en: Pod-to-Worker Node Traffic
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: If not disabled, workloads can query the worker node (host) they are running
-    on as well as the (cloud) environments they are deployed into.
-  prefs: []
-  type: TYPE_NORMAL
-- en: No default protection exists for worker nodes, routable from the CNI. Further,
-    the worker nodes may be able to access cloud resources, datastores, and API servers.
-    Some cloud providers, notably Google, offer some solutions for this issue; see,
-    for example, [shielded GKE Nodes](https://oreil.ly/RykAM).
-  prefs: []
-  type: TYPE_NORMAL
-- en: For cloud environments in general, good practices exist. For example, Amazon
-    EKS recommends to [restrict access to instance metadata](https://oreil.ly/ycvSd)
-    and equally GKE documents how to [protect cluster metadata](https://oreil.ly/pMDaj).
-  prefs: []
-  type: TYPE_NORMAL
-- en: Further, commercial offerings like Nirmata’s [Virtual Clusters and Workload
-    Policies](https://oreil.ly/LSElg) can be used in this context.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Cluster-External Traffic
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: To allow pods to communicate with cluster-external endpoints, Kubernetes has
-    added a number of mechanisms over time. The most recent and widely used is called
-    an [Ingress](https://oreil.ly/F17YB). This allows for layer 7 routing (HTTP),
-    whereas for other use cases such as layer 3/4 routing you would need to use older,
-    less convenient methods. See also [Publishing Services (ServiceTypes)](https://oreil.ly/pzlGE)
-    in the docs.
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'In order for you to use the Ingress resource, you will need to pick an ingress
-    controller. You have many many choices, oftentimes open source-based, which include:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[Emissary-ingress](https://oreil.ly/N8v57)'
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: '[Contour](https://oreil.ly/T9nsX)'
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: '[HAProxy Ingress](https://oreil.ly/ZAm5g)'
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: '[NGINX Ingress Controller](https://oreil.ly/G6yS3)'
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: '[Traefik](https://oreil.ly/h0Tpr)'
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: In addition, cloud providers usually provide their own solutions, integrated
-    with their managed load-balancing services.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Encryption on the wire (TLS) is almost the default nowadays, and most Ingress
-    solutions support it out of the box. Alternatively, you can use a service mesh
-    for securing your North-South traffic (see [“Service Meshes”](#workload-networking-service-meshes)).
-  prefs: []
-  type: TYPE_NORMAL
-- en: Last but not least, on the application level you might want to consider using
-    a web application firewall (WAF) such as offered by most cloud providers, or you
-    can use standalone offering such as [Wallarm](https://oreil.ly/iTXQu).
-  prefs: []
-  type: TYPE_NORMAL
-- en: More and more practitioners are sharing their experiences in this space, so
-    keep an eye out for blog posts and CNCF webinars covering this topic. See, for
-    example, [“Shaping Chick-fil-A One Traffic in a Multi-Region Active-Active Architecture”](https://oreil.ly/Q8Twj).
-  prefs: []
-  type: TYPE_NORMAL
-- en: The State of the ARP
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: '[Address Resolution Protocol](https://oreil.ly/8egtf) (ARP) is a link layer
-    protocol used by the Internet Protocol (IP) to map IP network addresses to the
-    hardware (MAC) addresses. Liz Rice showed in her KubeCon NA 2019 talk, [“CAP_NET_RAW
-    and ARP Spoofing in Your Cluster: It’s Going Downhill From Here”](https://oreil.ly/wnQKi),
-    how defaults allow us to open raw network sockets and how this can lead to issues.'
-  prefs: []
-  type: TYPE_NORMAL
-- en: It involves using ARP and DNS to fool a victim pod to visit a fake URL, which
-    is possible due to the way Kubernetes [handles local FQDNs](https://oreil.ly/NAPnT),
-    and it requires that `CAP_NET_RAW` is available to a pod.
-  prefs: []
-  type: TYPE_NORMAL
-- en: For more details, see the Aqua Security blog post [“DNS Spoofing on Kubernetes
-    Clusters”](https://oreil.ly/g6Zu3).
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'The good news is, there are defenses available to mitigate the ARP-based attacks
-    and spoil the Captain’s mood:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: Using Pod Security Policies (PSP) as discussed in [“Runtime Policies”](ch08.xhtml#policy-runtime-policies),
-    to drop `CAP_NET_RAW`.
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: Using generic policy engines as described in [“Generic Policy Engines”](ch08.xhtml#generic-policy-engines)
-    such as [Open Policy Agent/Gatekeeper](https://oreil.ly/VpDrN), or by using [Kyverno
-    to convert PSPs](https://oreil.ly/5Xn2T) (also see [this video](https://oreil.ly/ZWp1X)).
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: Using, for example, [Calico](https://oreil.ly/jQchh) or [Cilium](https://oreil.ly/ZWrKF)
-    on layer 3.
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: How can you tell if you’re affected? Use [kube-hunter](https://oreil.ly/uDFka),
-    for example.
-  prefs: []
-  type: TYPE_NORMAL
-- en: No securityContext
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: 'By default, workloads can escalate to the NIC of the worker node they are running
-    on. For example, when running privileged containers, one can escape from the container
-    [using kernel modules](https://oreil.ly/uRrgr). Further, as the Microsoft Azure
-    team pointed out in its [“Threat matrix for Kubernetes” blog post](https://oreil.ly/1ohm8):'
-  prefs: []
-  type: TYPE_NORMAL
-- en: Attackers with network access to the host (for example, via running code on
-    a compromised container) can send API requests to the Kubelet API. Specifically
-    querying `https://[NODE IP]:10255/pods/` retrieves the running pods on the node.
-    `https://[NODE IP]:10255/spec/` retrieves information about the node itself, such
-    as CPU and memory consumption.
-  prefs:
-  - PREF_BQ
-  type: TYPE_NORMAL
-- en: Naturally, one wants to avoid these scenarios and one way to go about this is
-    to apply PSPs, as discussed in [“Runtime Policies”](ch08.xhtml#policy-runtime-policies).
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'For example, the [Baseline/default policy](https://oreil.ly/MD6BD) has the
-    following defined:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: Sharing the host namespaces must be disallowed
-  prefs: []
-  type: TYPE_NORMAL
-- en: '`spec.hostNetwork`'
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: '`spec.hostPID`'
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: '`spec.hostIPC`'
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: Privileged pods disable most security mechanisms and must be disallowed
-  prefs: []
-  type: TYPE_NORMAL
-- en: '`spec.containers[*].securityContext.privileged`'
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: '`spec.initContainers[*].securityContext.privileged`'
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: '`HostPorts` should be disallowed or at minimum restricted to a known list'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '`spec.containers[*].ports[*].hostPort`'
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: '`spec.initContainers[*].ports[*].hostPort`'
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: In addition, there are a number of commercial offerings, such as Palo Alto Networks
-    [Prisma Cloud](https://oreil.ly/3kNmb) (formerly Twistlock), that you can use
-    to harden your worker nodes in this context.
-  prefs: []
-  type: TYPE_NORMAL
-- en: No Workload Identity
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: By default, Kubernetes does not assign an identity to services. SPIFFE/SPIRE
-    can be used to manage workload identities and enable mTLS. [SPIFFE](https://spiffe.io)
-    (Secure Production Identity Framework for Everyone) is a collection of specifications
-    for securely identifying workloads. It provides a framework enabling you to dynamically
-    issue an identity to a service across environments by defining short-lived cryptographic
-    identity documents—called SPIFFE Verifiable Identity Documents (SVIDs)—via an
-    API. Your workloads in turn can use these SVIDs when authenticating to other workloads.
-    For example, an SVID can be used to establish an TLS connection or to verify a
-    JWT token.
-  prefs: []
-  type: TYPE_NORMAL
-- en: No Encryption on the Wire
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: For workloads in regulated industries, that is, any kind of app that is required
-    to conform to a (government issued) regulation, encryption on the wire—or encryption
-    in transit, as it’s sometimes called—is typically one of the requirements. For
-    example, if you have a [Payment Card Industry Data Security Standard](https://oreil.ly/Pr7oP)
-    (PCI DSS)–compliant app as a bank, or a [Health Insurance Portability and Accountability
-    Act](https://oreil.ly/uLjNn) (HIPAA)–compliant app as a health care provider,
-    you will want to make sure that the communication between your containerized microservices
-    is protected against sniffing and person-in-the-middle attacks.
-  prefs: []
-  type: TYPE_NORMAL
-- en: These days, the Transport Layer Security (TLS) protocol as defined in [RFC 8446](https://oreil.ly/VeMXC)
-    and older IETF paperwork is usually used to encrypt traffic on the wire. It uses
-    asymmetric encryption to agree on a shared secret negotiated at the beginning
-    of the session (“handshake”) and in turn symmetric encryption to encrypt the workload
-    data. This setup is a nice performance versus security trade-off.
-  prefs: []
-  type: TYPE_NORMAL
-- en: While control plane components such as the API server, `etcd`, or a `kubelet`
-    can rely on an PKI infra out-of-the-box, providing APIs and good practices for
-    [certificates](https://oreil.ly/PA3NQ), the same is sadly not true for your workloads.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Tip
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: You can see the API server’s hostname, and any IPs encoded into its TLS certificate,
-    with `openssl`. You can find example code for this in [“Control Plane”](ch07.xhtml#control_plane).
-  prefs: []
-  type: TYPE_NORMAL
-- en: By default, the traffic between pods and to the outside world is not encrypted.
-    To mitigate, enable workload encryption on the wire, for example with [Calico](https://oreil.ly/jwHQU),
-    with [Wireguard](https://oreil.ly/ZxGoa) VPN, or with Cilium, which supports both
-    [Wireguard and IPsec](https://oreil.ly/6bYn9). Another option to provide not only
-    this sort of encryption but also workload identity, as discussed in [“No Workload
-    Identity”](#workload-networking-identity), are service meshes. With the defaults
-    out of the way, let’s move on to the threat modeling for the networking space.
+- en: This is a complex problem, as we will discuss in this chapter. As adversarial
+    techniques evolve and cloud native systems adapt, you’ll see how the supply chain
+    risks shift during development, testing, distribution, and runtime.
+  id: totrans-11
   prefs: []
   type: TYPE_NORMAL
 - en: Threat Model
+  id: totrans-12
   prefs:
   - PREF_H1
   type: TYPE_NORMAL
-- en: The threat model in the networking space (see [“Starting to Threat Model”](ch01.xhtml#threat-models-def));
-    that is, the collection of identified networking vulnerabilities according to
-    the risk they pose—is what we’re focusing on in this section.
+- en: 'Most applications do not come hardened by default, and you need to spend time
+    securing them. [OWASP Application Security Verification Standard](https://oreil.ly/5S6Qd)
+    provides application security (AppSec) guidance that we will not explore any further,
+    except to say: you don’t want to make an attacker’s life easy by running outdated
+    or error-ridden software. Rigorous logic and security tests are essential for
+    any and all software you run.'
+  id: totrans-13
   prefs: []
   type: TYPE_NORMAL
-- en: So, what is the threat model we consider in the networking space, with respect
-    to workloads? What are our assumptions about what attackers could do to our precious
-    workloads and beyond to the infrastructure?
+- en: That extends from your developers’ coding style and web application security
+    standards, to the supply chain for everything inside the container itself. Engineering
+    effort is required to make them secure and ensure they are secure when updated.
+  id: totrans-14
   prefs: []
   type: TYPE_NORMAL
-- en: 'The following observations should give you an idea about potential threat models.
-    We illustrate these scenarios with some examples of past attacks, covering the
-    2018–2020 time frame:'
+- en: 'Dependencies in the SDLC are especially vulnerable to attack, and give opportunities
+    to Captain Hashjack to run some malicious code (the “payload”):'
+  id: totrans-15
   prefs: []
   type: TYPE_NORMAL
-- en: Using the front door, for example via an ingress controller or a load balancer,
-    and then either pivoting or performing a denial-of-service attack, such as observed
-    in [CVE-2020-15127](https://oreil.ly/m4aKx)
+- en: At installation (package manager hooks, which may be running as root)
+  id: totrans-16
   prefs:
   - PREF_UL
   type: TYPE_NORMAL
-- en: Using developer access paths like `kubectl cp` ([CVE-2019-11249](https://oreil.ly/U7ogf))
-    or developer environments such as Minikube, witnessed in [CVE-2018-1002103](https://oreil.ly/lkf3P)
+- en: During development and test (IDEs, builds, and executing tests)
+  id: totrans-17
   prefs:
   - PREF_UL
   type: TYPE_NORMAL
-- en: Launching a pod with access to host networking or unnecessary capabilities,
-    as we will further discuss in [“The State of the ARP”](#workload-networking-arp)
+- en: At runtime (local, dev, staging, and production Kubernetes pods)
+  id: totrans-18
   prefs:
   - PREF_UL
   type: TYPE_NORMAL
-- en: Leveraging a compromised workload to connect to another workload
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: Port scanning of all CNI plug-ins and further use this information to identify
-    vulnerabilities; for example, [CVE-2019-9946](https://oreil.ly/3kVUY)
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: Attacking a control plane component such as the API server and `etcd` or a `kubelet`
-    or `kube-proxy` on the worker; for example, [CVE-2020-8558](https://oreil.ly/tauhi),
-    [CVE-2019-11248](https://oreil.ly/Tybuu), [CVE-2019-11247](https://oreil.ly/60und),
-    and [CVE-2018-1002105](https://oreil.ly/KouIk)
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: Performing server-side request forgery (SSRF); for example, concerning the hosting
-    environment, like a cloud provider’s VMs
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: Performing person-in-the-middle attacks, such as seen in the context of [IPv6
-    routing](https://oreil.ly/hGXIM); see also [CVE-2020-10749](https://oreil.ly/CHK6q)
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: Now that we have a basic idea of the potential threat model, let’s go through
-    and see how the defaults can be exploited and defended against, in turn.
+- en: When a payload is executing, it may write further code to the filesystem or
+    pull malware from the internet. It may search for data on a developer’s laptop,
+    a CI server, or production. Any looted credentials form the next phase of the
+    attack.
+  id: totrans-19
   prefs: []
   type: TYPE_NORMAL
-- en: Traffic Flow Control
+- en: 'And applications are not the only software at risk: with infrastructure, policy,
+    and security defined as code, any scripted or automated point of the system that
+    an attacker can infiltrate must be considered, and so is in scope for your threat
+    model.'
+  id: totrans-20
+  prefs: []
+  type: TYPE_NORMAL
+- en: The Supply Chain
+  id: totrans-21
   prefs:
   - PREF_H1
   type: TYPE_NORMAL
-- en: We’ve seen the networking defaults and what kind of communication paths are
-    present in Kubernetes. In this section, we walk you through an end-to-end setup
-    and show you how to secure the external traffic using network policies.
+- en: 'Software supply chains ([Figure 4-1](#web-of-supply-chains)) consider the movement
+    of your files: source code, applications, data. They may be plain text, encrypted,
+    on a floppy disk, or in the cloud.'
+  id: totrans-22
   prefs: []
   type: TYPE_NORMAL
-- en: The Setup
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: To demonstrate the networking defaults in action, let’s use [kind](https://oreil.ly/9KldR),
-    a tool for running local Kubernetes clusters using Docker containers.
+- en: Supply chains exist for anything that is built from other things—perhaps something
+    that humans ingest (food, medicine), use (a CPU, cars), or interact with (an operating
+    system, open source software). Any exchange of goods can be modeled as a supply
+    chain, and some supply chains are huge and complex.
+  id: totrans-23
   prefs: []
   type: TYPE_NORMAL
-- en: 'Let’s create a `kind` cluster with networking prepared for Calico and enable
-    Ingress (also see the [documentation](https://oreil.ly/H7dPf)). We are using the
-    following config:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE0]'
-  prefs: []
-  type: TYPE_PRE
-- en: '[![1](Images/1.png)](#co_networking_CO1-1)'
-  prefs: []
-  type: TYPE_NORMAL
-- en: Enable Ingress for cluster.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[![2](Images/2.png)](#co_networking_CO1-2)'
-  prefs: []
-  type: TYPE_NORMAL
-- en: Disable the native `kindnet`.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[![3](Images/3.png)](#co_networking_CO1-3)'
-  prefs: []
-  type: TYPE_NORMAL
-- en: In preparation to install Calico, set to its default subnet.
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'Assuming the preceding YAML snippet is stored in a file called *cluster-config.yaml*,
-    you can now create the `kind` cluster as follows:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE1]'
-  prefs: []
-  type: TYPE_PRE
-- en: Note that if you do this the first time, the preceding output might look different
-    and it can take several minutes to pull the respective container images.
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'Next we install and patch Calico to make it work with `kind`. Kudos to Alex
-    Brand for putting together the necessary [patch instructions](https://oreil.ly/qudSv):'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE2]'
-  prefs: []
-  type: TYPE_PRE
-- en: 'And to verify if everything is up and running as expected:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE3]'
-  prefs: []
-  type: TYPE_PRE
-- en: Before we can deploy our app, we need one last bit of infrastructure in place,
-    a load balancer, making the pods available to the outside world (your machine).
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'For this we use [Ambassador](https://oreil.ly/fv4K2) as an ingress controller:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE4]'
-  prefs: []
-  type: TYPE_PRE
-- en: 'Now we can launch the application, a web server. First off, we want to do all
-    of the following in a dedicated namespace called `npdemo`, so let’s create one:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE5]'
-  prefs: []
-  type: TYPE_PRE
-- en: 'Next, create a YAML file called *workload.yaml* that defines a deployment,
-    a service, and an ingress resource, in total representing our workload application:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE6]'
-  prefs: []
-  type: TYPE_PRE
-- en: '[![1](Images/1.png)](#co_networking_CO2-1)'
-  prefs: []
-  type: TYPE_NORMAL
-- en: We configure the ingress in a way that if we hit the */api* URL path we expect
-    it to route traffic to our `nginx` service.
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'Next, you want to create the resources defined in *workload.yaml* by using:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE7]'
-  prefs: []
-  type: TYPE_PRE
-- en: 'When you now try to access the app as exposed in the Ingress resource you should
-    be able to do the following (note that we’re only counting the lines returned
-    to verify we get something back):'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE8]'
-  prefs: []
-  type: TYPE_PRE
-- en: Wait. What just happened? We put an Ingress in front of the NGINX service and
-    it happily receives traffic from outside? That can’t be good.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Network Policies to the Rescue!
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: So, how can we keep the Captain and their crew from getting their dirty paws
-    on our cluster? [Network policies](https://oreil.ly/lIqM8) are coming to our rescue.
-    While we will cover policies in a dedicated chapter (see [Chapter 8](ch08.xhtml#ch-policy)),
-    we point out network policies and their usage here since they are so useful and,
-    given the “by default all traffic is allowed” attitude of Kubernetes, one can
-    argue almost necessary.
-  prefs: []
-  type: TYPE_NORMAL
-- en: While Kubernetes allows you to define and apply network policies out-of-the-box,
-    you need something that *enforces* the policies you define and that’s the job
-    of a [provider](https://oreil.ly/4uK2d).
-  prefs: []
-  type: TYPE_NORMAL
-- en: For example, in the following walkthrough, we will be using [Calico](https://oreil.ly/zoAbv),
-    however there are many more options available, such as the eBPF-based solutions
-    discussed in [“eBPF”](#workload-networking-bpf).
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'We shut down all traffic with the following Kubernetes network policy in a
-    file called, fittingly, *np-deny-all.yaml*:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE9]'
-  prefs: []
-  type: TYPE_PRE
-- en: '[![1](Images/1.png)](#co_networking_CO3-1)'
-  prefs: []
-  type: TYPE_NORMAL
-- en: Selects the pods in the same namespace, in our case all.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[![2](Images/2.png)](#co_networking_CO3-2)'
-  prefs: []
-  type: TYPE_NORMAL
-- en: Disallow any Ingress traffic.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Tip
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: 'Network policies are notoriously difficult to get right, so in this context,
-    you may want to check out the following:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: To help you edit and visualize network pollicies, check out the tool available
-    from [networkpolicy.io](https://oreil.ly/6bTIb).
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: To debug network policy you can use [krew-net-forward](https://oreil.ly/2bk4K).
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: To test policies, have a look at [netassert](https://oreil.ly/xvabI).
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: 'So let’s apply the preceding network policy and see if we can still access
-    the app from outside of the cluster:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE10]'
-  prefs: []
-  type: TYPE_PRE
-- en: 'And this should fail now, based on our network policy (giving it a 3-second
-    time out, just to be sure):'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE11]'
-  prefs: []
-  type: TYPE_PRE
-- en: Tip
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: 'If you only have `kubectl` available, you can still make raw network requests,
-    as [Rory McCune](https://oreil.ly/TDxaW) pointed out:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE12]'
-  prefs: []
-  type: TYPE_PRE
-- en: Of course, it shouldn’t be in your container image in the first place!
-  prefs: []
-  type: TYPE_NORMAL
-- en: We hope by now you get an idea how dangerous the defaults are—all network traffic
-    to and from pods is allowed—and how you can defend against it.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Learn more about network policies, including recipes, tips, and tricks, via
-    the resources we put together in [Appendix B](app02.xhtml#appendix-resources).
-  prefs: []
-  type: TYPE_NORMAL
-- en: Tip
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: In addition to network policies, some cloud providers offer other native mechanisms
-    to restrict traffic from/to pods; for example, see AWS [security groups for pods](https://oreil.ly/HWxpu).
-  prefs: []
-  type: TYPE_NORMAL
-- en: Finally, don’t forget to clean up your Kubernetes cluster using `kind delete
-    cluster --name cnnp`, once you’re done exploring the topic of network policies.
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'Now that we’ve seen a concrete networking setup in action, let’s move on to
-    a different topic: service meshes. This relatively recent technology can help
-    you in addressing some of the not-so-secure defaults discussed earlier, including
-    workload identity and encryption on the wire.'
-  prefs: []
-  type: TYPE_NORMAL
-- en: Service Meshes
-  prefs:
-  - PREF_H1
-  type: TYPE_NORMAL
-- en: A somewhat advanced topic, a service mesh is in a sense complementary to Kubernetes
-    and can be beneficial in a number of [use cases](https://oreil.ly/0GmzF). Let’s
-    have a look at how the most important workload-level networking issues can be
-    addressed using a service mesh.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Concept
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: A service mesh as conceptually shown in [Figure 5-4](#fig-networking-service-mesh-concept)
-    is, as per its [creators](https://oreil.ly/Zo8Xk), a collection of userspace proxies
-    in front of your apps along with a management process to configure said proxies.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![Service mesh concept](Images/haku_0504.png)'
+- en: '![haku 0401](Images/haku_0401.png)'
+  id: totrans-24
   prefs: []
   type: TYPE_IMG
-- en: Figure 5-4\. Service mesh concept
+- en: Figure 4-1\. A web of supply chains; adapted from [*https://oreil.ly/r9ndi*](https://oreil.ly/r9ndi)
+  id: totrans-25
   prefs:
   - PREF_H6
   type: TYPE_NORMAL
-- en: The proxies are referred to as the service mesh’s *data plane*, and the management
-    process as its *control plane*. The proxies intercept calls between services and
-    do something interesting with or to these calls, such as disallowing a certain
-    communication path or collecting metrics from the call. The control plane, on
-    the other hand, coordinates the behavior of the proxies and provides the administrator
-    an API.
+- en: 'Each dependency you use is potentially a malicious implant primed to trigger,
+    awaiting a spark of execution when it’s run in your systems to deploy its payload.
+    Container supply chains are long and may include:'
+  id: totrans-26
   prefs: []
   type: TYPE_NORMAL
-- en: Options and Uptake
+- en: The base image(s)
+  id: totrans-27
   prefs:
-  - PREF_H2
+  - PREF_UL
   type: TYPE_NORMAL
-- en: At the time of writing, a number of [service meshes](https://oreil.ly/DeWKV)
-    exist as well as proposed quasi-standards for interoperability, such as the CNCF
-    project [Service Mesh Interface](https://oreil.ly/2s1H4) or work of the Envoy-based
-    [Universal Data Plane API Working Group](https://oreil.ly/3xQ3m) (UDPA-WG).
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'While it is early days, we witness certain uptake, especially out of security
-    considerations (see [Figure 5-5](#fig-networking-service-mesh-survey)). For example,
-    The New Stack (TNS) reports in its 2020 [Service Mesh survey](https://oreil.ly/m0Kk7):'
-  prefs: []
-  type: TYPE_NORMAL
-- en: A third of respondents’ organizations are using service meshes to control communications
-    traffic between microservices in production Kubernetes environments. Another 34%
-    use service mesh technology in a test environment, or are piloting or actively
-    evaluating solutions.
+- en: Installed operating system packages
+  id: totrans-28
   prefs:
-  - PREF_BQ
+  - PREF_UL
   type: TYPE_NORMAL
-- en: '![TNS 2020 service mesh survey excerpt](Images/haku_0505.png)'
+- en: Application code and dependencies
+  id: totrans-29
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Public Git repositories
+  id: totrans-30
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Open source artifacts
+  id: totrans-31
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Arbitrary files
+  id: totrans-32
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Any other data that may be added
+  id: totrans-33
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'If malicious code is added to your supply chain at any step, it may be loaded
+    into executable memory in a running container in your Kubernetes cluster. This
+    is Captain Hashjack’s goal with malicious payloads: sneak bad code into your trusted
+    software and use it to launch an attack from inside the perimeter of your organization,
+    where you may not have defended your systems as well on the assumption that the
+    “perimeter” will keep attackers out.'
+  id: totrans-34
+  prefs: []
+  type: TYPE_NORMAL
+- en: Each link of a supply chain has a producer and a consumer. In [Table 4-1](#app-example-supply-chains),
+    the CPU chip producer is the manufacturer, and the next consumer is the distributor.
+    In practice, there may be multiple producers and consumers at each stage of the
+    supply chain.
+  id: totrans-35
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 4-1\. Varied example supply chains
+  id: totrans-36
+  prefs: []
+  type: TYPE_NORMAL
+- en: '|  | Farm food | CPU chip | An open source software package | Your organization’s
+    servers |'
+  id: totrans-37
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- | --- | --- |'
+  id: totrans-38
+  prefs: []
+  type: TYPE_TB
+- en: '| *original producer* | Farmer (seeds, feed, harvester) | Manufacturer (raw
+    materials, fab, firmware) | Open source package developer (ingenuity, code) |
+    Open source software, original source code built in internal CI/CD |'
+  id: totrans-39
+  prefs: []
+  type: TYPE_TB
+- en: '| *(links to)* | Distributor (selling to shops or other distributors) | Distributor
+    (selling to shops or other distributors) | Repository maintainer (npm, PyPi, etc.)
+    | Signed code artifacts pushed over the network to production-facing registry
+    |'
+  id: totrans-40
+  prefs: []
+  type: TYPE_TB
+- en: '| *(links to)* | Local food shop | Vendor or local computer shop | Developer
+    | Artifacts at rest in registry ready for deployment |'
+  id: totrans-41
+  prefs: []
+  type: TYPE_TB
+- en: '| *links to final consumer* | End user | End user | End user | Latest artifacts
+    deployed to production systems |'
+  id: totrans-42
+  prefs: []
+  type: TYPE_TB
+- en: Any stage in the supply chain that is not under your direct control is liable
+    to be attacked ([Figure 4-2](#app-similarity-between-supply-chains)). A compromise
+    of any “upstream” stage—for example, one that you consume—may impact you as a
+    downstream consumer.
+  id: totrans-43
+  prefs: []
+  type: TYPE_NORMAL
+- en: For example, an open source software project ([Figure 4-3](#app-open-source-supply-chain-attack))
+    may have three contributors (or “trusted producers”) with permission to merge
+    external code contributions into the codebase. If one of those contributors’ passwords
+    is stolen, an attacker can add their own malicious code to the project. Then,
+    when your developers pull that dependency into their codebase, they are running
+    the attacker’s hostile code on your internal systems.
+  id: totrans-44
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Similarity between supply chains](Images/haku_0402.png)'
+  id: totrans-45
   prefs: []
   type: TYPE_IMG
-- en: Figure 5-5\. TNS 2020 service mesh survey excerpt
+- en: Figure 4-2\. Similarity between supply chains
+  id: totrans-46
   prefs:
   - PREF_H6
   type: TYPE_NORMAL
-- en: Going forward, many exciting application areas and nifty defense mechanisms
-    based on service meshes are possible—for example, [Identity Federation for Multi-Cluster
-    Kubernetes and Service Mesh](https://oreil.ly/WxRpf) or using [OPA in Istio](https://oreil.ly/2KacR).
-    That said, many end users are not yet ready to go all in and/or are in a holding
-    pattern, waiting for cloud and platform providers to make the data plane of the
-    service mesh part of the underlying infrastructure. Alternatively, the data plane
-    may be implemented on the operating system level, for example, using [eBPF](https://ebpf.io).
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'Case Study: mTLS with Linkerd'
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: Linkerd is a graduated CNCF project, originally created by Buoyant.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Linkerd [automatically enables](https://oreil.ly/vGiXq) mutual Transport Layer
-    Security (mTLS) for most HTTP-based communication between meshed pods. Let’s see
-    that in action.
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'To follow along, [install Linkerd](https://oreil.ly/crGez) in a test cluster.
-    We’re using `kind` in the following example and assume you have both the Kubernetes
-    cluster set up and configured as well as the Linkerd CLI:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE13]'
-  prefs: []
-  type: TYPE_PRE
-- en: 'Now that we know that we’re in a position to install Linkerd, let’s go ahead
-    and do it:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE14]'
-  prefs: []
-  type: TYPE_PRE
-- en: 'And finally verify the install:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE15]'
-  prefs: []
-  type: TYPE_PRE
-- en: Great! All up and running. You could have a quick look at the Linkerd dashboard
-    using `linkerd dashboard &`, which should show something similar to what’s depicted
-    in [Figure 5-6](#fig-networking-linkerd-dashboard).
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'OK, back to mTLS: once we have enabled the mesh in the respective namespaces
-    it should be impossible for us, even from within the cluster, to directly talk
-    to a service using, say `curl`, and doing an HTTP query. Let’s see how that works.'
-  prefs: []
-  type: TYPE_NORMAL
-- en: In the following example, we’re reusing the setup from [“Inter-Pod Traffic”](#workload-networking-inter-pod)
-    but you can really use any workload that exposes an HTTP service within the cluster.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![Linkerd dashboard showing example traffic stats](Images/haku_0506.png)'
+- en: '![Open source supply chain attack](Images/haku_0403.png)'
+  id: totrans-47
   prefs: []
   type: TYPE_IMG
-- en: Figure 5-6\. Linkerd dashboard showing example traffic stats
+- en: Figure 4-3\. Open source supply chain attack
+  id: totrans-48
   prefs:
   - PREF_H6
   type: TYPE_NORMAL
-- en: 'First, we need to enable the mesh, or meshify, as the good folks from Buoyant
-    call it:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE16]'
-  prefs: []
-  type: TYPE_PRE
-- en: 'Now we can [validate](https://oreil.ly/RsUhF) our mTLS setup using [tshark](https://oreil.ly/0JAvk)
-    as follows:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE17]'
-  prefs: []
-  type: TYPE_PRE
-- en: 'Once the sample app is up and running we can use an remote shell into the attached
-    debug container that Linkerd kindly put there for us:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE18]'
-  prefs: []
-  type: TYPE_PRE
-- en: '[![1](Images/1.png)](#co_networking_CO4-1)'
-  prefs: []
-  type: TYPE_NORMAL
-- en: Connect to pod for interactive (terminal) use.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[![2](Images/2.png)](#co_networking_CO4-2)'
-  prefs: []
-  type: TYPE_NORMAL
-- en: Provide pod name for the `exec` command.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[![3](Images/3.png)](#co_networking_CO4-3)'
-  prefs: []
-  type: TYPE_NORMAL
-- en: Target the `linkerd-debug` container in the pod.
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'Now, from within the debug container we use `tshark` to inspect the packets
-    on the NIC and expect to see TLS traffic (output edited to fit):'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE19]'
-  prefs: []
-  type: TYPE_PRE
-- en: '[![1](Images/1.png)](#co_networking_CO5-1)'
-  prefs: []
-  type: TYPE_NORMAL
-- en: Listen on all available network interfaces for live packet capture.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[![2](Images/2.png)](#co_networking_CO5-2)'
-  prefs: []
-  type: TYPE_NORMAL
-- en: Decode any traffic running over port `8080` as TLS.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[![3](Images/3.png)](#co_networking_CO5-3)'
-  prefs: []
-  type: TYPE_NORMAL
-- en: Ignoring `127.0.0.1` (localhost) as this traffic will always be unencrypted.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Yay, it works, encryption on the wire for free! And with this we’ve completed
-    the mTLS case study.
-  prefs: []
-  type: TYPE_NORMAL
-- en: If you want to learn more about how to use service meshes to secure your East-West
-    communication, we have put together some suggested further reading in [“Networking”](app02.xhtml#apx-networking)
-    in [Appendix B](app02.xhtml#appendix-resources).
-  prefs: []
-  type: TYPE_NORMAL
-- en: While service meshes certainly can help you with networking-related security
-    challenges, fending off the Captain and their crew, you should be aware of weaknesses.
-    For example, from Envoy-based systems, if you run a container with UID 1337, it
-    bypasses the Istio/Envoy sidecar or, by default, the Envoy admin dashboard is
-    accessible from within the container because it shares a network. For more background
-    on this topic, check out the in-depth [Istio Security Assessment](https://oreil.ly/1LKUg).
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'Now it’s time to move on to the last part of the workload networking topic:
-    what happens on a single worker node.'
-  prefs: []
-  type: TYPE_NORMAL
-- en: eBPF
-  prefs:
-  - PREF_H1
-  type: TYPE_NORMAL
-- en: After the service mesh adventure, we focus our attention now on a topic that
-    is on the one hand entirely of opposite character and on the other hand can also
-    be viewed and understood to be used in the service mesh data plane. We have a
-    look at eBPF, a modern and powerful way to extend the Linux kernel, and with it
-    you can address a number of networking-related security challenges.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Concept
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: Originally, this piece of Linux kernel technology was known under the name Berkeley
-    Packet Filter (BPF). Then it experienced a number of enhancements, mainly dirven
-    by Google, Facebook, and Netflix, and to distinguish it from the original implementation
-    it was called [eBPF](https://oreil.ly/xIhBB). Nowadays, the kernel project and
-    technology is commonly known as eBPF, which is a term in itself and does not stand
-    for anything per se; that is, it’s not considered an acronym any longer.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Technically, eBPF is a feature of the Linux kernel and you’ll need the Linux
-    kernel version 3.18 or above to benefit from it. It enables you to safely and
-    efficiently extend the Linux kernel functions by using the `bpf(2)` syscall (see
-    also the [man pages](https://oreil.ly/YurzV) for details). eBPF is implemented
-    as an in-kernel virtual machine using a custom 64-bit RISC instruction set.
-  prefs: []
-  type: TYPE_NORMAL
-- en: In [Figure 5-7](#fig-bpf-overview) you see a high-level overview taken from
-    Brendan Gregg’s [*Linux Extended BPF (eBPF) Tracing Tools* (Addison-Wesley)](https://oreil.ly/n7jqx)
-    .
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![eBPF overview in the Linux kernel](Images/haku_0507.png)'
-  prefs: []
-  type: TYPE_IMG
-- en: Figure 5-7\. eBPF overview in the Linux kernel
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: This all looks promising, but is eBPF already used in the wild, and also, which
-    options are available? Let’s take a look.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Options and Uptake
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: 'In 2021, eBPF is already used in a number of places and for use cases such
-    as:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: In Kubernetes, as a CNI plug-in to enable, for example, pod networking in [Cilium](https://oreil.ly/mjYG3)
-    and Project Calico, as well as for service scalability (in the context of `kube-proxy`)
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: For observability, like for Linux kernel tracing such as with [iovisor/bpftrace](https://oreil.ly/Qk7G5)
-    as well as in a clustered setup with [Hubble](https://oreil.ly/Pqzra)
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: As a security control, for example to perform container runtime scanning as
-    you can use with projects such as [CNCF Falco](https://falco.org), but also for
-    enforcing network policies in Kubernetes (via Cilium, Calico, etc.) as discussed
-    in [“Traffic Flow Control”](#workload-network-policies)
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: Network load balancing like Facebook’s L4 [katran](https://oreil.ly/csPLr) library
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: Low-level intrusion detection systems (IDS) for Kubernetes (see [Chapter 9](ch09.xhtml#ch-intrusion-detection)
-    for details)
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: 'We see an increasing number of players entering the eBPF field and leading
-    the charge is [Isovalent](https://isovalent.com). While it’s still early days
-    from an adoption perspective, eBPF has a huge potential. Coming back to the service
-    mesh data plane: it is perfectly doable and thinkable to implement the Envoy APIs
-    as a set of eBPF programs and push the handling from user space sidecar proxy
-    into the kernel.'
-  prefs: []
-  type: TYPE_NORMAL
-- en: Extending the kernel with userspace programs sounds interesting, but how does
-    that look, in practice?
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'Case Study: Attaching a Probe to a Go Program'
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: Let’s have a look at an example from the [Cilium](https://oreil.ly/MPvHJ) project.
-    The following is a Go program available in [main.go](https://oreil.ly/I0L8S) and
-    demonstrates how you can attach an eBPF program (written in C) to a kernel symbol.
-    The overall result of the exercise is that whenever the `sys_execve` syscall is
-    invoked, a kernel counter is increased, which the Go program then reads and prints
-    out the number of times the probed symbol has been called per second.
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'The following line in *main.go* (edited to fit the page; should all be on the
-    same line) instructs the Go toolchain to include the compiled C program that contains
-    our eBPF code:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE20]'
-  prefs: []
-  type: TYPE_PRE
-- en: 'In [kprobe_example.c](https://oreil.ly/BmGIb) we find the eBPF program itself:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE21]'
-  prefs: []
-  type: TYPE_PRE
-- en: '[![1](Images/1.png)](#co_networking_CO6-1)'
-  prefs: []
-  type: TYPE_NORMAL
-- en: You must define a license.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[![2](Images/2.png)](#co_networking_CO6-2)'
-  prefs: []
-  type: TYPE_NORMAL
-- en: Enables exchange of data between kernel and userspace.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[![3](Images/3.png)](#co_networking_CO6-3)'
-  prefs: []
-  type: TYPE_NORMAL
-- en: The entry point of our eBPF probe (program).
-  prefs: []
-  type: TYPE_NORMAL
-- en: As you can guess, writing eBPF by hand is not fun. Luckily there are a number
-    of great tools and environments available that take care of the low-level stuff
-    for you.
+- en: But the compromise doesn’t have to be malicious. As with the [npm `event-stream`
+    vulnerability](https://oreil.ly/UCKUv), sometimes it’s something as innocent as
+    someone looking to pass on maintainership to an existing and credible maintainer,
+    who then goes rogue and inserts their own payload.
+  id: totrans-49
   prefs: []
   type: TYPE_NORMAL
 - en: Note
+  id: totrans-50
   prefs:
   - PREF_H6
   type: TYPE_NORMAL
-- en: Just as we were wrapping up the book writing, the Linux Foundation announced
-    that Facebook, Google, Isovalent, Microsoft, and Netflix joined together to [create
-    the eBPF Foundation](https://oreil.ly/9JkNz), and with it giving the eBPF project
-    a vendor-neutral home. Stay tuned!
+- en: In this case the vulnerable `event-stream` package was downloaded 12 million
+    times, and was depended upon by more than 1,600 other packages. The payload searched
+    for “hot cryptocurrency wallets” to steal from developers’ machines. If this had
+    stolen SSH and GPG keys instead and used them to propagate the attack further,
+    the compromise could have been much wider.
+  id: totrans-51
   prefs: []
   type: TYPE_NORMAL
-- en: To dive deeper into the eBPF topic we suggest you read [*Linux Observability
-    with BPF*](https://oreil.ly/jbERf) by David Calavera and Lorenzo Fontana (O’Reilly).
-    If you’re looking for a quick overview, Matt Oswalt has a nice [Introduction to
-    eBPF](https://oreil.ly/kROpT).
+- en: A successful supply chain attack is often difficult to detect, as a consumer
+    trusts every upstream producer. If a single producer is compromised, the attacker
+    may target individual downstream consumers or pick only the highest-value targets.
+  id: totrans-52
   prefs: []
   type: TYPE_NORMAL
-- en: To stay on top of things, have a look at [ebpf.io](https://ebpf.io) and check
-    out what the community publishes on the [YouTube channel](https://oreil.ly/wfFnN)
-    for this topic.
+- en: Software
+  id: totrans-53
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: For our purposes, the supply chains we consume are for software and hardware.
+    In a cloud environment, a datacenter’s physical and network security is managed
+    by the provider, but it is your responsibility to secure your use of the system.
+    This means we have high confidence that the hardware we are using is safe. Our
+    usage of it—the software we install and its behavior—is where our supply chain
+    risk starts.
+  id: totrans-54
   prefs: []
   type: TYPE_NORMAL
-- en: Further, have a look at [Pixie](https://px.dev), an open source, eBPF-based
-    observability tool with an active community and broad industry support (see [Figure 5-8](#fig-pixie-example)).
+- en: Software is built from many other pieces of software. Unlike CPU manufacturing,
+    where inert components are assembled into a structure, software is more like a
+    symbiotic population of cooperating organisms. Each component may be autonomous
+    and choosing to cooperate (CLI tools, servers, OS) or useless unless used in a
+    certain way (`glibc`, linked libraries, most application dependencies). Any software
+    can be autonomous or cooperative, and it is impossible to conclusively prove which
+    it is at any moment in time. This means test code (unit tests, acceptance tests)
+    may still contain malicious code, which would start to explore the Continuous
+    Integration (CI) build environment or the developer’s machine it is executed on.
+  id: totrans-55
   prefs: []
   type: TYPE_NORMAL
-- en: '![Pixie in action](Images/haku_0508.png)'
+- en: 'This poses a conundrum: if malicious code can be hidden in any part of a system,
+    how can we conclusively say that the entire system is secure?'
+  id: totrans-56
   prefs: []
-  type: TYPE_IMG
-- en: Figure 5-8\. Pixie in action
+  type: TYPE_NORMAL
+- en: 'As Liz Rice points out in [*Container Security*](https://oreil.ly/uzvnv) (O’Reilly):'
+  id: totrans-57
+  prefs: []
+  type: TYPE_NORMAL
+- en: It’s very likely that a deployment of any non-trivial software will include
+    some vulnerabilities, and there is a risk that systems will be attacked through
+    them. To manage this risk, you need to be able to identify which vulnerabilities
+    are present and assess their severity, prioritize them, and have processes in
+    place to fix or mitigate these issues.
+  id: totrans-58
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: Software supply chain management is difficult. It requires you to accept some
+    level of risk and make sure that reasonable measures are in place to detect dangerous
+    software before it is executed inside your systems. This risk is balanced with
+    diminishing rewards—builds get more expensive and more difficult to maintain with
+    each control, and there are much higher expenses for each step.
+  id: totrans-59
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  id: totrans-60
   prefs:
   - PREF_H6
   type: TYPE_NORMAL
-- en: Conclusion
+- en: Full confidence in your supply chain is almost impossible without the full spectrum
+    of controls detailed in the CNCF Security Technical Advisory Group paper on software
+    supply chain security (addressed later in this chapter).
+  id: totrans-61
+  prefs: []
+  type: TYPE_NORMAL
+- en: As ever, you assume that no control is entirely effective and run intrusion
+    detection on the build machines as the last line of defense against targeted or
+    widespread zero-day vulnerabilities that may have included SUNBURST, Shellshock,
+    or DirtyCOW, (see [“Architecting Containerized Apps for Resilience”](#architecting-apps-resilience)).
+  id: totrans-62
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Now let’s look at how to secure a software supply chain, starting with minimum
+    viable cloud native security: scanning for CVEs.'
+  id: totrans-63
+  prefs: []
+  type: TYPE_NORMAL
+- en: Scanning for CVEs
+  id: totrans-64
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: CVEs are published for known vulnerabilities, and it is critical that you do
+    not give Captain Hashjack’s gruesome crew easy access to your systems by ignoring
+    or failing to patch them. Open source software lists its dependencies in its build
+    instructions (*pom.xml*, *package.json*, *go.mod*, *requirements.txt*, *Gemfile*,
+    etc.), which gives us visibility of its composition. This means you should scan
+    those dependencies for CVEs using tools like [trivy](https://oreil.ly/wLyXO).
+    This is the lowest-hanging fruit in the defense of the supply chain and should
+    be considered a part of the minimum viable container security processes.
+  id: totrans-65
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'trivy can scan code at rest in various places:'
+  id: totrans-66
+  prefs: []
+  type: TYPE_NORMAL
+- en: In a container image
+  id: totrans-67
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: In a filesystem
+  id: totrans-68
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: In a Git repository
+  id: totrans-69
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: It reports on known vulnerabilities. Scanning for CVEs is minimum viable security
+    for shipping code to production.
+  id: totrans-70
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This command scans the local directory and finds the `gomod` and `npm` dependency
+    files, reporting on their contents (output was edited to fit):'
+  id: totrans-71
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE0]'
+  id: totrans-72
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE0]'
+- en: '[![1](Images/1.png)](#co_applications_and_supply_chain_CO1-1)'
+  id: totrans-73
+  prefs: []
+  type: TYPE_NORMAL
+- en: Run trivy against the filesystem (`fs`) in the current working directory (`.`).
+  id: totrans-74
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](Images/2.png)](#co_applications_and_supply_chain_CO1-2)'
+  id: totrans-75
+  prefs: []
+  type: TYPE_NORMAL
+- en: Scanning has found two high-severity vulnerabilities in *infra/build/go.sum*.
+  id: totrans-76
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![3](Images/3.png)](#co_applications_and_supply_chain_CO1-3)'
+  id: totrans-77
+  prefs: []
+  type: TYPE_NORMAL
+- en: The *infra/api/code/package-lock.json* has no vulnerabilities detected.
+  id: totrans-78
+  prefs: []
+  type: TYPE_NORMAL
+- en: So we can scan code in our supply chain to see if it’s got vulnerable dependencies.
+    But what about the code itself?
+  id: totrans-79
+  prefs: []
+  type: TYPE_NORMAL
+- en: Ingesting Open Source Software
+  id: totrans-80
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Securely ingesting code is hard: how can we prove that a container image was
+    built from the same source we can see on GitHub? Or that a compiled application
+    is the same open source code we’ve read, without rebuilding it from source?'
+  id: totrans-81
+  prefs: []
+  type: TYPE_NORMAL
+- en: While this is hard with open source, closed source presents even greater challenges.
+  id: totrans-82
+  prefs: []
+  type: TYPE_NORMAL
+- en: How do we establish and verify trust with our suppliers?
+  id: totrans-83
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Much to the Captain’s dismay, this problem has been studied since 1983, when
+    Ken Thompson introduced [“Reflections on Trusting Trust”](https://oreil.ly/NEMQR):'
+  id: totrans-84
+  prefs: []
+  type: TYPE_NORMAL
+- en: To what extent should one trust a statement that a program is free of Trojan
+    horses? Perhaps it is more important to trust the people who wrote the software.
+  id: totrans-85
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: 'The question of trust underpins many human interactions, and is the foundation
+    of the original internet. Thompson continues:'
+  id: totrans-86
+  prefs: []
+  type: TYPE_NORMAL
+- en: The moral is obvious. You can’t trust code that you did not totally create yourself.
+    (Especially code from companies that employ people like me.) No amount of source-level
+    verification or scrutiny will protect you from using untrusted code… As the level
+    of program gets lower, these bugs will be harder and harder to detect. A well
+    installed microcode bug will be almost impossible to detect.
+  id: totrans-87
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: These philosophical questions of security affect your organization’s supply
+    chain, as well as your customers. The core problem remains unsolved and difficult
+    to correct entirely.
+  id: totrans-88
+  prefs: []
+  type: TYPE_NORMAL
+- en: While BCTL’s traditional relationship with software was defined previously as
+    a consumer, when you started public open source on GitHub, you became a producer
+    too. This distinction exists in most enterprise organizations today, as most have
+    not adapted to their new producer responsibilities.
+  id: totrans-89
+  prefs: []
+  type: TYPE_NORMAL
+- en: Which Producers Do We Trust?
+  id: totrans-90
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'To secure a supply chain we must have trust in our producers. These are parties
+    outside of your organization and they may include:'
+  id: totrans-91
+  prefs: []
+  type: TYPE_NORMAL
+- en: Security providers such as the root Certificate Authorities to authenticate
+    other servers on a network, and DNSSEC to return the right address for our transmission
+  id: totrans-92
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Cryptographic algorithms and implementations like GPG, RSA, and Diffie-Hellman
+    to secure our data in transit and at rest
+  id: totrans-93
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Hardware enablers like OS, CPU/firmware, and driver vendors to provide us low-level
+    hardware interaction
+  id: totrans-94
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Application developers and package maintainers to prevent malicious code installation
+    via their distributed packages
+  id: totrans-95
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Open source and community-run teams, organizations, and standards bodies, to
+    grow our technologies and communities in the common interest
+  id: totrans-96
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Vendors, distributors, and sales agents to not install backdoors or malware
+  id: totrans-97
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Everybody—not to have exploitable bugs
+  id: totrans-98
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'You may be wondering if it’s ever possible to secure this entirely, and the
+    answer is no. Nothing is ever entirely secure, but everything can be hardened
+    so that it’s less appealing to all except the most skilled of threat actors. It’s
+    all about balancing layers of security controls that might include:'
+  id: totrans-99
+  prefs: []
+  type: TYPE_NORMAL
+- en: Physical second factors (2FA)
+  id: totrans-100
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: GPG signing (e.g., Yubikeys)
+  id: totrans-101
+  prefs:
+  - PREF_IND
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[WebAuthn](https://webauthn.io), FIDO2 Project, and physical security tokens
+    (e.g., RSA)'
+  id: totrans-102
+  prefs:
+  - PREF_IND
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Human redundancy
+  id: totrans-103
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Authors cannot merge their own PRs
+  id: totrans-104
+  prefs:
+  - PREF_IND
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Adding a second person to sign-off critical processes
+  id: totrans-105
+  prefs:
+  - PREF_IND
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Duplication by running the same process twice in different environments and
+    comparing results
+  id: totrans-106
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[reprotest](https://oreil.ly/c5Gm0) and the [Reproducible Builds](https://oreil.ly/VsONj)
+    initiative (see examples in [Debian](https://oreil.ly/rwWoH) and [Arch Linux](https://oreil.ly/mgVwV))'
+  id: totrans-107
+  prefs:
+  - PREF_IND
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: CNCF Security Technical Advisory Group
+  id: totrans-108
   prefs:
   - PREF_H1
   type: TYPE_NORMAL
-- en: Summing up, there are a number of defaults in the Kubernetes networking space
-    you want to be aware of. As a baseline, you can apply the good practices you know
-    from a noncontainerized environment in combination with intrusion detection tooling
-    as shown in [Chapter 9](ch09.xhtml#ch-intrusion-detection). In addition, you want
-    to use native resources such as network policies potentially in combination with
-    other CNCF projects such as SPIFFE for workload identity to strengthen your security
-    posture.
+- en: 'The CNCF Security Technical Advisory Group (*tag-security*) published a definitive
+    [software supply chain security paper](https://oreil.ly/rEEd7). For an in-depth
+    and immersive view of the field, it is strongly recommended reading:'
+  id: totrans-109
   prefs: []
   type: TYPE_NORMAL
-- en: Service meshes, while still in the early days, are another promising option
-    to enforce policies and gain insights into what is going on. Last but not least,
-    eBPF is the up and coming star in the networking arena, enabling a number of security-related
-    use cases.
+- en: 'It evaluates many of the available tools and defines four key principles for
+    supply chain security and steps for each, including:'
+  id: totrans-110
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: ''
+  id: totrans-111
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: 'Trust: Every step in a supply chain should be “trustworthy” due to a combination
+    of cryptographic attestation and verification.'
+  id: totrans-112
+  prefs:
+  - PREF_BQ
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: ''
+  id: totrans-113
+  prefs:
+  - PREF_BQ
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: ''
+  id: totrans-114
+  prefs:
+  - PREF_BQ
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: 'Automation: Automation is critical to supply chain security and can significantly
+    reduce the possibility of human error and configuration drift.'
+  id: totrans-115
+  prefs:
+  - PREF_BQ
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: ''
+  id: totrans-116
+  prefs:
+  - PREF_BQ
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: ''
+  id: totrans-117
+  prefs:
+  - PREF_BQ
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: 'Clarity: The build environments used in a supply chain should be clearly defined,
+    with limited scope.'
+  id: totrans-118
+  prefs:
+  - PREF_BQ
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: ''
+  id: totrans-119
+  prefs:
+  - PREF_BQ
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: ''
+  id: totrans-120
+  prefs:
+  - PREF_BQ
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: 'Mutual Authentication: All entities operating in the supply chain environment
+    must be required to mutually authenticate using hardened authentication mechanisms
+    with regular key rotation.'
+  id: totrans-121
+  prefs:
+  - PREF_BQ
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: ''
+  id: totrans-122
+  prefs:
+  - PREF_BQ
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: ''
+  id: totrans-123
+  prefs:
+  - PREF_BQ
+  - PREF_IND
+  type: TYPE_NORMAL
+- en: ''
+  id: totrans-124
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: Software Supply Chain Best Practices, tag-security
+  id: totrans-125
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: 'It then covers the main parts of supply chain security:'
+  id: totrans-126
   prefs: []
   type: TYPE_NORMAL
-- en: 'Now that we have the networking secured, we are ready for the Captain to move
-    on to more “solid” grounds: storage.'
+- en: Source code (what your developers write)
+  id: totrans-127
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Materials (dependencies of the app and its environment)
+  id: totrans-128
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Build pipelines (to test and build your app)
+  id: totrans-129
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Artifacts (your app plus test evidence and signatures)
+  id: totrans-130
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: Deployments (how your consumers access your app)
+  id: totrans-131
+  prefs:
+  - PREF_OL
+  type: TYPE_NORMAL
+- en: If your supply chain is compromised at any one of these points, your consumers
+    may be compromised too.
+  id: totrans-132
+  prefs: []
+  type: TYPE_NORMAL
+- en: Architecting Containerized Apps for Resilience
+  id: totrans-133
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: You should adopt an adversarial mindset when architecting and building systems
+    so security considerations are baked in. Part of that mindset includes learning
+    about historical vulnerabilities in order to defend yourself against similar attacks.
+  id: totrans-134
+  prefs: []
+  type: TYPE_NORMAL
+- en: The granular security policy of a container is an opportunity to reconsider
+    applications as “compromised-by-default,” and configure them so they’re better
+    protected against zero-day or unpatched vulnerabilities.
+  id: totrans-135
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  id: totrans-136
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'One such historical vulnerability was DirtyCOW: a race condition in the Linux
+    kernel’s privileged memory mapping code that allowed unprivileged local users
+    to escalate to root.'
+  id: totrans-137
+  prefs: []
+  type: TYPE_NORMAL
+- en: The bug allowed an attacker to gain a root shell on the host, and was exploitable
+    from inside a container that didn’t block `ptrace`. One of the authors live demoed
+    [preventing a DirtyCOW container breakout](https://oreil.ly/zYCJp) with an AppArmor
+    profile that blocked the `ptrace` system call. There’s an example Vagrantfile
+    to reproduce the bug in [Scott Coulton’s repo](https://oreil.ly/Fvu4v).
+  id: totrans-138
+  prefs: []
+  type: TYPE_NORMAL
+- en: Detecting Trojans
+  id: totrans-139
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Tools like [dockerscan](https://oreil.ly/rlLnJ) can *trojanize* a container:'
+  id: totrans-140
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'trojanize: inject a reverse shell into a docker image'
+  id: totrans-141
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: ''
+  id: totrans-142
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: dockerscan
+  id: totrans-143
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: Note
+  id: totrans-144
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: We go into more detail on attacking software and libraries in [“Captain Hashjack
+    Attacks a Supply Chain”](#captain_hashjack_attacks_a_supply_chain).
+  id: totrans-145
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'To trojanize a `webserver` image is simple:'
+  id: totrans-146
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  id: totrans-147
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE1]'
+- en: '[![1](Images/1.png)](#co_applications_and_supply_chain_CO2-1)'
+  id: totrans-148
+  prefs: []
+  type: TYPE_NORMAL
+- en: Export a valid `webserver` tarball from a container image.
+  id: totrans-149
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](Images/2.png)](#co_applications_and_supply_chain_CO2-2)'
+  id: totrans-150
+  prefs: []
+  type: TYPE_NORMAL
+- en: Trojanize the image tarball.
+  id: totrans-151
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![3](Images/3.png)](#co_applications_and_supply_chain_CO2-3)'
+  id: totrans-152
+  prefs: []
+  type: TYPE_NORMAL
+- en: Specify the attacker’s shellcatcher IP and port.
+  id: totrans-153
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![4](Images/4.png)](#co_applications_and_supply_chain_CO2-4)'
+  id: totrans-154
+  prefs: []
+  type: TYPE_NORMAL
+- en: Write to an output tarball called `trojanized-webserver`.
+  id: totrans-155
+  prefs: []
+  type: TYPE_NORMAL
+- en: It’s this sort of attack that you should scan your container images to detect
+    and prevent. As `dockerscan` uses an `LD_PRELOAD` attack that most container IDS
+    and scanning should detect.
+  id: totrans-156
+  prefs: []
+  type: TYPE_NORMAL
+- en: Dynamic analysis of software involves running it in a malware lab environment
+    where it is unable to communicate with the internet and is observed for signs
+    of C2 (“command and control”), automated attacks, or unexpected behavior.
+  id: totrans-157
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  id: totrans-158
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Malware such as WannaCry (a cryptolocking worm) includes a disabling “killswitch”
+    DNS record (sometimes secretly used by malware authors to remotely terminate attacks).
+    In some cases, this is used to delay the deployment of the malware until a convenient
+    time for the attacker.
+  id: totrans-159
+  prefs: []
+  type: TYPE_NORMAL
+- en: Together an artifact and its runtime behavior should form a picture of the trustworthiness
+    of a single package, however there are workarounds. Logic bombs (behavior only
+    executed on certain conditions) make this difficult to detect unless the logic
+    is known. For example, SUNBURST closely emulated the valid HTTP calls of the software
+    it infected. Even tracing a compromised application with tools such as `sysdig`
+    does not clearly surface this type of attack.
+  id: totrans-160
+  prefs: []
+  type: TYPE_NORMAL
+- en: Captain Hashjack Attacks a Supply Chain
+  id: totrans-161
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: '![captain](Images/haku_0000.png)'
+  id: totrans-162
+  prefs: []
+  type: TYPE_IMG
+- en: You know BCTL hasn’t put enough effort into supply chain security. Open source
+    ingestion isn’t regulated, and developers ignore the results of CVE scanning in
+    the pipeline.
+  id: totrans-163
+  prefs: []
+  type: TYPE_NORMAL
+- en: Dread Pirate Hashjack dusts off their keyboard and starts the attack. The goal
+    is to add malicious code to a container image, an open source package, or an operating
+    system application that your team will run in production.
+  id: totrans-164
+  prefs: []
+  type: TYPE_NORMAL
+- en: In this case, Captain Hashjack is looking to attack the rest of your systems
+    from a foothold in an initial pod attack. When the malicious code runs inside
+    your pods it will connect back to a server that the Captain controls. That connection
+    will relay attack commands to run inside that pod in your cluster so the pirates
+    can have a look around, as shown in [Figure 4-4](#app-remote-access-supply-chain).
+  id: totrans-165
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'From this position of remote control, Captain Hashjack might:'
+  id: totrans-166
+  prefs: []
+  type: TYPE_NORMAL
+- en: Enumerate other infrastructure around the cluster like datastores and internally
+    facing software
+  id: totrans-167
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Try to escalate privilege and take over your nodes or cluster
+  id: totrans-168
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Mine cryptocurrency
+  id: totrans-169
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Add the pods or nodes to a botnet, use them as servers, or “watering holes”
+    to spread malware
+  id: totrans-170
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Any other unintended misuse of your noncompromised systems.
+  id: totrans-171
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '![Establishing remote access with a supply chain compromise](Images/haku_0404.png)'
+  id: totrans-172
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 4-4\. Establishing remote access with a supply chain compromise
+  id: totrans-173
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The [Open Source Security Foundation (OpenSSF)](https://openssf.org)’s [SLSA
+    Framework](https://slsa.dev) (“Supply-chain Levels for Software Artifacts,” or
+    “Salsa”) works on the principle that “It can take years to achieve the ideal security
+    state, and intermediate milestones are important.” It defines a graded approach
+    to adopting supply chain security for your builds (see [Table 4-2](#table-openssf)).
+  id: totrans-174
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 4-2\. OpenSSF SLSA levels
+  id: totrans-175
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Level | Description | Requirements |'
+  id: totrans-176
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- |'
+  id: totrans-177
+  prefs: []
+  type: TYPE_TB
+- en: '| 0 | No guarantees | SLSA 0 represents the lack of any SLSA level. |'
+  id: totrans-178
+  prefs: []
+  type: TYPE_TB
+- en: '| 1 | Provenance checks to help evaluate risks and security | The build process
+    must be fully scripted/automated and generate provenance. |'
+  id: totrans-179
+  prefs: []
+  type: TYPE_TB
+- en: '| 2 | Further checks against the origin of the software | Requires using version
+    control and a hosted build service that generates authenticated provenance. This
+    results in tamper resistance of the build service. |'
+  id: totrans-180
+  prefs: []
+  type: TYPE_TB
+- en: '| 3 | Extra resistance to specific classes of threats | The source and build
+    platforms meet specific standards to guarantee the auditability of the source
+    and the integrity of the provenance respectively. Advanced protection including
+    security controls on host, non-falsifiable provenance, and prevention of cross-build
+    contamination. |'
+  id: totrans-181
+  prefs: []
+  type: TYPE_TB
+- en: '| 4 | Highest levels of confidence and trust | Strict auditability and reliability
+    checks. Requires two-person review of all changes and a hermetic, reproducible
+    build process. |'
+  id: totrans-182
+  prefs: []
+  type: TYPE_TB
+- en: Let’s move on to the aftermath.
+  id: totrans-183
+  prefs: []
+  type: TYPE_NORMAL
+- en: Post-Compromise Persistence
+  id: totrans-184
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Before attackers do something that may be detected by the defender, they look
+    to establish persistence, or a backdoor, so they can, for example, enter the system
+    if they get detected or unceremoniously ejected, as their method of intrusion
+    is patched.
+  id: totrans-185
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  id: totrans-186
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: When containers restart, filesystem changes are lost, so persistence is not
+    possible just by writing to the container filesystem. Dropping a “back door” or
+    other persistence mechanism in Kubernetes requires the attacker to use other parts
+    of Kubernetes or the `kubelet` on the host, as anything they write inside the
+    container is lost when it restarts.
+  id: totrans-187
+  prefs: []
+  type: TYPE_NORMAL
+- en: Depending on how you were compromised, Captain Hashjack now has various options
+    available. None are possible in a well-configured container without excessive
+    RBAC privilege, although this doesn’t stop the attacker exlpoiting the same path
+    again and looking to pivot to another part of your system.
+  id: totrans-188
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Possible persistence in Kubernetes can be gained by:'
+  id: totrans-189
+  prefs: []
+  type: TYPE_NORMAL
+- en: Starting a static privileged pod through the `kubelet`’s static manifests
+  id: totrans-190
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Deploying a privileged container directly using the container runtime
+  id: totrans-191
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Deploying an admission controller or CronJob with a backdoor
+  id: totrans-192
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Deploying a shadow API server with custom authentication
+  id: totrans-193
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Adding a mutating webhook that injects a backdoor container to some new pods
+  id: totrans-194
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Adding worker or control plane nodes to a botnet or C2 network
+  id: totrans-195
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Editing container lifecycle `postStart` and `preStop` hooks to add backdoors
+  id: totrans-196
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Editing liveness probes to exec a backdoor in the target container
+  id: totrans-197
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Any other mechanism that runs code under the attacker’s control
+  id: totrans-198
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Risks to Your Systems
+  id: totrans-199
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Once they have established persistence, attacks may become more bold and dangerous:'
+  id: totrans-200
+  prefs: []
+  type: TYPE_NORMAL
+- en: Exfiltrating data, credentials, and cryptocurrency wallets
+  id: totrans-201
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Pivoting further into the system via other pods, the control plane, worker nodes,
+    or cloud account
+  id: totrans-202
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Cryptojacking compute resources (e.g., [mining Monero in Docker containers](https://oreil.ly/0E9iw))
+  id: totrans-203
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Escalating privilege in the same pod
+  id: totrans-204
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Cryptolocking data
+  id: totrans-205
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Secondary supply chain attack on target’s published artifacts/software
+  id: totrans-206
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Let’s move on to container images.
+  id: totrans-207
+  prefs: []
+  type: TYPE_NORMAL
+- en: Container Image Build Supply Chains
+  id: totrans-208
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Your developers have written code that needs to be built and run in production.
+    CI/CD automation enables the building and deployment of artifacts, and is a traditionally
+    appealing target due to less security rigor than the production systems it deploys
+    to.
+  id: totrans-209
+  prefs: []
+  type: TYPE_NORMAL
+- en: To address this insecurity, the Software Factory pattern is gaining adoption
+    as a model for building the pipelines to build software.
+  id: totrans-210
+  prefs: []
+  type: TYPE_NORMAL
+- en: Software Factories
+  id: totrans-211
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: A Software Factory is a form of CI/CD that focuses on self-replication. It is
+    a build system that can deploy copies of itself, or other parts of the system,
+    as new CI/CD pipelines. This focus on replication ensures build systems are repeatable,
+    easy to deploy, and easy to replace. They also assist iteration and development
+    of the build infrastructure itself, which makes securing these types of systems
+    much easier.
+  id: totrans-212
+  prefs: []
+  type: TYPE_NORMAL
+- en: Use of this pattern requires slick DevOps skills, continuous integration, and
+    build automation practices, and is ideal for containers due to their compartmentalised
+    nature.
+  id: totrans-213
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  id: totrans-214
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The [DoD Software Factory pattern](https://oreil.ly/HqNz4) defines the Department
+    of Defense’s best practice ideals for building secure, large-scale cloud or on-prem
+    cloud native infrastructure.
+  id: totrans-215
+  prefs: []
+  type: TYPE_NORMAL
+- en: Container images built from, and used to build, the DoD Software Factory are
+    publicly available at [IronBank GitLab](https://oreil.ly/3NvDj).
+  id: totrans-216
+  prefs: []
+  type: TYPE_NORMAL
+- en: Cryptographic signing of build steps and artifacts can increase trust in the
+    system, and can be revalidated with an admission controller such as [portieris](https://oreil.ly/mY9eu)
+    for Notary and [Kritis](https://oreil.ly/R33SG) for Grafeas.
+  id: totrans-217
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tekton is a Kubernetes-based build system that runs build stages in containers.
+    It runs Kubernetes Custom Resources that define build steps in pods, and [Tekton
+    Chains](https://oreil.ly/ZHMmw) can use in-toto to sign the pod’s workspace files.
+    [Jenkins X](https://jenkins-x.io) is built on top of it and extends its feature
+    set.
+  id: totrans-218
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  id: totrans-219
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '[Dan Lorenc](https://oreil.ly/av7UQ) elegantly summarised [the supply chain
+    signing landscape](https://oreil.ly/WUVHD).'
+  id: totrans-220
+  prefs: []
+  type: TYPE_NORMAL
+- en: Blessed Image Factory
+  id: totrans-221
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Some software factory pipelines are used to build and scan your base images,
+    in the same way virtual machine images are built: on a cadence, and in response
+    to releases of the underlying image. An image build is untrusted if any of the
+    inputs to the build are not trusted. An adversary can attack a container build
+    with:'
+  id: totrans-222
+  prefs: []
+  type: TYPE_NORMAL
+- en: Malicious commands in a `RUN` directive that can attack the host
+  id: totrans-223
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Host’s non-loopback network ports/services
+  id: totrans-224
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Enumeration of other network entities (cloud provider, build infrastructure,
+    network routes to production)
+  id: totrans-225
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Malicious `FROM` image that has access to build Secrets
+  id: totrans-226
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Malicious image that has `ONBUILD` directive
+  id: totrans-227
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Docker-in-docker and mounted container runtime sockets that can lead to host
+    breakout
+  id: totrans-228
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Zero-days in container runtime or kernel
+  id: totrans-229
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Network attack surface (host, ports exposed by other builds)
+  id: totrans-230
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'To defend from malicious builds, you should begin with static analysis using
+    [Hadolint](https://oreil.ly/M8GDi) and [conftest](https://oreil.ly/8mKFd) to enforce
+    your policy. For example:'
+  id: totrans-231
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  id: totrans-232
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE2]'
+- en: 'Conftest wraps OPA and runs Rego language policies (see [“Open Policy Agent”](ch08.xhtml#open-policy-agent)):'
+  id: totrans-233
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  id: totrans-234
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE3]'
+- en: If the Dockerfile conforms to policy, scan the container build workspace with
+    tools like trivy. You can also build and then scan, although this is slightly
+    riskier if an attack spawns a reverse shell into the build environment.
+  id: totrans-235
+  prefs: []
+  type: TYPE_NORMAL
+- en: If the container’s scan is safe, you can perform a build.
+  id: totrans-236
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  id: totrans-237
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Adding a hardening stage to the Dockerfile helps to remove unnecessary files
+    and binaries that an attacker may try to exploit, and is detailed in [DoD’s Container
+    Hardening Guide](https://oreil.ly/7lVbG).
+  id: totrans-238
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Protecting the build’s network is important, otherwise malicious code in a
+    container build can pull further dependencies and malicious code from the internet.
+    Security controls of varying difficulty include:'
+  id: totrans-239
+  prefs: []
+  type: TYPE_NORMAL
+- en: Preventing network egress
+  id: totrans-240
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Isolating from the host’s kernel with a VM
+  id: totrans-241
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Running the build process as a nonroot user or in a user namespace
+  id: totrans-242
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Executing `RUN` commands as a nonroot user in container filesystem
+  id: totrans-243
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Share nothing nonessential with the build
+  id: totrans-244
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Base Images
+  id: totrans-245
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: When an application is being packaged for deployment it must be built into a
+    container image. Depending on your choice of programming language and application
+    dependencies, your container will use one of the base images from [Table 4-3](Images/#app-table-base-images).
+  id: totrans-246
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 4-3\. Types of base images
+  id: totrans-247
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Type of base image | How it’s built | Contents of image filesystem | Example
+    container image |'
+  id: totrans-248
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- | --- |'
+  id: totrans-249
+  prefs: []
+  type: TYPE_TB
+- en: '| Scratch | Add one (or more) static binary to an empty container root filesystem.
+    | Nothing at all except `/my-binary` (it’s the only thing in `/` directory), and
+    any added dependencies (often CA bundles, locale information, static files for
+    the application). | [Static Golang or Rust binary examples](https://oreil.ly/7VW3k)
+    |'
+  id: totrans-250
+  prefs: []
+  type: TYPE_TB
+- en: '| Distroless | Add one (or more) static binary to a container that has locale
+    and CA information only (no Bash, Busybox, etc.). | Nothing except `my-app`, `/etc/locale`,
+    TLS pubkeys, (plus any dependencies, as per scratch), etc. | [Static Golang or
+    Rust binary examples](https://oreil.ly/RZc07) |'
+  id: totrans-251
+  prefs: []
+  type: TYPE_TB
+- en: '| Hardened | Add nonstatic binary or dynamic application to a minimal container,
+    then remove all nonessential files and harden filesystem. | Reduced Linux userspace:
+    `glibc`, `/code/my-app.py`, `/code/deps`, `/bin/python`, Python libs, static files
+    for the application. | Web servers, nonstatic or complex applications, [IronBank
+    examples](https://oreil.ly/tYOPP) |'
+  id: totrans-252
+  prefs: []
+  type: TYPE_TB
+- en: '| Vanilla | No security precautions, possibly dangerous. | Standard Linux userspace.
+    Root user. Possibly anything and everything required to install, build, compile,
+    or debug applications. This offers many opportunities for attack. | [NGINX](https://oreil.ly/0M1HH),
+    [raesene/alpine-nettools](https://oreil.ly/nGOby), [nicolaka/netshoot](https://oreil.ly/60byc)
+    |'
+  id: totrans-253
+  prefs: []
+  type: TYPE_TB
+- en: Minimal containers minimize a container’s attack surface to a hostile process
+    or RCE, reducing an adversary to very advanced tricks like [return-oriented programming](https://oreil.ly/Kr4Kn)
+    that are beyond most attackers’ capabilities. Organized criminals like Dread Pirate
+    Hashjack may be able to use these programming techniques, but exploiting vulnerabilities
+    like these are valuable and perhaps more likely to be sold to an exploit broker
+    than used in the field, potentially reducing their value if discovered.
+  id: totrans-254
+  prefs: []
+  type: TYPE_NORMAL
+- en: Because statically compiled binaries ship their own system call library, they
+    do not need `glibc` or another userspace kernel interface, and can exist with
+    only themselves on the filesystem (see [Figure 4-5](#app-scratch-vs-glibc)).
+  id: totrans-255
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![app-scratch-vs-glibc](Images/haku_0405.png)'
+  id: totrans-256
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 4-5\. How scratch containers and `glibc` talk to the kernel
+  id: totrans-257
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Let’s step back a bit now: we need to take stock of our supply chain.'
+  id: totrans-258
+  prefs: []
+  type: TYPE_NORMAL
+- en: The State of Your Container Supply Chains
+  id: totrans-259
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Applications in containers bundle all their userspace dependencies with them,
+    and this allows us to inspect the composition of an application. The blast radius
+    of a compromised container is less than a bare metal server (the container provides
+    security configuration around the namespaces), but exacerbated by the highly parallelised
+    nature of a Kubernetes workload deployment.
+  id: totrans-260
+  prefs: []
+  type: TYPE_NORMAL
+- en: Secure third-party code ingestion requires trust and verification of upstream
+    dependencies.
+  id: totrans-261
+  prefs: []
+  type: TYPE_NORMAL
+- en: Kubernetes components (OS, containers, config) are a supply chain risk in themselves.
+    Kubernetes distributions that pull unsigned artifacts from object storage (such
+    as S3 and GCS) have no way of validating that the developers meant them to run
+    those containers. Any containers with “escape-friendly configuration” (disabled
+    security features, a lack of hardening, unmonitored and unsecured, etc.) are viable
+    assets for attack.
+  id: totrans-262
+  prefs: []
+  type: TYPE_NORMAL
+- en: The same is true of supporting applications (logging/monitoring, observability,
+    IDS)—anything that is installed as root, that is not hardened, or indeed not architected
+    for resilience to compromise, is potentially subjected to swashbuckling attacks
+    from hostile forces.
+  id: totrans-263
+  prefs: []
+  type: TYPE_NORMAL
+- en: Third-Party Code Risk
+  id: totrans-264
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: During the image build your application installs dependencies into the container,
+    and the same dependencies are often installed onto developers’ machines. This
+    requires the secure ingestion of third party and open source code.
+  id: totrans-265
+  prefs: []
+  type: TYPE_NORMAL
+- en: You value your data security, so running any code from the internet without
+    first verifying it could be unsafe. Adversaries like Captain Hashjack may have
+    left a backdoor to enable remote access to any system that runs their malicious
+    code. You should consider the risk of such an attack as sufficiently low before
+    you allow the software inside your organization’s corporate network and production
+    systems.
+  id: totrans-266
+  prefs: []
+  type: TYPE_NORMAL
+- en: One method to scan ingested code is shown in [Figure 4-6](#app-third-party-code-ingestion).
+    Containers (and other code) that originate outside your organization are pulled
+    from the internet onto a temporary virtual machine. All software signatures and
+    checksums are verified, binaries and source code are scanned for CVEs and malware,
+    and the artifact is packaged and signed for consumption in an internal registry.
+  id: totrans-267
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Third-party code ingestion (detailed)](Images/haku_0406.png)'
+  id: totrans-268
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 4-6\. Third-party code ingestion
+  id: totrans-269
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: In this example a container pulled from a public registry is scanned for CVEs,
+    e.g., tagged for the internal domain, then signed with Notary and pushed to an
+    internal registry, where it can be consumed by Kubernetes build systems and your
+    developers.
+  id: totrans-270
+  prefs: []
+  type: TYPE_NORMAL
+- en: When ingesting third-party code you should be cognizant of who has released
+    it and/or signed the package, the dependencies it uses itself, how long it has
+    been published for, and how it scores in your internal static analysis pipelines.
+  id: totrans-271
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  id: totrans-272
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Aqua’s [Dynamic Threat Analysis for Containers](https://oreil.ly/u1Rc8) runs
+    potentially hostile containers in a sandbox to observe their behavior for signs
+    of malice.
+  id: totrans-273
+  prefs: []
+  type: TYPE_NORMAL
+- en: Scanning third-party code before it enters your network protects you from some
+    supply chain compromises, but targeted attacks may be harder to defend against
+    as they may not use known CVEs or malware. In these cases you may want to observe
+    it running as part of your validation.
+  id: totrans-274
+  prefs: []
+  type: TYPE_NORMAL
+- en: Software Bills of Materials
+  id: totrans-275
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Creating a software bill of materials (SBOM) for a container image is easy with
+    tools like [syft](https://oreil.ly/Z7j5T), which supports APK, DEB, RPM, Ruby
+    Bundles, Python Wheel/Egg/requirements.txt, JavaScript NPM/Yarn, Java JAR/EAR/WAR,
+    Jenkins plugi-ns JPI/HPI, and Go modules.
+  id: totrans-276
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'It can generate output in the [CycloneDX](https://cyclonedx.org) XM format.
+    Here it is running on a container with a single static binary:'
+  id: totrans-277
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE4]'
+  id: totrans-278
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE4]'
+- en: '[![1](Images/1.png)](#co_applications_and_supply_chain_CO3-1)'
+  id: totrans-279
+  prefs: []
+  type: TYPE_NORMAL
+- en: The vendor of the tool used to create the SBOM.
+  id: totrans-280
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](Images/2.png)](#co_applications_and_supply_chain_CO3-2)'
+  id: totrans-281
+  prefs: []
+  type: TYPE_NORMAL
+- en: The tool that’s created the SBOM.
+  id: totrans-282
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![3](Images/3.png)](#co_applications_and_supply_chain_CO3-3)'
+  id: totrans-283
+  prefs: []
+  type: TYPE_NORMAL
+- en: The tool version.
+  id: totrans-284
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![4](Images/4.png)](#co_applications_and_supply_chain_CO3-4)'
+  id: totrans-285
+  prefs: []
+  type: TYPE_NORMAL
+- en: The supply chain component being scanned and its type of container.
+  id: totrans-286
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![5](Images/5.png)](#co_applications_and_supply_chain_CO3-5)'
+  id: totrans-287
+  prefs: []
+  type: TYPE_NORMAL
+- en: The container’s name.
+  id: totrans-288
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![6](Images/6.png)](#co_applications_and_supply_chain_CO3-6)'
+  id: totrans-289
+  prefs: []
+  type: TYPE_NORMAL
+- en: The container’s version, a SHA256 content hash, or digest.
+  id: totrans-290
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'A bill of materials is just a packing list for your software artifacts. Running
+    against the `alpine:base` image, we see an SBOM with software licenses (output
+    edited to fit):'
+  id: totrans-291
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE5]'
+  id: totrans-292
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE5]'
+- en: These verifiable artifacts can be signed by supply chain security tools like
+    `cosign`, `in-toto`, and `notary`. When consumers demand that suppliers produce
+    verifiable artifacts and bills of materials from their own audited, compliant,
+    and secure software factories, the supply chain will become harder to compromise
+    for the casual attacker.
+  id: totrans-293
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  id: totrans-294
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: An attack on source code prior to building an artifact or generating an SBOM
+    from it is still trusted, even if it is actually malicious, as with SUNBURST.
+    This is why the build infrastructure must be secured.
+  id: totrans-295
+  prefs: []
+  type: TYPE_NORMAL
+- en: Human Identity and GPG
+  id: totrans-296
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Signing Git commits with GNU Privacy Guard (GPG) signatures identifies the owner
+    of they key as having trusted the commit at the time of signature. This is useful
+    to increase trust, but requires public key infrastructure (PKI), which is notoriously
+    difficult to secure entirely.
+  id: totrans-297
+  prefs: []
+  type: TYPE_NORMAL
+- en: Signing data is easy—the verification is hard.
+  id: totrans-298
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: ''
+  id: totrans-299
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: Dan Lorenc
+  id: totrans-300
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: The problem with PKI is the risk of breach of the PKI infrastructure. Somebody
+    is always responsible for ensuring the public key infrastructure (the servers
+    that host individuals’ trusted public keys) is not compromised and is reporting
+    correct data. If PKI is compromised, an entire organization may be exploited as
+    attackers add keys they control to trusted users.
+  id: totrans-301
+  prefs: []
+  type: TYPE_NORMAL
+- en: Signing Builds and Metadata
+  id: totrans-302
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: In order to trust the output of your build infrastructure, you need to sign
+    it so consumers can verify that it came from you. Signing metadata like SBOMs
+    also allows consumers to detect vulnerabilities where the code is deployed in
+    their systems. The following tools help by signing your artifacts, containers,
+    or metadata.
+  id: totrans-303
+  prefs: []
+  type: TYPE_NORMAL
+- en: Notary v1
+  id: totrans-304
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Notary is the signing system built into Docker, and implements The Update Framework
+    (TUF). It’s used for shipping software updates, but wasn’t enabled in Kubernetes
+    as it requires all images to be signed, or it won’t run them. [portieris](https://oreil.ly/beFeG)
+    implements Notary as an admission controller for Kubernetes instead.
+  id: totrans-305
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Notary v2](https://oreil.ly/ZfhGk) supports creating multiple signatures for
+    OCI Artifacts and storing them in OCI image registries.'
+  id: totrans-306
+  prefs: []
+  type: TYPE_NORMAL
+- en: sigstore
+  id: totrans-307
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: sigstore is a public software signing and transparency service, which can sign
+    containers with [cosign](https://oreil.ly/0mtGF) and store the signatures in an
+    OCI repository, something missing from Notary v1\. As anything can be stored in
+    a container (e.g., binaries, tarballs, scripts, or configuration files), `cosign`
+    is a general artifact signing tool with OCI as its packaging format.
+  id: totrans-308
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`sigstore` provides free certificates and tooling to automate and verify signatures
+    of source code.'
+  id: totrans-309
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: ''
+  id: totrans-310
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: '[sigstore release announcement](https://oreil.ly/rQEeS)'
+  id: totrans-311
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: Similar to Certificate Transparency, it has an append-only cryptographic ledger
+    of events (called [rekor](https://oreil.ly/hkMGk)), and each event has signed
+    metadata about a software release as shown in [Figure 4-7](#suppy-chain-sigstore).
+    Finally, it supports “a free Root-CA for code signing certs, that is, issuing
+    certificates based on an OIDC email address” in [fulcio](https://oreil.ly/lS8WB).
+    Together, these tools dramatically improve the capabilities of the supply chain
+    security landscape.
+  id: totrans-312
+  prefs: []
+  type: TYPE_NORMAL
+- en: It is designed for open source software, and is under rapid development. There
+    are integrations for TUF and in-toto, hardware-based tokens are supported, and
+    it’s compatible with most OCI registries.
+  id: totrans-313
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`sigstore`’s cosign is used to [sign the Distroless base image family](https://oreil.ly/28hQ9).'
+  id: totrans-314
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Storing sigstore manifests in the sigstore manifests into the rekor transparency
+    log](Images/haku_0407.png)'
+  id: totrans-315
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 4-7\. Storing sigstore manifests in the rekor transparency log
+  id: totrans-316
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: in-toto and TUF
+  id: totrans-317
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The [in-toto toolchain](https://in-toto.io) checksums and signs software builds—the
+    steps and output of CI/CD pipelines. This provides transparent metadata about
+    software build processes. This increases the trust a consumer has that an artifact
+    was built from a specific source code revision.
+  id: totrans-318
+  prefs: []
+  type: TYPE_NORMAL
+- en: in-toto link metadata (describing transitions between build stages and signing
+    metadata about them) can be stored by tools like rekor and Grafeas, to be validated
+    by consumers at time of use.
+  id: totrans-319
+  prefs: []
+  type: TYPE_NORMAL
+- en: The in-toto signature ensures that a trusted party (e.g., the build server)
+    has built and signed these objects. However, there is no guarantee that the third
+    party’s keys have not been compromised—the only solution for this is to run parallel,
+    isolated build environments and cross-check the cryptographic signatures. This
+    is done with reproducible builds (in Debian, Arch Linux, and PyPi) to offer resilience
+    to build tool compromise.
+  id: totrans-320
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is only possible if the CI and builds themselves are deterministic (no
+    side effects of the build) and reproducible (the same artifacts are created by
+    the source code). Relying on temporal or stochastic behaviors (time and randomness)
+    will yield unreproducible binaries, as they are affected by timestamps in logfiles,
+    or random seeds that affect compilation.
+  id: totrans-321
+  prefs: []
+  type: TYPE_NORMAL
+- en: When using in-toto, an organization increases trust in their pipelines and artifacts,
+    as there are verifiable signatures for everything. However, without an objective
+    threat model or security assessment of the original build infrastructure, this
+    doesn’t protect supply chains with a single build server that may have been compromised.
+  id: totrans-322
+  prefs: []
+  type: TYPE_NORMAL
+- en: Producers using in-toto with consumers that verfiy signatures makes an attacker’s
+    life harder. They must fully compromise the signing infrastructure (as with SolarWinds).
+  id: totrans-323
+  prefs: []
+  type: TYPE_NORMAL
+- en: GCP Binary Authorization
+  id: totrans-324
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The GCP Binary Authorization feature allows signing of images and admission
+    control to prevent unsigned, out of date, or vulnerable images from reaching production.
+  id: totrans-325
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Validating expected signatures at runtime provides enforcement of pipeline
+    controls: is this image free from known vulnerabilities, or has a list of “accepted”
+    vulnerabilities? Did it pass the automated acceptance tests in the pipeline? Did
+    it come from the build pipeline at all?'
+  id: totrans-326
+  prefs: []
+  type: TYPE_NORMAL
+- en: Grafeas is used to store metadata from image scanning reports, and Kritis is
+    an admission controller that verifies signatures and the absence of CVEs against
+    the images.
+  id: totrans-327
+  prefs: []
+  type: TYPE_NORMAL
+- en: Grafeas
+  id: totrans-328
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Grafeas is a metadata store for pipeline metadata like vulnerability scans and
+    test reports. Information about a container is recorded against its digest, which
+    can be used to report on vulnerabilities of an organization’s images and ensure
+    that build stages have successfully passed. Grafeas can also store in-toto link
+    metadata.
+  id: totrans-329
+  prefs: []
+  type: TYPE_NORMAL
+- en: Infrastructure Supply Chain
+  id: totrans-330
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: It’s also worth considering your operating system base image, and the location
+    your Kubernetes control plane containers and packages are installed from.
+  id: totrans-331
+  prefs: []
+  type: TYPE_NORMAL
+- en: Some distributions have historically modified and repackaged Kubernetes, and
+    this introduces further supply chain risk of malicious code injection. Decide
+    how you’ll handle this based upon your initial threat model, and architect systems
+    and networks for compromise resilience.
+  id: totrans-332
+  prefs: []
+  type: TYPE_NORMAL
+- en: Operator Privileges
+  id: totrans-333
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Kubernetes Operators are designed to reduce human error by automating Kubernetes
+    configuration, and reactive to events. They interact with Kubernetes and whatever
+    other resources are under the operator’s control. Those resources may be in a
+    single namespace, multiple namespaces, or outside of Kubernetes. This means they
+    are often highly privileged to enable this complex automation, and so bring a
+    level of risk.
+  id: totrans-334
+  prefs: []
+  type: TYPE_NORMAL
+- en: An Operator-based supply chain attack might allow Captain Hashjack to discreetly
+    deploy their malicious workloads by misusing RBAC, and a rogue resource could
+    go completely undetected. While this attack is not yet widely seen, it has the
+    potential to compromise a great number of clusters.
+  id: totrans-335
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You must appraise and security-test third-party Operators before trusting them:
+    write tests for their RBAC permissions so you are alerted if they change, and
+    ensure an Operator’s `securityContext` configuration is suitable for the workload.'
+  id: totrans-336
+  prefs: []
+  type: TYPE_NORMAL
+- en: Attacking Higher Up the Supply Chain
+  id: totrans-337
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: To attack BCTL, Captain Hashjack may consider attacking the organizations that
+    supply its software, such as operating systems, vendors, and open source packages.
+    Your open source libraries may also have vulnerabilities, the most devastating
+    of which has historically been an Apache Struts RCE, CVE-2017-5638.
+  id: totrans-338
+  prefs: []
+  type: TYPE_NORMAL
+- en: Trusted open source libraries may have been “backdoored” (such as NPM’s [`event-stream`
+    package](https://oreil.ly/7ZRj5)) or may be removed from the registry while in
+    active use, such as [`left-pad`](https://oreil.ly/mMv29) (although registries
+    now look to avoid this by preventing “unpublishing” packages).
+  id: totrans-339
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  id: totrans-340
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: CVE-2017-5638 affected Apache Struts, a Java web framework.
+  id: totrans-341
+  prefs: []
+  type: TYPE_NORMAL
+- en: The server didn’t parse `Content-Type` HTTP headers correctly, which [allowed
+    any commands](https://oreil.ly/aZfEL) to be executed in the process namespace
+    as the web server’s user.
+  id: totrans-342
+  prefs: []
+  type: TYPE_NORMAL
+- en: Struts 2 has a history of critical security bugs,[3] many tied to its use of
+    OGNL technology;[4] some vulnerabilities can lead to arbitrary code execution.
+  id: totrans-343
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: ''
+  id: totrans-344
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: '[Wikipedia](https://oreil.ly/t6Cfe)'
+  id: totrans-345
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: Code distributed by vendors can be compromised, as [Codecov was](https://oreil.ly/9SHDZ).
+    An error in its container image creation process allowed an attacker to modify
+    a Bash uploader script run by customers to start builds. This attack compromised
+    build Secrets that may then have been used against other systems.
+  id: totrans-346
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  id: totrans-347
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The number of organizations using Codecov was significant. [Searching for Git
+    repos with grep.app](https://oreil.ly/kDBdD) showed there were over 9,200 results
+    in the top 500,000 public Git repos. [GitHub](https://oreil.ly/GLP8D) shows 397,518
+    code results at the time of this writing.
+  id: totrans-348
+  prefs: []
+  type: TYPE_NORMAL
+- en: Poorly written code that fails to handle untrusted user input or internal errors
+    may have remotely exploitable vulnerabilities. Application security is responsible
+    for preventing this easy access to your systems.
+  id: totrans-349
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The industry-recognised moniker for this is “shift left,” which means you should
+    run static and dynamic analysis of the code your developers write as they write
+    it: add automated tooling to the IDE, provide a local security testing workflow,
+    run configuration tests before deployment, and generally don’t leave security
+    considerations to the last possible moment as has been traditional in software.'
+  id: totrans-350
+  prefs: []
+  type: TYPE_NORMAL
+- en: Types of Supply Chain Attack
+  id: totrans-351
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: TAG Security’s [Catalog of Supply Chain Compromises](https://oreil.ly/zwxo9)
+    lists attacks affecting packages with millions of weekly downloads across various
+    application dependency repositories and vendors, and hundreds of millions of total
+    installations.
+  id: totrans-352
+  prefs: []
+  type: TYPE_NORMAL
+- en: The combined downloads, including both benign and malicious versions, for the
+    most popular malicious packages (`event-stream`—190 million, `eslint-scope`—442
+    million, `bootstrap-sass`—30 million, and `rest-client`—114 million) sum to 776
+    million.
+  id: totrans-353
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: ''
+  id: totrans-354
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: '[“Towards Measuring Supply Chain Attacks on Package Managers for Interpreted
+    Languages”](https://oreil.ly/uHWBT)'
+  id: totrans-355
+  prefs:
+  - PREF_BQ
+  type: TYPE_NORMAL
+- en: 'In the quoted paper, the authors identify four actors in the open source supply
+    chain:'
+  id: totrans-356
+  prefs: []
+  type: TYPE_NORMAL
+- en: Registry Maintainers (RMs)
+  id: totrans-357
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Package Maintainers (PMs)
+  id: totrans-358
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Developers (Devs)
+  id: totrans-359
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: End-users (Users)
+  id: totrans-360
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Those with consumers have a responsibility to verify the code they pass to their
+    customers, and a duty to provide verifiable metadata to build confidence in the
+    artifacts.
+  id: totrans-361
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'There’s a lot to defend from to ensure that Users receive a trusted artifact
+    ([Table 4-4](#table-attack-public-infra)):'
+  id: totrans-362
+  prefs: []
+  type: TYPE_NORMAL
+- en: Source code
+  id: totrans-363
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Publishing infrastructure
+  id: totrans-364
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Dev tooling
+  id: totrans-365
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Malicious maintainer
+  id: totrans-366
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Negligence
+  id: totrans-367
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Fake toolchain
+  id: totrans-368
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Watering-hole attack
+  id: totrans-369
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Multiple steps
+  id: totrans-370
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 'Registry maintainers should guard publishing infrastructure from typosquatters:
+    individuals that register a package that looks similar to a widely deployed package.'
+  id: totrans-371
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 4-4\. Examples of attacking publishing infrastructure
+  id: totrans-372
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Attack | Package name | Typosquatted name |'
+  id: totrans-373
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- |'
+  id: totrans-374
+  prefs: []
+  type: TYPE_TB
+- en: '| Typosquatting | event-stream | eventstream |'
+  id: totrans-375
+  prefs: []
+  type: TYPE_TB
+- en: '| Different account | user/package | usr/package, user_/package |'
+  id: totrans-376
+  prefs: []
+  type: TYPE_TB
+- en: '| Combosquatting | package | package-2, package-ng |'
+  id: totrans-377
+  prefs: []
+  type: TYPE_TB
+- en: '| Account takeover | user/package | user/package—no change as the user has
+    been compromised by to the attacker |'
+  id: totrans-378
+  prefs: []
+  type: TYPE_TB
+- en: '| Social engineering | user/package | user/package—no change as the user has
+    willingly given repository access to the attacker |'
+  id: totrans-379
+  prefs: []
+  type: TYPE_TB
+- en: As [Figure 4-8](#app-trust-supply-chain-paper) demonstrates, the supply chain
+    of a package manager holds many risks.
+  id: totrans-380
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Simplified relationships of stakeholders and threats in the package manager
+    ecosystem](Images/haku_0408.png)'
+  id: totrans-381
+  prefs: []
+  type: TYPE_IMG
+- en: 'Figure 4-8\. Simplified relationships of stakeholders and threats in the package
+    manager ecosystem (source: [“Towards Measuring Supply Chain Attacks on Package
+    Managers for Interpreted Languages”](https://oreil.ly/uHWBT))'
+  id: totrans-382
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Open Source Ingestion
+  id: totrans-383
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: This attention to detail may become exhausting when applied to every package
+    and quickly becomes impractical at scale. This is where a web of trust between
+    producers and consumers alleviates some of the burden of double-checking the proofs
+    at every link in the chain. However, nothing can be fully trusted, and regular
+    reverification of code is necessary to account for newly announced CVEs or zero-days.
+  id: totrans-384
+  prefs: []
+  type: TYPE_NORMAL
+- en: In “Towards Measuring Supply Chain Attacks on Package Managers for Interpreted
+    Languages”, the authors identify relevant issues as listed in [Table 4-5](#table-oss-ingestion).
+  id: totrans-385
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 4-5\. Heuristic rules derived from existing supply chain attacks and other
+    malware studies
+  id: totrans-386
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Type | Description |'
+  id: totrans-387
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- |'
+  id: totrans-388
+  prefs: []
+  type: TYPE_TB
+- en: '| Metadata | The package name is similar to popular ones in the same registry.The
+    package name is the same as popular packages in other registries, but the authors
+    are different.The package depends on or shares authors with known malware.The
+    package has older versions released around the time as known malware.The package
+    contains Windows PE files or Linux ELF files. |'
+  id: totrans-389
+  prefs: []
+  type: TYPE_TB
+- en: '| Static | The package has customized installation logic.The package adds network,
+    process, or code generation APIs in recently released versions.The package has
+    flows from filesystem sources to network sinks.The package has flows from network
+    sources to code generation or process sinks. |'
+  id: totrans-390
+  prefs: []
+  type: TYPE_TB
+- en: '| Dynamic | The package contacts unexpected IPs or domains, where expected
+    ones are official registries and code hosting services.The package reads from
+    sensitive file locations such as */etc/shadow, /home/<user>/.ssh, /home/<user>/.aws*.The
+    package writes to sensitive file locations such as */usr/bin, /etc/sudoers, /home/<user>/.ssh/authorized_keys*.The
+    package spawns unexpected processes, where expected ones are initialized to registry
+    clients (e.g., pip). |'
+  id: totrans-391
+  prefs: []
+  type: TYPE_TB
+- en: 'The paper summarises that:'
+  id: totrans-392
+  prefs: []
+  type: TYPE_NORMAL
+- en: Typosquatting and account compromise are low-cost to an attacker, and are the
+    most widely exploited attack vectors.
+  id: totrans-393
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Stealing data and dropping backdoors are the most common malicious post-exploit
+    behaviors, suggesting wide consumer targeting.
+  id: totrans-394
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: 20% of identified malwares have persisted in package managers for over 400 days
+    and have more than 1K downloads.
+  id: totrans-395
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: New techniques include code obfuscation, multistage payloads, and logic bombs
+    to evade detection.
+  id: totrans-396
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Additionally, packages with lower numbers of installations are unlikely to act
+    quickly on a reported compromise as [Figure 4-9](#app-attacks-persistence-supply-chain)
+    demonstrates. It could be that the developers are not paid to support these open
+    source packages. Creating incentives for these maintainers with well-written patches
+    and timely assistance merging them, or financial support for handling reports
+    from a bug bounty program, are effective ways to decrease vulnerabilities in popular
+    but rarely maintained packages.
+  id: totrans-397
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![haku 0409](Images/haku_0409.png)'
+  id: totrans-398
+  prefs: []
+  type: TYPE_IMG
+- en: 'Figure 4-9\. Correlation between number of persistence days and number of downloads
+    (R&R = Reported and Removed; R&I = Reported and Investigating) (source: [“Towards
+    Measuring Supply Chain Attacks on Package Managers for Interpreted Languages”](https://oreil.ly/0aNss))'
+  id: totrans-399
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Application Vulnerability Throughout the SDLC
+  id: totrans-400
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The Software Development Lifecycle (SDLC) is an application’s journey from a
+    glint in a developer’s eye, to its secure build and deployment on production systems.
+  id: totrans-401
+  prefs: []
+  type: TYPE_NORMAL
+- en: As applications progress from development to production they have a varying
+    risk profile, as shown [Table 4-6](#app-dep-vuln-order).
+  id: totrans-402
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 4-6\. Application vulnerabilities throughout the SDLC
+  id: totrans-403
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| System lifecycle stage | Higher risk | Lower risk |'
+  id: totrans-404
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- |'
+  id: totrans-405
+  prefs: []
+  type: TYPE_TB
+- en: '| Development to production deployment | Application code (changes frequently)
+    | Application libraries, operating system packages |'
+  id: totrans-406
+  prefs: []
+  type: TYPE_TB
+- en: '| Established production deployment to decommissioning | Slowly decaying application
+    libraries and operating system packages | Application code (changes less frequently)
+    |'
+  id: totrans-407
+  prefs: []
+  type: TYPE_TB
+- en: 'The risk profile of an application running in production changes as its lifespan
+    lengthens, as its software becomes progressively more out-of-date. This is known
+    as “reverse uptime”—the correlation between risk of an application’s compromise
+    and the time since its deployment (e.g., the date of the container’s build). An
+    average of reverse uptime in an organization could also be considered “mean time
+    to …”:'
+  id: totrans-408
+  prefs: []
+  type: TYPE_NORMAL
+- en: Compromise (application has a remotely exploitable vulnerability)
+  id: totrans-409
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Failure (application no longer works with the updated system or external APIs)
+  id: totrans-410
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Update (change application code)
+  id: totrans-411
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Patch (to update dependencies versions explicitly)
+  id: totrans-412
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Rebuild (to pull new server dependencies)
+  id: totrans-413
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Defending Against SUNBURST
+  id: totrans-414
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: So would the techniques in this chapter save you from a SUNBURST-like attack?
+    Let’s look at how it worked.
+  id: totrans-415
+  prefs: []
+  type: TYPE_NORMAL
+- en: The attackers gained access to the SolarWinds systems on 4th September 2019
+    ([Figure 4-10](#sunspot-timeline)). This might have happened perhaps through a
+    spear-phishing email attack that allowed further escalation into SolarWind’s systems
+    or through some software misconfiguration they found in build infrastructure or
+    internet-facing servers.
+  id: totrans-416
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![haku 0410](Images/haku_0410.png)'
+  id: totrans-417
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 4-10\. SUNSPOT timeline
+  id: totrans-418
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The threat actors stayed hidden for a week, then started testing the SUNSPOT
+    injection code that would eventually compromise the SolarWinds product. This phase
+    progressed quietly for two months.
+  id: totrans-419
+  prefs: []
+  type: TYPE_NORMAL
+- en: Internal detection may have discovered the attackers here, however build infrastructure
+    is rarely subjected to the same level of security scrutiny, intrusion detection,
+    and monitoring as production systems. This is despite it delivering code to production
+    or customers. This is something we can address using our more granular security
+    controls around containers. Of course, a backdoor straight into a host system
+    remains difficult to detect unless intrusion detection is running on the host,
+    which may be noisy on shared build nodes that necessarily run many jobs for its
+    consumers.
+  id: totrans-420
+  prefs: []
+  type: TYPE_NORMAL
+- en: Almost six months after the initial compromise of the build infrastructure,
+    the SUNSPOT malware was deployed. A month later, the infamous SolarWinds Hotfix
+    5 DLL containing the malicious implant was made available to customers, and once
+    the threat actor confirmed that customers were infected, it removed its malware
+    from the build VMs.
+  id: totrans-421
+  prefs: []
+  type: TYPE_NORMAL
+- en: It was a further six months before the customer infections were identified.
+  id: totrans-422
+  prefs: []
+  type: TYPE_NORMAL
+- en: This SUNSPOT malware changed source code immediately before it was compiled
+    and immediately back to its original form afterwards, as shown in [Figure 4-11](#sunspot-malware).
+    This required observing the filesystem and changing its contents.
+  id: totrans-423
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![SUNSPOT Malware](Images/haku_0411.png)'
+  id: totrans-424
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 4-11\. SUNSPOT malware
+  id: totrans-425
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: A build-stage signing tool that verifies its inputs and outputs (as in-toto
+    does) then invokes a subprocess to perform a build step may be immune to this
+    variant of the attack, although it may turn security into a race condition between
+    the in-toto hash function and the malware that modifies the filesystem.
+  id: totrans-426
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Bear in mind that if an attacker has control of your build environment, they
+    can potentially modify any files in it. Although this is bad, they cannot regenerate
+    signatures made outside the build: this is why your cryptographically signed artifacts
+    are safer than unsigned binary blobs or Git code. Tampering of signed or checksummed
+    artifacts can be detected because attackers are unlikely to have the private keys
+    to, for example, sign tampered data.'
+  id: totrans-427
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'SUNSPOT changed the files that were about to be compiled. In a container build,
+    the same problem exists: the local filesystem must be trusted. Signing the inputs
+    and validating outputs goes some way to mitigating this attack, but a motivated
+    attacker with full control of a build system may be impossible to disambiguate
+    from build activity.'
+  id: totrans-428
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'It may not be possible to entirely protect a build system without a complete
+    implementation of all supply chain security recommendations. Your organization’s
+    ultimate risk appetite should be used to determine how much effort you wish to
+    expend protecting this vital, vulnerable part of your system: for example, critical
+    infrastructure projects may wish to fully audit the hardware and software they
+    receive, root chains of trust in hardware modules wherever possible, and strictly
+    regulate the employees permitted to interact with build systems. For most organizations,
+    this will be deeply impractical.'
+  id: totrans-429
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  id: totrans-430
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '[Nixpkgs](https://oreil.ly/nojb6) (utilized in NixOS) [bootstraps deterministically](https://oreil.ly/Rd1WB)
+    from a small collection of tools. This is perhaps the ultimate in reproducible
+    builds, with some useful security side effects; it allows end-to-end trust and
+    reproducibility for all images built from it.'
+  id: totrans-431
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Trustix](https://oreil.ly/flKAf), another Nix project, compares build outputs
+    against a Merkle tree log across multiple untrusted build servers to determine
+    if a build has been compromised.'
+  id: totrans-432
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'So these recommendations might not truly prevent supply chain compromise like
+    SUNBURST, but they can protect some of the attack vectors and reduce your total
+    risk exposure. To protect your build system:'
+  id: totrans-433
+  prefs: []
+  type: TYPE_NORMAL
+- en: Give developers root access to integration and testing environments, *not* build
+    and packaging systems.
+  id: totrans-434
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Use ephemeral build infrastructure and protect builds from cache poisoning.
+  id: totrans-435
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Generate and distribute SBOMs so consumers can validate the artifacts.
+  id: totrans-436
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Run intrusion detection on build servers.
+  id: totrans-437
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Scan open source libraries and operating system packages.
+  id: totrans-438
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Create reproducible builds on distributed infrastructure and compare the results
+    to detect tampering.
+  id: totrans-439
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Run hermetic, self-contained builds that only use what’s made available to them
+    (instead of calling out to other systems or the internet), and avoid decision
+    logic in build scripts.
+  id: totrans-440
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Keep builds simple and easy to reason about, and security review and scan the
+    build scripts like any other software.
+  id: totrans-441
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Conclusion
+  id: totrans-442
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Supply chain attacks are difficult to defend completely. Malicious software
+    on public container registries is often detected rather than prevented, with the
+    same for application libraries, and potential insecurity is part of the reality
+    of using any third-party software.
+  id: totrans-443
+  prefs: []
+  type: TYPE_NORMAL
+- en: The [SLSA Framework](https://slsa.dev) suggests the milestones to achieve in
+    order to secure your supply chain, assuming your build infrastructure is already
+    secure! The [Software Supply Chain Security paper](https://oreil.ly/8qXmY) details
+    concrete patterns and practices for Source Code, Materials, Build Pipelines, Artifacts,
+    and Deployments, to guide you on your supply chain security voyage.
+  id: totrans-444
+  prefs: []
+  type: TYPE_NORMAL
+- en: Scanning container images and Git repositories for published CVEs is a cloud
+    native application’s minimal viable security. If you assume all workloads are
+    potentially hostile, your container security context and configuration should
+    be tuned to match the workload’s sensitivity. Container `seccomp` and LSM profiles
+    should always be configured to defend against new, undefined behavior or system
+    calls from a freshly compromised dependency.
+  id: totrans-445
+  prefs: []
+  type: TYPE_NORMAL
+- en: Sign your build artifacts with cosign, Notary, and in-toto during CI/CD, then
+    validate their signatures whenever they are consumed. Distribute SBOMs so consumers
+    can verify your dependency chain for new vulnerabilities. While these measures
+    only contribute to wider supply chain security coverage, they frustrate attackers
+    and decrease BCTL’s risk of falling prey to drive-by container pirates.
+  id: totrans-446
   prefs: []
   type: TYPE_NORMAL

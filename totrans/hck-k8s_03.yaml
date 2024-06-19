@@ -1,1299 +1,2501 @@
-- en: Chapter 3\. Container Runtime Isolation
+- en: Chapter 2\. Pod-Level Resources
+  id: totrans-0
   prefs:
   - PREF_H1
   type: TYPE_NORMAL
-- en: Linux has evolved sandboxing and isolation techniques beyond simple virtual
-    machines (VMs) that strengthen it from current and future vulnerabilities. Sometimes
-    these sandboxes are called *micro VMs*.
+- en: 'This chapter concerns the atomic unit of Kubernetes deployment: a pod. Pods
+    run apps, and an app may be one or more containers working together in one or
+    more pods.'
+  id: totrans-1
   prefs: []
   type: TYPE_NORMAL
-- en: These sandboxes combine parts of all previous container and VM approaches. You
-    would use them to protect sensitive workloads and data, as they focus on rapid
-    deployment and high performance on shared infrastructure.
+- en: We’ll consider what bad things can happen in and around a pod, and look at how
+    you can mitigate the risk of getting attacked.
+  id: totrans-2
   prefs: []
   type: TYPE_NORMAL
-- en: 'In this chapter we’ll discuss different types of micro VMs that use virtual
-    machines and containers together, to protect your running Linux kernel and userspace.
-    The generic term *sandboxing* is used to cover the entire spectrum: each tool
-    in this chapter combines software and hardware virtualization of technologies
-    and uses Linux’s Kernel Virtual Machine (KVM), which is widely used to power VMs
-    in public cloud services, including Amazon Web Services and Google Cloud.'
+- en: As with any sensible security effort, we’ll begin by defining a lightweight
+    threat model for your system, identifying the threat actors it defends against,
+    and highlighting the most dangerous threats. This gives you a solid basis to devise
+    countermeasures and controls, and take defensive steps to protect your customer’s
+    valuable data.
+  id: totrans-3
   prefs: []
   type: TYPE_NORMAL
-- en: You run a lot of workloads at BCTL, and you should remember that while these
-    techniques may also protect against Kubernetes mistakes, all of your web-facing
-    software and infrastructure is a more obvious place to defend first. Zero-days
-    and container breakouts are rare in comparison to simple security-sensitive misconfigurations.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Hardened runtimes are newer, and have fewer generally less dangerous CVEs than
-    the kernel or more established container runtimes, so we’ll focus less on historical
-    breakouts and more on the history of micro VM design and rationale.
+- en: We’ll go deep into the security model of a pod and look at what is trusted by
+    default, where we can tighten security with configuration, and what an attacker’s
+    journey looks like.
+  id: totrans-4
   prefs: []
   type: TYPE_NORMAL
 - en: Defaults
+  id: totrans-5
   prefs:
   - PREF_H1
   type: TYPE_NORMAL
-- en: '`kubeadm` installs Kubernetes with `runc` as its container runtime, using `cri-o`
-    or `containerd` to manage it. The old `dockershim` way of running `runc` was removed
-    in Kubernetes v1.20, so although Kubernetes doesn’t use Docker any more, the `runc`
-    container runtime that Docker is built on continues to run containers for us.
-    [Figure 3-1](#runtime-sandboxing-k8s-cris) shows three ways Kubernetes can consume
-    the `runc` container runtime: CRI-O, `containerd`, and Docker.'
+- en: Kubernetes has historically not been security hardened out of the box, and sometimes
+    this may lead to privilege escalation or container breakout.
+  id: totrans-6
   prefs: []
   type: TYPE_NORMAL
-- en: '![haku 0301](Images/haku_0301.png)'
+- en: If we zoom in on the relationship between a single pod and the host in [Figure 2-1](#pod-diagram-temp),
+    we can see the services offered to the container by the `kubelet` and potential
+    security boundaries that may keep an adversary at bay.
+  id: totrans-7
+  prefs: []
+  type: TYPE_NORMAL
+- en: By default much of this is sensibly configured with least privilege, but where
+    user-supplied configuration is more common (pod YAML, cluster policy, container
+    images) there are more opportunities for accidental or malicious misconfiguration.
+    Most defaults are sane—in this chapter we will show you where they are not, and
+    demonstrate how to test that your clusters and workloads are configured securely.
+  id: totrans-8
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Pod Architecture](Images/haku_0201.png)'
+  id: totrans-9
   prefs: []
   type: TYPE_IMG
-- en: Figure 3-1\. Kubernetes container runtime interfaces
+- en: Figure 2-1\. Pod architecture
+  id: totrans-10
   prefs:
   - PREF_H6
-  type: TYPE_NORMAL
-- en: We’ll get into container runtimes in a lot of detail later on in this chapter.
-  prefs: []
   type: TYPE_NORMAL
 - en: Threat Model
+  id: totrans-11
   prefs:
   - PREF_H1
   type: TYPE_NORMAL
-- en: 'You have two main reasons for isolating a workload or pod—it may have access
-    to sensitive information and data, or it may be untrusted and potentially hostile
-    to other users of the system:'
+- en: 'We define a scope for each threat model. Here, you are threat modeling a pod.
+    Let’s consider a simple group of Kubernetes threats to begin with:'
+  id: totrans-12
   prefs: []
   type: TYPE_NORMAL
-- en: A *sensitive* workload is one whose data or code is too important to permit
-    unauthorized access to. This may include fraud detection systems, pricing engines,
-    high-frequency trading algorithms, personally identifiable information (PII),
-    financial records, passwords that may be reused in other systems, machine learning
-    models, or an organization’s “secret sauce.” Sensitive workloads are precious.
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: '*Untrusted* workloads are those that may be dangerous to run. They may allow
-    high-risk user input or run external software.'
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: 'Examples of potentially untrusted workloads include:'
+- en: '[Attacker on the network](https://oreil.ly/PoRXb)'
+  id: totrans-13
   prefs: []
   type: TYPE_NORMAL
-- en: VM workloads on a cloud provider’s hypervisor
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: CI/CD infrastructure subject to build-time supply chain attacks
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: Transcoding of complex files with potential parser errors
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: Untrusted workloads may also include software with published or suspected zero-day
-    Common Vulnerabilities and Exposures (CVEs)—if no patch is available and the workload
-    is business-critical, isolating it further may decrease the potential impact of
-    the vulnerability if exploited.
+- en: Sensitive endpoints (such as the API server) can be attacked easily if public.
+  id: totrans-14
   prefs: []
   type: TYPE_NORMAL
-- en: Note
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: The threat to a host running untrusted workloads is the workload, or process,
-    itself. By sandboxing a process and removing the system APIs available to it,
-    the attack surface presented by the host to the process is decreased. Even if
-    that process is compromised, the risk to the host is less.
+- en: '[Compromised application leads to foothold in container](https://oreil.ly/CYG04)'
+  id: totrans-15
   prefs: []
   type: TYPE_NORMAL
-- en: BCTL allows users to upload files to import data and shipping manifests, so
-    you have a risk that threat actors will try to upload badly formatted or malicious
-    files to try to force exploitable software errors. The pods that run the batch
-    transformation and processing workloads are a good candidate for sandboxing, as
-    they are processing untrusted inputs as shown in [Figure 3-2](#runtime-sandboxing-malicious-batch-workload).
+- en: A compromised application (remote code execution, supply chain compromise) is
+    the start of an attack.
+  id: totrans-16
   prefs: []
   type: TYPE_NORMAL
-- en: '![haku 0302](Images/haku_0302.png)'
-  prefs: []
-  type: TYPE_IMG
-- en: Figure 3-2\. Sandboxing a risky batch workload
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: Note
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: Any data supplied to an application by users can be considered untrusted, however
-    most input will be sanitized in some way (for example, validating against an integer
-    or string type). Complex files like PDFs or videos cannot be sanitized in this
-    way, and rely upon the encoding libraries to be secure, which they sometimes are
-    not. Bugs in this type are often “escapable” like CVE-X or ImageTragick.
+- en: '[Establish persistence](https://oreil.ly/zJGhK)'
+  id: totrans-17
   prefs: []
   type: TYPE_NORMAL
-- en: 'Your threat model may include:'
+- en: Stealing credentials or gaining persistence resilient to pod, node, and/or container
+    restarts.
+  id: totrans-18
   prefs: []
   type: TYPE_NORMAL
-- en: An untrusted user input triggers a bug in a workload that an attacker uses to
-    execute malicious code
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: A sensitive application is compromised and the attacker tries to exfiltrate
-    data
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: A malicious user on a compromised node attempts to read memory of other processes
-    on the host
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: New sandboxing code is less well tested, and may contain exploitable bugs
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: A container image build pulls malicious dependencies and code from unauthenticated
-    external sources that may contain malware
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: Note
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: Existing container runtimes come with some hardening by default, and Docker
-    uses default `seccomp` and AppArmor profiles that drop a large number of unused
-    system calls. These are not enabled by default in Kubernetes and must be enforced
-    with admission control or PodSecurityPolicy. The `SeccompDefault=true` kubelet
-    feature gate in v1.22 restores this container runtime default behavior.
+- en: '[Malicious code execution](https://oreil.ly/POnQ9)'
+  id: totrans-19
   prefs: []
   type: TYPE_NORMAL
-- en: 'Now that we have an idea of the dangers to your systems, let’s take a step
-    back. We’ll look at virtualization: what it is, why we use containers, and how
-    to combine the best bits of containers and VMs.'
+- en: Running exploits to pivot or escalate and enumerating endpoints.
+  id: totrans-20
   prefs: []
   type: TYPE_NORMAL
-- en: Containers, Virtual Machines, and Sandboxes
-  prefs:
-  - PREF_H1
-  type: TYPE_NORMAL
-- en: A major difference between a container and a VM is that containers exist on
-    a shared host kernel. VMs boot a kernel every time they start, use hardware-assisted
-    virtualization, and have a more secure but traditionally slower runtime.
+- en: '[Access sensitive data](https://oreil.ly/agQ7E)'
+  id: totrans-21
   prefs: []
   type: TYPE_NORMAL
-- en: A common perception is that containers are optimized for speed and portability,
-    and virtual machines sacrifice these features for more robust isolation from malicious
-    behavior and higher fault tolerance.
+- en: Reading Secret data from the API server, attached storage, and network-accessible
+    datastores.
+  id: totrans-22
   prefs: []
   type: TYPE_NORMAL
-- en: This perception is not entirely true. Both technologies share a lot of common
-    code pathways in the kernel itself. Containers and virtual machines have evolved
-    like co-orbiting stars, never fully able to escape each other’s gravity. Container
-    runtimes are a form of kernel virtualization. The OCI ([Open Container Initiative](https://oreil.ly/RCCWR))
-    container image specifications have become the standardized atomic unit of container
-    deployment.
+- en: '[Denial of service](https://oreil.ly/nr7Cb)'
+  id: totrans-23
   prefs: []
   type: TYPE_NORMAL
-- en: Next-generation sandboxes combine container and virtualization techniques (see
-    [Figure 3-3](#runtime-comparison)) to reduce workloads’ access to the kernel.
-    They do this by by emulating kernel functionality in userspace or the isolated
-    guest environment, thus reducing the host’s attack surface to the process inside
-    the sandbox. Well-defined interfaces can help to reduce complexity, minimizing
-    the opportunity for untested code paths. And, by integrating the sandboxes with
-    `containerd`, they are also able to interact with OCI images and with a software
-    proxy (“shim”) to connect two different interfaces, which can be used with orchestrators
-    like Kubernetes.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![image](Images/haku_0303.png)'
-  prefs: []
-  type: TYPE_IMG
-- en: 'Figure 3-3\. Comparison of container isolation approaches; source: Christian
-    Bargmann and Marina Tropmann-Frick’s [container isolation paper](https://oreil.ly/4slD4)'
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: These sandboxing techniques are especially relevant to public cloud providers,
-    for which multitenancy and bin packing is highly lucrative. Aggressively multitenanted
-    systems such as Google Cloud Functions and AWS Lambda are running “untrusted code
-    as a service,” and this isolation software is born from cloud vendor security
-    requirements to isolate serverless runtimes from other tenants. Multitenancy will
-    be discussed in depth in the next chapter.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Cloud providers use virtual machines as the atomic unit of compute, but they
-    may also wrap the root virtual machine process in container-like technologies.
-    Customers then use the virtual machine to run containers—virtualized inception.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Traditional virtualization emulates a physical hardware architecture in software.
-    Micro VMs emulate as small an API as possible, removing features like I/O devices
-    and even system calls to ensure least privilege. However, they are still running
-    the same Linux kernel code to perform low-level program operations such as memory
-    mapping and opening sockets—just with additional security abstractions to create
-    a secure by default runtime. So even though VMs are not sharing as much of the
-    kernel as containers do, some system calls must still be executed by the host
-    kernel.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Software abstractions require CPU time to execute, and so virtualization must
-    always be a balance of security and performance. It is possible to add enough
-    layers of abstraction and indirection that a process is considered “highly secure,”
-    but it is unlikely that this ultimate security will result in a viable user experience.
-    Unikernels go in the other direction, tracing a program’s execution and then removing
-    almost all kernel functionality except what the program has used. Observability
-    and debuggability are perhaps the reasons that unikernels have not seen widespread
-    adoption.
-  prefs: []
-  type: TYPE_NORMAL
-- en: To understand the trade-offs and compromises inherent in each approach, it is
-    important to grok a comparison of virtualization types. Virtualization has existed
-    for a long time and has many variations.
-  prefs: []
-  type: TYPE_NORMAL
-- en: How Virtual Machines Work
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: 'Although virtual machines and associated technologies have existed since the
-    late 1950s, a lack of hardware support in the 1990s led to their temporary demise.
-    During this time “process virtual machines” became more popular, especially the
-    Java virtual machine (JVM). In this chapter we are exclusively referring to system
-    virtual machines: a form of virtualization not tied to a specific programming
-    language. Examples include KVM/QEMU, VMware, Xen, VirtualBox, etc.'
-  prefs: []
-  type: TYPE_NORMAL
-- en: Virtual machine research began in the 1960s to facilitate sharing large, expensive
-    physical machines between multiple users and processes (see [Figure 3-4](#runtime-virtualisation-family-tree)).
-    To share a physical host safely, some level of isolation must be enforced between
-    tenants—and in case of hostile tenants, there should be much less access to the
-    underlying system.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![Container abstractions](Images/haku_0304.png)'
-  prefs: []
-  type: TYPE_IMG
-- en: 'Figure 3-4\. Family tree of virtualization; source: [“The Ideal Versus the
-    Real”](https://oreil.ly/7OLfk)'
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: 'This is performed in hardware (the CPU), software (in the kernel, and userspace),
-    or from cooperation between both layers, and allows many users to share the same
-    large physical hardware. This innovation became the driving technology behind
-    public cloud adoption: safe sharing and isolation for processes, memory, and the
-    resources they require from the physical host machine.'
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'The host machine is split into smaller isolated compute units, traditionally
-    referred to as guests (see [Figure 3-5](#runtime-virtualisation-high-level)).
-    These guests interact with a virtualized layer above the physical host’s CPU and
-    devices. That layer intercepts system calls to handle them itself: either by proxying
-    them to the host kernel, or handling the request itself—doing the kernel’s job
-    where possible. Full virtualization (e.g., VMware) emulates hardware and boots
-    a full kernel inside the guest. Operating-system–level virtualization (e.g., a
-    container) emulates the host’s kernel (i.e., using namespace, `cgroups`, capabilities,
-    and `seccomp`) so it can start a containerized process directly on the host kernel.
-    Processes in containers share many of the kernel pathways and security mechanisms
-    that processes in VMs execute.'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![image](Images/haku_0305.png)'
-  prefs: []
-  type: TYPE_IMG
-- en: 'Figure 3-5\. Server virtualization; source: [“The Ideal Versus the Real”](https://oreil.ly/oNBFf)'
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: To boot a kernel, a guest operating system will require access to a subset of
-    the host machine’s functionality, including BIOS routines, devices and peripherals
-    (e.g., keyboard, graphical/console access, storage, and networking), an interrupt
-    controller and an interval timer, a source of entropy (for random number seeds),
-    and the memory address space that it will run in.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Inside each guest virtual machine is an environment in which processes (or workloads)
-    can run. The virtual machine itself is owned by a privileged parent process that
-    manages its setup and interaction with the host, known as a *virtual machine monitor*
-    or VMM (as in [Figure 3-6](#runtime-virtualisation-vmm)). This has also been known
-    as a hypervisor, but the distinction is blurred with more recent approaches so
-    the original term VMM is preferred.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![image](Images/haku_0306.png)'
-  prefs: []
-  type: TYPE_IMG
-- en: Figure 3-6\. A virtual machine manager
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: Linux has a built-in virtual machine manager called KVM that allows a host kernel
-    to run virtual machines. Along with QEMU, which emulates physical devices and
-    provides memory management to the guest (and can run by itself if necessary),
-    an operating system can run fully emulated by the guest OS and by QEMU (as contrasted
-    with the Xen hypervisor in [Figure 3-7](#runtime-virtualisation-kvm-vs-xen-vs-qemu)).
-    This emulation narrows the interface between the VM and the host kernel and reduces
-    the amount of kernel code the process inside the VM can reach directly. This provides
-    a greater level of isolation from unknown kernel vulnerabilities.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![image](Images/haku_0307.png)'
-  prefs: []
-  type: TYPE_IMG
-- en: 'Figure 3-7\. KVM contrasted with Xen and QEMU; source: [What Is the Difference
-    Between KVM and QEMU](https://oreil.ly/k1bJ1)'
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: Note
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: Despite many decades of effort, “in practice no virtual machine is completely
-    equivalent to its real machine counterpart” ([“The Ideal Versus the Real”](https://oreil.ly/oNBFf)).
-    This is due to the complexities of emulating hardware, and hopefully decreases
-    the chance that we’re living in a simulation.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Benefits of Virtualization
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: 'Like all things we try to secure, virtualization must balance performance with
-    security: decreasing the risk of running your workloads using the minimum possible
-    number of extra checks at runtime. For containers, a shared host kernel is an
-    avenue of potential container escape—the Linux kernel has a long heritage and
-    monolithic codebase.'
-  prefs: []
-  type: TYPE_NORMAL
-- en: Linux is mainly written in the C language, which has classes of memory management
-    and range checking vulnerabilities that have proven notoriously difficult to entirely
-    eradicate. Many applications have experienced these exploitable bugs when subjected
-    to fuzzers. This risk means we want to keep hostile code away from trusted interfaces
-    in case they have zero-day vulnerabilities. This is a pretty serious defensive
-    stance—it’s about reducing any window of opportunity for an attacker that has
-    access to zero-day Linux vulnerabilities.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Note
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: Google’s [OSS-Fuzz](https://oreil.ly/8LAkV) was born from the swirling maelstrom
-    around the Heartbleed OpenSSL bug, which may have been raging in the wild for
-    up to two years. Critical, internet-bolstering projects like OpenSSL are poorly
-    funded and much goodwill exists in the open source community, so finding these
-    bugs before they are exploited is a vital step in securing critical software.
-  prefs: []
-  type: TYPE_NORMAL
-- en: The sandboxing model defends against zero-days by abstractions. It moves processes
-    away from the Linux system call interface to reduce the opportunities to exploit
-    it, using an assortment of containers and capabilities, LSMs and kernel modules,
-    hardware and software virtualization, and dedicated drivers. Most recent sandboxes
-    use a type-safe language like Golang or Rust, which makes their memory management
-    safer than software programmed in C (which requires manual and potentially error-prone
-    memory management).
-  prefs: []
-  type: TYPE_NORMAL
-- en: What’s Wrong with Containers?
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: Let’s further define what we mean by containers by looking at how they interact
-    with the host kernel, as shown in [Figure 3-8](#runtime-host-kernel-boundary).
-  prefs: []
-  type: TYPE_NORMAL
-- en: Containers talk directly to the host kernel, but the layers of LSMs, capabilities,
-    and namespaces ensure they do not have full host kernel access. Conversely, instead
-    of sharing one kernel, VMs use a guest kernel (a dedicated kernel running in a
-    hypervisor). This means if the VM’s guest kernel is compromised, more work is
-    required to break out of the hypervisor and into the host.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![Host kernel boundary](Images/haku_0308.png)'
-  prefs: []
-  type: TYPE_IMG
-- en: Figure 3-8\. Host kernel boundary
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: Containers are created by a low-level container runtime, and as users we talk
-    to the high-level container runtime that controls it.
-  prefs: []
-  type: TYPE_NORMAL
-- en: The diagram in [Figure 3-9](#runtime-docker-podman-crio) shows the high-level
-    interfaces, with the container managers on the left. Then Kubernetes, Docker,
-    and Podman interact with their respective libraries and runtimes. These perform
-    useful container management features including pushing and pulling container images,
-    managing storage and network interfaces, and interacting with the low-level container
-    runtime.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![Container abstractions](Images/haku_0309.png)'
-  prefs: []
-  type: TYPE_IMG
-- en: 'Figure 3-9\. Container abstractions; source: [“What’s up with CRI-O, Kata Containers
-    and Podman?”](https://oreil.ly/2Mx7n)'
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: In the middle column of [Figure 3-9](#runtime-docker-podman-crio) are the container
-    runtimes that your Kubernetes cluster interacts with, while in the right column
-    are the low-level runtimes responsible for starting and managing the container.
-  prefs: []
-  type: TYPE_NORMAL
-- en: That low-level container runtime is directly responsible for starting and managing
-    containers, interfacing with the kernel to create the namespaces and configuration,
-    and finally starting the process in the container. It is also responsible for
-    handling your process inside the container, and getting its system calls to the
-    host kernel at runtime.
-  prefs: []
-  type: TYPE_NORMAL
-- en: User Namespace Vulnerabilities
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: 'Linux was written with a core assumption: that the root user is always in the
-    host namespace. This assumption held true while there were no other namespaces.
-    But this changed with the introduction of user namespaces (the last major kernel
-    namespace to be completed): developing user namespaces required many code changes
-    to code concerning the root user.'
-  prefs: []
-  type: TYPE_NORMAL
-- en: User namespaces allow you to map users inside a container to other users on
-    the host, so ID 0 (root) inside the container can create files on a volume that
-    from within the container look to be root-owned. But when you inspect the same
-    volume from the host, they show up as owned by the user root was mapped to (e.g.,
-    user ID 1000, or 110000, as shown in [Figure 3-10](#runtime-user-ns-remapping)).
-    User namespaces are not enabled in Kubernetes, although work is underway to support
-    them.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![User namespace user id remapping](Images/haku_0310.png)'
-  prefs: []
-  type: TYPE_IMG
-- en: Figure 3-10\. User namespace user ID remapping
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: 'Everything in Linux is a file, and files are owned by users. This makes user
-    namespaces wide-reaching and complex, and they have been a source of privilege
-    escalation bugs in previous versions of Linux:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[CVE-2013-1858](https://oreil.ly/5UHB1) (user namespace & CLONE_FS)'
-  prefs: []
-  type: TYPE_NORMAL
-- en: The clone system-call implementation in the Linux kernel before 3.8.3 does not
-    properly handle a combination of the `CLONE_NEWUSER` and `CLONE_FS` flags, which
-    allows local users to gain privileges by calling `chroot` and leveraging the sharing
-    of the / directory between a parent process and a child process.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[CVE-2014-4014](https://oreil.ly/iRKjY) (user namespace & chmod)'
-  prefs: []
-  type: TYPE_NORMAL
-- en: The capabilities implementation in the Linux kernel before 3.14.8 does not properly
-    consider that namespaces are inapplicable to inodes, which allows local users
-    to bypass intended `chmod` restrictions by first creating a user namespace, as
-    demonstrated by setting the `setgid` bit on a file with group ownership of `root`.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[CVE-2015-1328](https://oreil.ly/uCaNj) (user namespace & OverlayFS (Ubuntu
-    only))'
-  prefs: []
-  type: TYPE_NORMAL
-- en: The `overlayfs` implementation in the Linux kernel package before 3.19.0-21.21
-    in Ubuntu versions until 15.04 did not properly check permissions for file creation
-    in the upper filesystem directory, which allowed local users to obtain root access
-    by leveraging a configuration in which `overlayfs` is permitted in an arbitrary
-    mount namespace.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[CVE-2018-18955](https://oreil.ly/8YIWz) (user namespace & complex ID mapping)'
-  prefs: []
-  type: TYPE_NORMAL
-- en: In the Linux kernel 4.15.x through 4.19.x before 4.19.2, `map_write()` *in kernel/user_namespace.c*
-    allows privilege escalation because it mishandles nested user namespaces with
-    more than 5 `UID` or `GID` ranges. A user who has `CAP_SYS_ADMIN` in an affected
-    user namespace can bypass access controls on resources outside the namespace,
-    as demonstrated by reading */etc/shadow*. This occurs because an ID transformation
-    takes place properly for the namespaced-to-kernel direction but not for the kernel-to-namespaced
-    direction.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Containers are not inherently “insecure,” but as we saw in [Chapter 2](ch02.xhtml#ch-pod-level-resources),
-    they can leak some information about a host, and a root-owned container runtime
-    is a potential exploitation path for a hostile process or container image.
+- en: Rarely a good use of an attacker’s time. Denial of Wallet and cryptolocking
+    are common variants.
+  id: totrans-24
   prefs: []
   type: TYPE_NORMAL
 - en: Tip
+  id: totrans-25
   prefs:
   - PREF_H6
   type: TYPE_NORMAL
-- en: Operations such as creating network adapters in the host network namespace,
-    and mounting host disks, are historically root-only, which has made rootless containers
-    harder to implement. Rootfull container runtimes were the only viable option for
-    the first decade of popularized container use.
+- en: The threat sources in [“Prior Art”](ch01.xhtml#PriorArt) have other negative
+    outcomes to cross-reference with this list.
+  id: totrans-26
   prefs: []
   type: TYPE_NORMAL
-- en: Exploits that have abused this rootfulness include [CVE-2019-5736](https://oreil.ly/ZZyRQ),
-    replacing the `runc` binary from inside a container via */proc/self/exe*, and
-    [CVE-2019-14271](https://oreil.ly/DSKFf), attacking the host from inside a container
-    responding to `docker cp`.
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'Underlying concerns about a root-owned daemon can be assuaged by running rootless
-    containers in “unprivileged user namespaces” mode: creating containers using a
-    nonroot user, within their own user namespace. This is supported in Docker 20.0X
-    and Podman.'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '*Rootless* means the low-level container runtime process that creates the container
-    is owned by an unprivileged user, and so container breakout via the process tree
-    only escapes to a nonroot user, nullifying some potential attacks.'
-  prefs: []
-  type: TYPE_NORMAL
-- en: Note
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: Rootless containers introduce a hopefully less dangerous risk—user namespaces
-    have historically been a rich source of vulnerabilities. The answer to whether
-    it is riskier to run root-owned daemon or user namespaces isn’t clear-cut, although
-    any reduction of root privileges is likely to be the more effective security boundary.
-    There have been more high-profile breakouts from root-owned Docker, but this may
-    well be down to adoption and widespread use.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Rootless containers (without a root-owned daemon) provide a security boundary
-    as compared to those with root-owned daemons. When code owned by the host’s root
-    user is compromised by a malicious process, it can potentially read and write
-    other users’ files, attack the network and its traffic, or install malware to
-    the host.
-  prefs: []
-  type: TYPE_NORMAL
-- en: The mapping of user identifiers (UIDs) in the guest to actual users on the host
-    depends on the user mappings of the host user namespace, container user namespace,
-    and rootless runtime, as shown in [Figure 3-11](#runtime-userns-and-rootles).
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![User mapping for Rootless and User Namespace containers](Images/haku_0311.png)'
-  prefs: []
-  type: TYPE_IMG
-- en: 'Figure 3-11\. Container abstractions; source: [“Experimenting with Rootless
-    Docker”](https://oreil.ly/B2KzQ)'
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: User namespaces allow nonroot users to pretend to be the host’s root user. The
-    “root-in-userns” user can have a “fake” UID 0 and permission to create new namespaces
-    (mount, net, uts, ipc), change the container’s hostname, and mount points.
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'This allows root-in-userns, which is unprivileged in the host namespace, to
-    create new containers. To achieve this, additional work must be done: network
-    connections into the host network namespace can only be created by the host’s
-    root. For rootless containers, an unprivileged *slirp4netns* networking device
-    (guarded by `seccomp`) is used to create a virtual network device.'
-  prefs: []
-  type: TYPE_NORMAL
-- en: Unfortunately, mounting remote filesystems becomes difficult when the remote
-    system, e.g., NFS home directories, does not understand the host’s user namespaces.
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'In the [rootless Podman guide](https://oreil.ly/YjwLF), [Dan Walsh](https://oreil.ly/QzBhv)
-    says:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: If you have a normal process creating files on an NFS share and not taking advantage
-    of user-namespaced capabilities, everything works fine. The problem comes in when
-    the root process inside the container needs to do something on the NFS share that
-    requires special capability access. In that case, the remote kernel will not know
-    about the capability and will most likely deny access.
-  prefs:
-  - PREF_BQ
-  type: TYPE_NORMAL
-- en: While rootless Podman has SELinux support (and dynamic profile support via [udica](https://oreil.ly/AuSMF)),
-    rootless Docker does not yet support AppArmor and, for both runtimes, CRIU (Checkpoint/Restore
-    In Userspace, a feature to freeze running applications) is disabled.
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'Both rootless runtimes require configuration for some networking features:
-    `CAP_NET_BIND_SERVICE` is required by the kernel to bind to ports below 1024 (historically
-    considered a privileged boundary), and ping is not supported for users with high
-    UIDs if the ID is not in */proc/sys/net/ipv4/ping_group_range* (although this
-    can be changed by host root). Host networking is not permitted (as it breaks the
-    network isolation), `cgroups` v2 are functional but only when running under `systemd`,
-    and `cgroup` v1 is not supported by either rootless implementation. There are
-    more details in the docs for [shortcomings of rootless Podman](https://oreil.ly/3SWtT).'
-  prefs: []
-  type: TYPE_NORMAL
-- en: Docker and Podman share similar performance and features as both use `runc`,
-    although Docker has an established networking model that doesn’t support host
-    networking in rootless mode, whereas Podman reuses Kubernetes’ Container Network
-    Interface (CNI)) plug-ins for greater networking deployment flexibility.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Rootless containers decrease the risk of running your container images. Rootlessness
-    prevents an exploit escalating to root via many host interactions (although some
-    use of `SETUID` and `SETGID` binaries is often needed by software aiming to avoid
-    running processes as root).
-  prefs: []
-  type: TYPE_NORMAL
-- en: While rootless containers protect the host from the container, it may still
-    be possible to read some data from the host, although an adversary will find this
-    a lot less useful. Root capabilities are needed to interact with potential privilege
-    escalation points including */proc*, host devices, and the kernel interface, among
-    others.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Throughout these layers of abstraction, system calls are still ultimately handled
-    by software written in potentially unsafe C. Is the rootless runtime’s exposure
-    to C-based system calls in the Linux kernel really that bad? Well, the C language
-    powers the internet (and world?) and has done so for decades, but its lack of
-    memory management leads to the same critical bugs occurring over and over again.
-    When the kernel, OpenSSL, and other critical software are written in C, we just
-    want to move everything as far away from trusted kernel space as possible.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Note
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: '[Whitesource suggests](https://oreil.ly/yyD5o) that C has accounted for 47%
-    of all reported vulnerabilities in the last 10 years. This may largely be due
-    to its proliferation and longevity, but highlights the inherent risk.'
-  prefs: []
-  type: TYPE_NORMAL
-- en: While “trimmed-down” kernels exist (like unikernels and rump kernels), many
-    traditional and legacy applications are portable onto a container runtime without
-    code modifications. To achieve this feat for a unikernel would require the application
-    to be ported to the new reduced kernel. Containerizing an application is a generally
-    frictionless developer experience, which has contributed to the success of containers.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Sandboxing
+- en: Anatomy of the Attack
+  id: totrans-27
   prefs:
   - PREF_H1
   type: TYPE_NORMAL
-- en: If a process can exploit the kernel, it can take over the system the kernel
-    is running. This is a risk that adversaries like Captian Hashjack will attempt
-    to exploit, and so cloud providers and hardware vendors have been pioneering different
-    approaches to moving away from Linux system call interaction for the guest.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Linux containers are a lightweight form of isolation as they allow workloads
-    to use kernel APIs directly, minimizing the layers of abstraction. Sandboxes take
-    a variety of other approaches, and generally use container techniques as well.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Tip
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: 'Linux’s Kernel Virtual Machine (KVM) is a module that allows the kernel to
-    run a nested version of itself as a hypervisor. It uses the processor’s hardware
-    virtualization commands and allows each “guest” to run a full Linux or Windows
-    operating system in the virtual machine with private, virtualized hardware. A
-    virtual machine differs from a container as the guest’s processes are running
-    on their own kernel: container processes always share the host kernel.'
-  prefs: []
-  type: TYPE_NORMAL
-- en: Sandboxes combine the best of virtualization and container isolation to optimize
-    for specific use cases.
-  prefs: []
-  type: TYPE_NORMAL
-- en: gVisor and Firecracker (written in Golang and Rust, respectively) both operate
-    on the premise that their statically typed system call proxying (between the workload/guest
-    process and the host kernel) is more secure for consumption by untrusted workloads
-    than the Linux kernel itself, and that performance is not significantly impacted.
-  prefs: []
-  type: TYPE_NORMAL
-- en: gVisor starts a KVM or operates in `ptrace` mode (using a debug `ptrace` system
-    call to monitor and control its guest), and inside starts a userspace kernel,
-    which proxies system calls down to the host using a “sentry” process. This trusted
-    process reimplements 237 Linux system calls and only needs 53 host system calls
-    to operate. It is constrained to that list of system calls by `seccomp`. It also
-    starts a companion “filesystem interaction” side process called Gofer to prevent
-    a compromised sentry process interacting with the host’s filesystem, and finally
-    implements its own userspace networking stack to isolate it from bugs in the Linux
-    TCP/IP stack.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Firecracker, on the other hand, while also using KVM, starts a stripped-down
-    device emulator instead of implementing the heavyweight QEMU process to emulate
-    devices (as traditional Linux virtual machines do). This reduces the host’s attack
-    surface and removes unnecessary code, requiring 36 system calls itself to function.
-  prefs: []
-  type: TYPE_NORMAL
-- en: And finally, at the other end of the diagram in [Figure 3-12](#runtime-virtualisation-spectrum),
-    KVM/QEMU VMs emulate hardware and so provide a guest kernel and full device emulation,
-    which increases startup times and memory footprint.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![image](Images/haku_0312.png)'
+- en: '![captain](Images/haku_0000.png)'
+  id: totrans-28
   prefs: []
   type: TYPE_IMG
-- en: Figure 3-12\. Spectrum of isolation
+- en: Captain Hashjack started their assault on your systems by enumerating BCTL’s
+    DNS subdomains and S3 buckets. These could have offered an easy way into the organization’s
+    systems, but there was nothing easily exploitable on this occasion.
+  id: totrans-29
+  prefs: []
+  type: TYPE_NORMAL
+- en: Undeterred, they create an account on the public website and log in, using a
+    web application scanner like [zaproxy](https://www.zaproxy.org) (OWASP Zed Attack
+    Proxy) to pry into API calls and application code for unexpected responses. They’re
+    on the search for leaking web-server banner and version information (to learn
+    which exploits might succeed) and are generally injecting and fuzzing APIs for
+    poorly handled user input.
+  id: totrans-30
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is not a level of scrutiny that your poorly maintained codebase and systems
+    are likely to withstand for long. Attackers may be searching for a needle in a
+    haystack, but only the safest haystack has no needles at all.
+  id: totrans-31
+  prefs: []
+  type: TYPE_NORMAL
+- en: Caution
+  id: totrans-32
   prefs:
   - PREF_H6
   type: TYPE_NORMAL
-- en: Virtualization provides better hardware isolation through CPU integration, but
-    is slower to start and run due to the abstraction layer between the guest and
-    the underlying host.
+- en: 'Any computer should be resistant to this type of indiscriminate attack: a Kubernetes
+    system should achieve “minimum viable security” through the capability to protect
+    itself from casual attack with up-to-date software and hardened configuration.
+    Kubernetes encourages regular updates by supporting the last three minor releases
+    (e.g., 1.24, 1.23, and 1.22), which are released every 4 months and ensure a year
+    of patch support. Older versions are unsupported and likely to be vulnerable.'
+  id: totrans-33
   prefs: []
   type: TYPE_NORMAL
-- en: 'Containers are lightweight and suitably secure for most workloads. They run
-    in production for multinational organizations around the world. But high-sensitivity
-    workloads and data need greater isolation. You can categorize workloads by risk:'
+- en: Although many parts of an attack can be automated, this is an involved process.
+    A casual attacker is more likely to scan widely for software paths that trigger
+    published CVEs and run automated tools and scripts against large ranges of IPs
+    (such as the ranges advertised by public cloud providers). These are noisy approaches.
+  id: totrans-34
   prefs: []
   type: TYPE_NORMAL
-- en: Does this application access a sensitive or high-value asset?
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: Is this application able to receive untrusted traffic or input?
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: Have there been vulnerabilities or bugs in this application before?
-  prefs:
-  - PREF_UL
-  type: TYPE_NORMAL
-- en: If the answer to any of those is yes, you may want to consider a next-generation
-    sandboxing technology to further isolate workloads.
-  prefs: []
-  type: TYPE_NORMAL
-- en: gVisor, Firecracker, and Kata Containers all take different approaches to virtual
-    machine isolation, while sharing the aim of challenging the perception of slow
-    startup time and high memory overhead.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Note
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: Kata Containers is a container runtime that starts a VM and runs a container
-    inside. It is widely compatible and can run `firecracker` as a guest.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[Table 3-1](#runtime-virtualisation-comparison) compares these sandboxes and
-    some key features.'
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'Table 3-1\. Comparison of sandbox features; source: [“Making Containers More
-    Isolated: An Overview of Sandboxed Container Technologies”](https://oreil.ly/vpKaB)'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '|  | Supported container platforms | Dedicated guest kernel | Support different
-    guest kernels | Open source | Hot-plug | Direct access to HW | Required hypervisors
-    | Backed by |'
-  prefs: []
-  type: TYPE_TB
-- en: '| --- | --- | --- | --- | --- | --- | --- | --- | --- |'
-  prefs: []
-  type: TYPE_TB
-- en: '| gVisor | Docker, K8s | Yes | No | Yes | No | No | None | Google |'
-  prefs: []
-  type: TYPE_TB
-- en: '| Firecracker | Docker | Yes | Yes | Yes | No | No | KVM | Amazon |'
-  prefs: []
-  type: TYPE_TB
-- en: '| Kata | Docker, K8s | Yes | Yes | Yes | Yes | Yes | KVM or Xen | OpenStack
-    |'
-  prefs: []
-  type: TYPE_TB
-- en: 'Each sandbox combines virtual machine and container technologies: some VMM
-    process, a Linux kernel within the virtual machine, a Linux userspace in which
-    to run the process once the kernel has booted, and some mix of kernel-based isolation
-    (that is, container-style namespaces, `cgroups`, or `seccomp`) either within the
-    VM, around the VMM, or some combination thereof.'
-  prefs: []
-  type: TYPE_NORMAL
-- en: Let’s have a closer look at each one.
-  prefs: []
-  type: TYPE_NORMAL
-- en: gVisor
+- en: Remote Code Execution
+  id: totrans-35
   prefs:
   - PREF_H2
   type: TYPE_NORMAL
-- en: 'Google’s gVisor was originally built to allow untrusted, customer-supplied
-    workloads to run in AppEngine on Borg, Google’s internal orchestrator and the
-    progenitor to Kubernetes. It now protects Google Cloud products: App Engine standard
-    environment, Cloud Functions, Cloud ML Engine, and Cloud Run, and it has been
-    modified to run in GKE. It has the best Docker and Kubernetes integrations from
-    among this chapter’s sandboxing technologies.'
+- en: 'If a vulnerability in your application can be used to run untrusted (and in
+    this case, external) code, it is called a remote code execution (RCE). An adversary
+    can use an RCE to spawn a remote control session into the application’s environment:
+    here it is the container handling the network request, but if the RCE manages
+    to pass untrusted input deeper into the system, it may exploit a different process,
+    pod, or cluster.'
+  id: totrans-36
   prefs: []
   type: TYPE_NORMAL
-- en: Note
+- en: Your first goal of Kubernetes and pod security should be to prevent RCE, which
+    could be as simple as a `kubectl exec`, or as complex as a reverse shell, such
+    as the one demonstrated in [Figure 2-2](#pods-reverse-shell).
+  id: totrans-37
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![haku 0202](Images/haku_0202.png)'
+  id: totrans-38
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 2-2\. Reverse shell into a Kubernetes pod
+  id: totrans-39
   prefs:
   - PREF_H6
   type: TYPE_NORMAL
-- en: To run the examples, the gVisor runtime binary [must be installed](https://oreil.ly/Tj3hX)
-    on the host or worker node.
+- en: Application code changes frequently and may hide undiscovered bugs, so robust
+    application security (AppSec) practices (including IDE and CI/CD integration of
+    tooling and dedicated security requirements as task acceptance criteria) are essential
+    to keep an attacker from compromising the processes running in a pod.
+  id: totrans-40
   prefs: []
   type: TYPE_NORMAL
-- en: 'Docker supports pluggable container runtimes, and a simple `docker run -it
-    --runtime=runsc` starts a gVisor sandboxed OCI container. Let’s have a look at
-    what’s in */proc* in a vanilla gVisor container to compare it with standard `runc`:'
+- en: Note
+  id: totrans-41
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The Java framework Struts was one of the most widely deployed libraries to have
+    suffered a remotely exploitable vulnerability (CVE-2017-5638), which contributed
+    to the breach of Equifax customer data. To fix a supply chain vulnerability like
+    this in a container, it is quickly rebuilt in CI with a patched library and redeployed,
+    reducing the risk window of vulnerable libraries being exposed to the internet.
+    We examine other ways to get remote code execution throughout the book.
+  id: totrans-42
+  prefs: []
+  type: TYPE_NORMAL
+- en: With that, let’s move on to the network aspects.
+  id: totrans-43
+  prefs: []
+  type: TYPE_NORMAL
+- en: Network Attack Surface
+  id: totrans-44
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The greatest attack surface of a Kubernetes cluster is its network interfaces
+    and public-facing pods. Network-facing services such as web servers are the first
+    line of defense in keeping your clusters secure, a topic we will dive into in
+    [Chapter 5](ch05.xhtml#ch-networking).
+  id: totrans-45
+  prefs: []
+  type: TYPE_NORMAL
+- en: This is because unknown users coming in from across the network can scan network-facing
+    applications for the exploitable signs of RCE. They can use automated network
+    scanners to attempt to exploit known vulnerabilities and input-handling errors
+    in network-facing code. If a process or system can be forced to run in an unexpected
+    way, there is the possibility that it can be compromised through these untested
+    logic paths.
+  id: totrans-46
+  prefs: []
+  type: TYPE_NORMAL
+- en: To investigate how an attacker may establish a foothold in a remote system using
+    only the humble, all-powerful Bash shell, see, for example, Chapter 16 of [*Cybersecurity
+    Ops with bash*](https://oreil.ly/ZmILo) by Paul Troncone and Carl Albing (O’Reilly).
+  id: totrans-47
+  prefs: []
+  type: TYPE_NORMAL
+- en: To defend against this, we must scan containers for operating system and application
+    CVEs in the hope of updating them before they are exploited.
+  id: totrans-48
+  prefs: []
+  type: TYPE_NORMAL
+- en: If Captain Hashjack has an RCE into a pod, it’s a foothold to attack your system
+    more deeply from the pod’s network position and permissions set. You should strive
+    to limit what an attacker can do from this position, and customize your security
+    configuration to a workload’s sensitivity. If your controls are too loose, this
+    may be the beginning of an organization-wide breach for your employer, BCTL.
+  id: totrans-49
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  id: totrans-50
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: For an example of spawning a shell via Struts with Metasploit, see [Sam Bowne’s
+    guide](https://oreil.ly/nzsxP).
+  id: totrans-51
+  prefs: []
+  type: TYPE_NORMAL
+- en: As Dread Pirate Hashjack has just discovered, we have also been running a vulnerable
+    version of the Struts library. This offers an opportunity to start attacking the
+    cluster from within.
+  id: totrans-52
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  id: totrans-53
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'A simple Bash reverse shell like this one is a good reason to remove Bash from
+    your containers. It uses Bash’s virtual */dev/tcp/* filesystem, and is not exploitable
+    in `sh`, which doesn’t include this oft-abused feature:'
+  id: totrans-54
   prefs: []
   type: TYPE_NORMAL
 - en: '[PRE0]'
+  id: totrans-55
   prefs: []
   type: TYPE_PRE
-- en: Note
+  zh: '[PRE0]'
+- en: 'As the attack begins, let’s take a look at where the pirates have landed: inside
+    a Kubernetes pod.'
+  id: totrans-56
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Kubernetes Workloads: Apps in a Pod'
+  id: totrans-57
   prefs:
-  - PREF_H6
+  - PREF_H1
   type: TYPE_NORMAL
-- en: Removing special files from this directory prevents a hostile process from accessing
-    the relevant feature in the underlying host kernel.
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'There are far fewer entries in */proc* than in a `runc` container, as this
-    diff shows:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE1]'
-  prefs: []
-  type: TYPE_PRE
-- en: The sentry process that [simulates the Linux system call interface](https://oreil.ly/MRraT)
-    reimplements over 235 of the ~350 possible system calls in Linux 5.3.11\. This
-    shows you a “masked” view of the */proc* and */dev* virtual filesystems. These
-    filesystems have historically leaked the container abstraction by sharing information
-    from the host (memory, devices, processes, etc.) so are an area of special concern.
+- en: Multiple cooperating containers can be logically grouped into a single pod,
+    and every container Kubernetes runs must run inside a pod. Sometimes a pod is
+    called a “workload,” which is one of many copies of the same execution environment.
+    Each pod must run on a Node in your Kubernetes cluster as shown in [Figure 2-3](#pod-cluster-example).
+  id: totrans-58
   prefs: []
   type: TYPE_NORMAL
-- en: 'Let’s look at system devices under */dev* in gVisor and `runc`:'
+- en: A pod is a single instance of your application, and to scale to demand, many
+    identical pods are used to replicate the application by a workload resource (such
+    as a Deployment, DaemonSet, or StatefulSet).
+  id: totrans-59
   prefs: []
   type: TYPE_NORMAL
-- en: '[PRE2]'
-  prefs: []
-  type: TYPE_PRE
-- en: We can see that the `runsc` gVisor runtime drops the `console` and `core` devices,
-    but includes a `/dev/net/tun` device (under the *net/* directory) for its `netstack`
-    networking stack, which also runs inside Sentry. Netstack can be bypassed for
-    direct host network access (at the cost of some isolation), or host networking
-    disabled entirely for fully host-isolated networking (depending on the CNI or
-    other network configured within the sandbox).
+- en: Your pods may include sidecar containers supporting monitoring, network, and
+    security, and “init” containers for pod bootstrap, enabling you to deploy different
+    application styles. These sidecars are likely to have elevated privileges and
+    be of interest to an adversary.
+  id: totrans-60
   prefs: []
   type: TYPE_NORMAL
-- en: 'Apart from these giveaways, gVisor is kind enough to identify itself at boot
-    time, which you can see in a container with `dmesg`:'
+- en: “Init” containers run in order (first to last) to set up a pod and can make
+    security changes to the namespaces, like Istio’s init container that configures
+    the pod’s *iptables* (in the kernel’s netfilter) so the runtime (non-init container)
+    pods route traffic through a sidecar container. Sidecars run alongside the primary
+    container in the pod, and all non-init containers in a pod start at the same time.
+  id: totrans-61
   prefs: []
   type: TYPE_NORMAL
-- en: '[PRE3]'
-  prefs: []
-  type: TYPE_PRE
-- en: 'Notably this is not the real time it takes to start the container, and the
-    quirky messages are randomized—don’t rely on them for automation. If we `time`
-    the process we can see it start faster than it claims:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE4]'
-  prefs: []
-  type: TYPE_PRE
-- en: Unless an application running in a sandbox explicitly checks for these features
-    of the environment, it will be unaware that it is in a sandbox. Your application
-    makes the same system calls as it would to a normal Linux kernel, but the Sentry
-    process intercepts the system calls as shown in [Figure 3-13](#runtime-gvisor-boundaries).
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![image](Images/haku_0313.png)'
+- en: '![Cluster deployment example](Images/haku_0203.png)'
+  id: totrans-62
   prefs: []
   type: TYPE_IMG
-- en: Figure 3-13\. gVisor container components and privilege boundaries
+- en: 'Figure 2-3\. Cluster deployment example; source: [Kubernetes documentation](https://oreil.ly/Co9Hx)'
+  id: totrans-63
   prefs:
   - PREF_H6
   type: TYPE_NORMAL
-- en: Sentry prevents the application interacting directly with the host kernel, and
-    has a `seccomp` profile that limits its possible host system calls. This helps
-    prevent escalation in case a tenant breaks into Sentry and attempts to attack
-    the host kernel.
+- en: What’s inside a pod? Cloud native applications are often microservices, web
+    servers, workers, and batch processes. Some pods run one-shot tasks (wrapped with
+    a job, or maybe one single nonrestarting container), perhaps running multiple
+    other pods to assist. All these pods present an opportunity to an attacker. Pods
+    get hacked. Or, more often, a network-facing container process gets hacked.
+  id: totrans-64
   prefs: []
   type: TYPE_NORMAL
-- en: Implementing a userspace kernel is a Herculean undertaking and does not cover
-    every system call. This means some applications are not able to run in gvisor,
-    although in practice this doesn’t happen very often and there are millions of
-    workloads running on GCP under gVisor.
+- en: A pod is a trust boundary encompassing all the containers inside, including
+    their identity and access. There is still separation between pods that you can
+    enhance with policy configuration, but you should consider the entire contents
+    of a pod when threat modeling it.
+  id: totrans-65
   prefs: []
   type: TYPE_NORMAL
-- en: The Sentry has a side process called Gofer. It handles disks and devices, which
-    are historically common VM attack vectors. Separating out these responsibilities
-    increases your resistance to compromise; if Sentry has an exploitable bug, it
-    can’t be used to attack the host’s devices directly because they’re all proxied
-    through Gofer.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Note
+- en: Tip
+  id: totrans-66
   prefs:
   - PREF_H6
   type: TYPE_NORMAL
-- en: gVisor is written in [Go](https://Golang.org) to avoid security pitfalls that
-    can plague kernels. Go is strongly typed, with built-in bounds checks, no uninitialized
-    variables, no use-after-free bugs, no stack overflow bugs, and a built-in race
-    detector. However, using Go has its challenges, and the runtime often introduces
-    a little performance overhead.
+- en: Kubernetes is a distributed system, and ordering of actions (such as applying
+    a multidoc YAML file) is eventually consistent, meaning that API calls don’t always
+    complete in the order that you expect. Ordering depends on various factors and
+    shouldn’t be relied upon. Tabitha Sable has a mechanically sympathetic definition
+    of Kubernetes.
+  id: totrans-67
   prefs: []
   type: TYPE_NORMAL
-- en: However, this comes at the cost of some reduced application compatibility and
-    a high per-system-call overhead. Of course, not all applications make a lot of
-    system calls, so this depends on usage.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Application system calls are redirected to Sentry by a Platform Syscall Switcher,
-    which intercepts the application when it tries to make system calls to the kernel.
-    Sentry then makes the required system calls to the host for the containerized
-    process, as shown in [Figure 3-14](#runtime-gvisor-privilege). This proxying prevents
-    the application from directly controlling system calls.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![image](Images/haku_0314.png)'
+- en: '![tabby sable](Images/haku_0204.png)'
+  id: totrans-68
   prefs: []
   type: TYPE_IMG
-- en: Figure 3-14\. gVisor container components and privilege levels
+- en: What’s a Pod?
+  id: totrans-69
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: A pod as depicted in [Figure 2-4](#pod-examples) is a Kubernetes invention.
+    It’s an environment for multiple containers to run inside. The pod is the smallest
+    deployable unit you can ask Kubernetes to run and all containers in it will be
+    launched on the same node. A pod has its own IP address, can mount in storage,
+    and its namespaces surround the containers created by the container runtime such
+    as `containerd` or CRI-O.
+  id: totrans-70
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Example pods](Images/haku_0205.png)'
+  id: totrans-71
+  prefs: []
+  type: TYPE_IMG
+- en: 'Figure 2-4\. Example pods (source: [Kubernetes documentation](https://oreil.ly/YwBSv))'
+  id: totrans-72
   prefs:
   - PREF_H6
   type: TYPE_NORMAL
-- en: Sentry sits in a loop waiting for a system call to be generated by the application,
-    as shown in [Figure 3-15](#runtime-gvisor-sentry-loop).
+- en: A container is a mini-Linux, and its processes are containerized with control
+    groups (`cgroups`) to limit resource usage and namespaces to limit access. A variety
+    of other controls can be applied to restrict a containerized process’s behavior,
+    as we’ll see in this chapter.
+  id: totrans-73
   prefs: []
   type: TYPE_NORMAL
-- en: '![image](Images/haku_0315.png)'
+- en: The lifecycle of a pod is controlled by the `kubelet`, the Kubernetes API server’s
+    deputy, deployed on each node in the cluster to manage and run containers. If
+    the `kubelet` loses contact with the API server, it will continue to manage its
+    workloads, restarting them if necessary. If the `kubelet` crashes, the container
+    manager will also keep containers running in case they crash. The `kubelet` and
+    container manager oversee your workloads.
+  id: totrans-74
   prefs: []
-  type: TYPE_IMG
-- en: 'Figure 3-15\. gVisor sentry pseudocode; source: [Resource Sharing](https://oreil.ly/s1DjO)'
+  type: TYPE_NORMAL
+- en: The `kubelet` runs pods on worker nodes to instruct the container runtime and
+    configuring network and storage. Each container in a pod is a collection of Linux
+    namespaces, `cgroups`, capabilities, and Linux Security Modules (LSMs). As the
+    container runtime builds a container, each namespace is created and configured
+    individually before being combined into a container.
+  id: totrans-75
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  id: totrans-76
   prefs:
   - PREF_H6
   type: TYPE_NORMAL
-- en: It captures the system call with `ptrace`, handles it, and returns a response
-    to the process (often without making the expected system call to the host). This
-    simple model protects the underlying kernel from any direct interaction with the
-    process inside the container.
+- en: Capabilities are individual switches for “special” root user operations such
+    as changing any file’s permissions, loading modules into the kernel, accessing
+    devices in raw mode (e.g., networks and I/O), BPF and performance monitoring,
+    and every other operation.
+  id: totrans-77
   prefs: []
   type: TYPE_NORMAL
-- en: The decreasing number of permitted calls shown in [Figure 3-16](#runtime-gvisor-syscall-hierarchy)
-    limits the exploitable interface of the underlying host kernel to 68 system calls,
-    while the containerized application process believes it has access to all ~350
-    kernel calls.
+- en: The root user has all capabilities, and capabilities can be granted to any process
+    or user (“ambient capabilities”). Excess capability grants may lead to container
+    breakout, as we see later in this chapter.
+  id: totrans-78
   prefs: []
   type: TYPE_NORMAL
-- en: 'The Platform Syscall Switcher, gVisor’s system call interceptor, has two modes:
-    `ptrace` and KVM. The `ptrace` (“process trace”) system call provides a mechanism
-    for a parent process to observe and modify another process’s behavior. `PTRACE_SYSEMU`
-    forces the traced process to stop on entry to the next syscall, and gVisor is
-    able to respond to it or proxy the request to the host kernel, going via Gofer
-    if I/O is required.'
+- en: In Kubernetes, a newly created container is added to the pod by the container
+    runtime, where it shares network and interprocess communication namespaces between
+    pod containers.
+  id: totrans-79
   prefs: []
   type: TYPE_NORMAL
-- en: '![image](Images/haku_0316.png)'
-  prefs: []
-  type: TYPE_IMG
-- en: Figure 3-16\. gVisor system call hierarchy
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: Firecracker
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: Firecracker is a virtual machine monitor (VMM) that boots a dedicated VM for
-    its guest using KVM. Instead of using KVM’s traditional device emulation pairing
-    with QEMU, Firecracker implements its own memory management and device emulation.
-    It has no BIOS (instead implementing Linux Boot Protocol), no PCI support, and
-    stripped down, simple, virtualized devices with a single network device, a block
-    I/O device, timer, clock, serial console, and keyboard device that only simulates
-    Ctrl-Alt-Del to reset the VM, as shown in [Figure 3-17](#runtime-firecracker-1).
+- en: '[Figure 2-5](#node-examples) shows a `kubelet` running four individual pods
+    on a single node.'
+  id: totrans-80
   prefs: []
   type: TYPE_NORMAL
-- en: '![image](Images/haku_0317.png)'
+- en: 'The container is the first line of defense against an adversary, and container
+    images should be scanned for CVEs before being run. This simple step reduces the
+    risk of running an outdated or malicious container and informs your risk-based
+    deployment decisions: do you ship to production, or is there an exploitable CVE
+    that needs patching first?'
+  id: totrans-81
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Example pods on a node](Images/haku_0206.png)'
+  id: totrans-82
   prefs: []
   type: TYPE_IMG
-- en: 'Figure 3-17\. Firecracker and KVM interaction; source: [Resource Sharing](https://oreil.ly/s1DjO)'
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: The Firecracker VMM process that starts the guest virtual machine is in turn
-    started by a *jailer* process. The jailer configures the security configuration
-    of the VMM sandbox (GID and UID assignment, network namespaces, create chroot,
-    create `cgroups`), then terminates and passes control to Firecracker, where `seccomp`
-    is enforced around the KVM guest kernel and userspace that it boots.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Instead of using a second process for I/O like gVisor, Firecracker uses the
-    KVM’s virtio drivers to proxy from the guest’s Firecracker process to the host
-    kernel, via the VMM (shown in [Figure 3-18](#runtime-firecracker-2)). When the
-    Firecracker VM image starts, it boots into protected mode in the guest kernel,
-    never running in its real mode.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![image](Images/haku_0318.png)'
-  prefs: []
-  type: TYPE_IMG
-- en: Figure 3-18\. Firecracker sandboxing the guest kernel from the host
+- en: 'Figure 2-5\. Example pods on a node (source: [Kubernetes documentation](https://oreil.ly/ksFim))'
+  id: totrans-83
   prefs:
   - PREF_H6
   type: TYPE_NORMAL
 - en: Tip
+  id: totrans-84
   prefs:
   - PREF_H6
   type: TYPE_NORMAL
-- en: Firecracker is compatible with Kubernetes and OCI using the [firecracker-containerd
-    shim](https://oreil.ly/rRswg).
+- en: “Official” container images in public registries have a greater likelihood of
+    being up to date and well-patched, and Docker Hub signs all official images with
+    Notary, as we’ll see in [Chapter 4](ch04.xhtml#ch-apps-supply-chain).
+  id: totrans-85
   prefs: []
   type: TYPE_NORMAL
-- en: Firecracker invokes far less host kernel code than traditional LXC or gVisor
-    once it has started, although they all touch similar amounts of kernel code to
-    start their sandboxes.
+- en: Public container registries often host malicious images, so detecting them before
+    production is essential. [Figure 2-6](#app-poison-container-registry) shows how
+    this might happen.
+  id: totrans-86
   prefs: []
   type: TYPE_NORMAL
-- en: 'Performance improvements are gained from an isolated memory stack, and lazily
-    flushing data to the page cache instead of disk to increase filesystem performance.
-    It supports arbitrary Linux binaries but does not support generic Linux kernels.
-    It was created for AWS’s Lambda service, forked from Google’s ChromeOS VMM, crosvm:'
+- en: The `kubelet` attaches pods to a Container Network Interface (CNI). CNI network
+    traffic is treated as layer 4 TCP/IP (although the underlying network technology
+    used by the CNI plug-in may differ), and encryption is the job of the CNI plug-in,
+    the application, a service mesh, or at a minimum, the underlay networking between
+    the nodes. If traffic is unencrypted, it may be sniffed by a compromised pod or
+    node.
+  id: totrans-87
   prefs: []
   type: TYPE_NORMAL
-- en: What makes crosvm unique is a focus on safety within the programming language
-    and a sandbox around the virtual devices to protect the kernel from attack in
-    case of an exploit in the devices.
-  prefs:
-  - PREF_BQ
-  type: TYPE_NORMAL
-- en: ''
-  prefs:
-  - PREF_BQ
-  type: TYPE_NORMAL
-- en: '[Chrome OS Virtual Machine Monitor](https://oreil.ly/dbaZ5)'
-  prefs:
-  - PREF_BQ
-  type: TYPE_NORMAL
-- en: Firecracker is a statically linked Rust binary that is compatible with Kata
-    Containers, [Weave Ignite](https://oreil.ly/lUQ4Y), [firekube](https://oreil.ly/zn0Nc),
-    and [firecracker-containerd](https://oreil.ly/pluqR). It provides soft allocation
-    (not allocating memory until it’s actually used) for more aggressive “bin packing,”
-    and so greater resource utilization.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Kata Containers
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: Finally, Kata Containers consists of lightweight VMs containing a container
-    engine. They are highly optimized for running containers. They are also the oldest,
-    and most mature, of the recent sandboxes. Compatibility is wide, with support
-    for most container orchestrators.
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'Grown from a combination of Intel Clear Containers and Hyper.sh RunV, Kata
-    Containers ([Figure 3-19](#runtime-kata-1)) wraps containers with a dedicated
-    KVM virtual machine and device emulation from a pluggable backend: QEMU, QEMU-lite,
-    NEMU (a custom stripped-down QEMU), or Firecracker. It is an OCI runtime and so
-    supports Kubernetes.'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![image](Images/haku_0319.png)'
+- en: '![Poisoning a public container registry](Images/haku_0207.png)'
+  id: totrans-88
   prefs: []
   type: TYPE_IMG
-- en: Figure 3-19\. Kata Containers architecture
+- en: Figure 2-6\. Poisoning a public container registry
+  id: totrans-89
   prefs:
   - PREF_H6
   type: TYPE_NORMAL
-- en: The Kata Containers runtime launches each container on a guest Linux kernel.
-    Each Linux system is on its own hardware-isolated VM, as you can see in [Figure 3-20](#runtime-kata-2).
+- en: Warning
+  id: totrans-90
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Although starting a malicious container under a correctly configured container
+    runtime is usually safe, there have been attacks against the container bootstrap
+    phase. We examine the */proc/self/exe* breakout CVE-2019-5736 later in this chapter.
+  id: totrans-91
   prefs: []
   type: TYPE_NORMAL
-- en: The `kata-runtime` process is the VMM, and the interface to the OCI runtime.
-    `kata-proxy` handles I/O for the `kata-agent` (and therefore the application)
-    using KVM’s `virtio-serial`, and multiplexes a command channel over the same connection.
+- en: Pods can also have storage attached by Kubernetes, using the ([Container Storage
+    Interface (CSI)](https://oreil.ly/S8v3B)), which includes the PersistentVolumeClaim
+    and StorageClass shown in [Figure 2-7](#pod-cluster-example-2). In [Chapter 6](ch06.xhtml#ch-storage)
+    we will get deeper into the storage aspects.
+  id: totrans-92
   prefs: []
   type: TYPE_NORMAL
-- en: '`kata-shim` is the interface to the container engine, handling container lifecycles,
-    signals, and logs.'
+- en: 'In [Figure 2-7](#pod-cluster-example-2) you can see a view of the control plane
+    and the API server’s central role in the cluster. The API server is responsible
+    for interacting with the cluster datastore (`etcd`), hosting the cluster’s extensible
+    API surface, and managing the `kubelet`s. If the API server or `etcd` instance
+    is compromised, the attacker has complete control of the cluster: these are the
+    most sensitive parts of the system.'
+  id: totrans-93
   prefs: []
   type: TYPE_NORMAL
-- en: '![image](Images/haku_0320.png)'
+- en: '![Cluster Example 2](Images/haku_0208.png)'
+  id: totrans-94
   prefs: []
   type: TYPE_IMG
-- en: Figure 3-20\. Kata Containers components
+- en: 'Figure 2-7\. Cluster example 2 (source: [Tsuyoshi Ushio](https://oreil.ly/szUug))'
+  id: totrans-95
   prefs:
   - PREF_H6
   type: TYPE_NORMAL
-- en: The guest is started using KVM and either QEMU or Firecracker. The project has
-    forked QEMU twice to experiment with lightweight start times and has reimplemented
-    a number of features back into QEMU, which is now preferred to NEMU (the most
-    recent fork).
-  prefs: []
-  type: TYPE_NORMAL
-- en: Inside the VM, QEMU boots an optimized kernel, and `systemd` starts the `kata-agent`
-    process. `kata-agent`, which uses `libcontainer` and so shares a lot of code with
-    `runc`, manages the containers running inside the VM.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Networking is provided by integrating with CNI (or Docker’s CNM), and a network
-    namespace is created for each VM. Because of its networking model, the host network
-    can’t be joined.
-  prefs: []
-  type: TYPE_NORMAL
-- en: SELinux and AppArmor are not currently implemented, and some OCI inconsistencies
-    [limit the Docker integration](https://oreil.ly/VUz84).
-  prefs: []
-  type: TYPE_NORMAL
-- en: rust-vmm
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: Many new VMM technologies have some Rustlang components. So is Rust any good?
-  prefs: []
-  type: TYPE_NORMAL
-- en: It is similar to Golang in that it is memory safe (memory model, virtio, etc.)
-    but it is built atop a memory ownership model, which avoids whole classes of bugs
-    including use after free, double free, and dangling pointer issues.
-  prefs: []
-  type: TYPE_NORMAL
-- en: It has safe and simple concurrency and no garbage collector (which may incur
-    some virtualization overhead and latency), instead using build-time analysis to
-    find segmentation faults and memory issues.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[rust-vmm](https://oreil.ly/vs5f7) is a development toolkit for new VMMs as
-    shown in [Figure 3-21](#runtime-rust-vmm-1). It is a collection of building blocks
-    (Rust packages, or “crates”) comprised of virtualization components. These are
-    well tested (and therefore better secured) and provide a simple, clean interface.
-    For example, the `vm-memory` crate is a guest memory abstraction, providing a
-    guest address, memory regions, and guest shared memory.'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![image](Images/haku_0321.png)'
-  prefs: []
-  type: TYPE_IMG
-- en: 'Figure 3-21\. Kata Containers components; source: [Resource Sharing](https://oreil.ly/s1DjO)'
+- en: Warning
+  id: totrans-96
   prefs:
   - PREF_H6
   type: TYPE_NORMAL
-- en: The project was birthed from ChromeOS’s `cross-vm` (`crosvm`), which was forked
-    by Firecracker and subsequently abstracted into “hypervisor from scratch” Rust
-    crates. This approach will enable the development of a plug-and-play hypervisor
-    architecture.
+- en: Vulnerabilities have been found in many storage drivers, including CVE-2018-11235,
+    which exposed a Git attack on the `gitrepo` storage volume, and CVE-2017-1002101,
+    a subpath volume mount mishandling error. We will cover these in [Chapter 6](ch06.xhtml#ch-storage).
+  id: totrans-97
+  prefs: []
+  type: TYPE_NORMAL
+- en: For performance in larger clusters, the control plane should run on separate
+    infrastructure to `etcd`, which requires high disk and network I/O to support
+    reasonable response times for its distributed consensus algorithm, [Raft](https://oreil.ly/V5lbf).
+  id: totrans-98
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'As the API server is the `etcd` cluster’s only client, compromise of either
+    effectively roots the cluster: due to the asynchronous scheduling, in Kubernetes
+    the injection of malicious, unscheduled pods into `etcd` will trigger their scheduling
+    to a `kubelet`.'
+  id: totrans-99
+  prefs: []
+  type: TYPE_NORMAL
+- en: As with all fast-moving software, there have been vulnerabilities in most parts
+    of the Kubernetes stack. The only solution to running modern software is a healthy
+    continuous integration infrastructure capable of promptly redeploying vulnerable
+    clusters upon a vulnerability announcement.
+  id: totrans-100
+  prefs: []
+  type: TYPE_NORMAL
+- en: Understanding Containers
+  id: totrans-101
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Okay, so we have a high-level view of a cluster. But at a low level, what is
+    a “container”? It is a microcosm of Linux that gives a process the illusion of
+    a dedicated kernel, network, and userspace. Software trickery fools the process
+    inside your container into believing it is the only process running on the host
+    machine. This is useful for isolation and migration of your existing workloads
+    into Kubernetes.
+  id: totrans-102
   prefs: []
   type: TYPE_NORMAL
 - en: Note
+  id: totrans-103
   prefs:
   - PREF_H6
   type: TYPE_NORMAL
-- en: To see how a runtime is built, you can check out [Youki](https://oreil.ly/z4PmV).
-    It’s an experimental container runtime written in Rust that implements the `runc`
-    [runtime-spec](https://oreil.ly/MBWS0).
+- en: As [Christian Brauner](https://oreil.ly/lBByx) and [Stéphane Graber](https://oreil.ly/DsmkD)
+    like [to say](https://oreil.ly/sTkqN) “(Linux) containers are a userspace fiction,”
+    a collection of configurations that present an illusion of isolation to a process
+    inside. Containers emerged from the primordial kernel soup, a child of evolution
+    rather than intelligent design that has been morphed, refined, and coerced into
+    shape so that we now have something usable.
+  id: totrans-104
   prefs: []
   type: TYPE_NORMAL
-- en: Risks of Sandboxing
+- en: Containers don’t exist as a single API, library, or kernel feature. They are
+    merely the resultant bundling and isolation that’s left over once the kernel has
+    started a collection of namespaces, configured some `cgroups` and capabilities,
+    added Linux Security Modules like AppArmor and SELinux, and started our precious
+    little process inside.
+  id: totrans-105
+  prefs: []
+  type: TYPE_NORMAL
+- en: A container is a process in a special environment with some combination of namespaces
+    either enabled or shared with the host (or other containers). The process comes
+    from a container image, a TAR file containing the container’s root filesystem,
+    its application(s), and any dependencies. When the image is unpacked into a directory
+    on the host and a special filesystem “pivot root” is created, a “container” is
+    constructed around it, and its `ENTRYPOINT` is run from the filesystem within
+    the container. This is roughly how a container starts, and each container in a
+    pod must go through this process.
+  id: totrans-106
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Container security has two parts: the contents of the container image, and
+    its runtime configuration and security context. An abstract risk rating of a container
+    can be derived from the number of security primitives it enables and uses safely,
+    avoiding host namespaces, limiting resource use with `cgroups`, dropping unneeded
+    capabilities, tightening security module configuration for the process’s usage
+    pattern, and minimizing process and filesystem ownership and contents. [Kubesec.io](https://kubesec.io)
+    rates a pod configuration’s security on how well it enables these features at
+    runtime.'
+  id: totrans-107
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'When the kernel detects a network namespace is empty, it will destroy the namespace,
+    removing any IPs allocated to network adapters in it. For a pod with only a single
+    container to hold the network namespace’s IP allocation, a crashed and restarting
+    container would have a new network namespace created and so have a new IP assigned.
+    This rapid churn of IPs would create unnecessary noise for your operators and
+    security monitoring. Kubernetes uses the so-called pause container (see also [“Intra-Pod
+    Networking”](ch05.xhtml#workload-networking-intra-pod)), to hold the pod’s shared
+    network namespace open in the event of a crash-looping tenant container. From
+    inside a worker node, the companion pause container in each pod looks as follows:'
+  id: totrans-108
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE1]'
+  id: totrans-109
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE1]'
+- en: This pause container is invisible via the Kubernetes API, but visible to the
+    container runtime on the worker node.
+  id: totrans-110
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  id: totrans-111
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'CRI-O dispenses with the pause container (unless absolutely necessary) by pinning
+    namespaces, as described in the KubeCon talk [“CRI-O: Look Ma, No Pause”](https://oreil.ly/EqEwr).'
+  id: totrans-112
+  prefs: []
+  type: TYPE_NORMAL
+- en: Sharing Network and Storage
+  id: totrans-113
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: A group of containers in a pod share a network namespace, so all your containers’
+    ports are available on the same network adapter to every container in the pod.
+    This gives an attacker in one container of the pod a chance to attack private
+    sockets available on any network interface, including the loopback adapter `127.0.0.1`.
+  id: totrans-114
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  id: totrans-115
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: We examine these concepts in greater detail in Chapters [5](ch05.xhtml#ch-networking)
+    and [6](ch06.xhtml#ch-storage).
+  id: totrans-116
+  prefs: []
+  type: TYPE_NORMAL
+- en: Each container runs in a root filesystem from its container image that is not
+    shared between containers. Volumes must be mounted into each container in the
+    pod configuration, but a pod’s volumes may be available to all containers if configured
+    that way, as you saw in [Figure 2-4](#pod-examples).
+  id: totrans-117
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[Figure 2-8](#pod-namespace-nested) shows some of the paths inside a container
+    workload that an attacker may be interested in (note the `user` and `time` namespaces
+    are not currently in use).'
+  id: totrans-118
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Nested Pod Namespaces](Images/haku_0209.png)'
+  id: totrans-119
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 2-8\. Namespaces wrapping the containers in a pod ([inspired by Ian Lewis](https://oreil.ly/nH9y8))
+  id: totrans-120
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Note
+  id: totrans-121
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'User namespaces are the ultimate kernel security frontier, and are generally
+    not enabled due to historically being likely entry points for kernel attacks:
+    everything in Linux is a file, and user namespace implementation cuts across the
+    whole kernel, making it more difficult to secure than other namespaces.'
+  id: totrans-122
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The special virtual filesystems listed here are all possible paths of breakout
+    if misconfigured and accessible inside the container: */dev* may give access to
+    the host’s devices, */proc* can leak process information, or */sys* supports functionality
+    like launching new containers.'
+  id: totrans-123
+  prefs: []
+  type: TYPE_NORMAL
+- en: What’s the Worst That Could Happen?
+  id: totrans-124
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: A CISO is responsible for the organization’s security. Your role as a CISO means
+    you should consider worst-case scenarios, to ensure that you have appropriate
+    defenses and mitigations in place. Attack trees help to model these negative outcomes,
+    and one of the data sources you can use is the [threat matrix](https://oreil.ly/LyjsO)
+    as shown in [Figure 2-9](#pod-threat-matrix).
+  id: totrans-125
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Microsoft Kubernetes Threat Matrix](Images/haku_0210.png)'
+  id: totrans-126
+  prefs: []
+  type: TYPE_IMG
+- en: 'Figure 2-9\. Microsoft Kubernetes threat matrix; source: [“Secure Containerized
+    Environments with Updated Threat Matrix for Kubernetes”](https://oreil.ly/JzdmV)'
+  id: totrans-127
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: But there are some threats missing, and the community has added some (thanks
+    to Alcide, and [Brad Geesaman](https://oreil.ly/Ll2de) and [Ian Coldwater](https://oreil.ly/NmidV)
+    again), as shown in [Table 2-1](#table0201).
+  id: totrans-128
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 2-1\. Our enhanced Microsoft Kubernetes threat matrix
+  id: totrans-129
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Initial access (popping a shell pt 1 - prep) | Execution (popping a shell
+    pt 2 - exec) | Persistence (keeping the shell) | Privilege escalation (container
+    breakout) | Defense evasion (assuming no IDS) | Credential access (juicy creds)
+    | Discovery (enumerate possible pivots) | Lateral movement (pivot) | Command &
+    control (C2 methods) | Impact (dangers) |'
+  id: totrans-130
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |'
+  id: totrans-131
+  prefs: []
+  type: TYPE_TB
+- en: '| Using cloud credentials: service account keys, impersonation | Exec into
+    container (bypass admission control policy) | Backdoor container (add a reverse
+    shell to local or container registry image) | Privileged container (legitimate
+    escalation to host) | Clear container logs (covering tracks after host breakout)
+    | List K8s Secrets | List K8s API server (nmap, curl) | Access cloud resources
+    (workload identity and cloud integrations) | Dynamic resolution (DNS tunneling)
+    | Data destruction (datastores, files, NAS, ransomware…) |'
+  id: totrans-132
+  prefs: []
+  type: TYPE_TB
+- en: '| Compromised images in registry (supply chain unpatched or malicious) | BASH/CMD
+    inside container (implant or trojan, RCE/reverse shell, malware, C2, DNS tunneling)
+    | Writable host path mount (host mount breakout) | Cluster admin role binding
+    (untested RBAC) | Delete K8s events (covering tracks after host breakout) | Mount
+    service principal (Azure specific) | Access `kubelet` API | Container service
+    account (API server) | App protocols (L7 protocols, TLS, …) | Resource hijacking
+    (cryptojacking, malware C2/distribution, open relays, botnet membership) |'
+  id: totrans-133
+  prefs: []
+  type: TYPE_TB
+- en: '| Application vulnerability (supply chain unpatched or malicious) | Start new
+    container (with malicious payload: persistence, enumeration, observation, escalation)
+    | K8s CronJob (reverse shell on a timer) | Access cloud resources (metadata attack
+    via workload identity) | Connect from proxy server (to cover source IP, external
+    to cluster) | Applications credentials in config files (key material) | Access
+    K8s dashboard (UI requires service account credentials) | Cluster internal networking
+    (attack neighboring pods or systems) | Botnet (k3d, or traditional) | Application
+    DoS |'
+  id: totrans-134
+  prefs: []
+  type: TYPE_TB
+- en: '| kubeconfig file (exfiltrated, or uploaded to the wrong place) | Application
+    exploit (RCE) | Static pods (reverse shell, shadow API server to read audit-log-only
+    headers) | Pod `hostPath` mount (logs to container breakout) | Pod/container name
+    similarity (visual evasion, CronJob attack) | Access container service account
+    (RBAC lateral jumps) | Network mapping (nmap, curl) | Access container service
+    account (RBAC lateral jumps) |  | Node scheduling DoS |'
+  id: totrans-135
+  prefs: []
+  type: TYPE_TB
+- en: '| Compromise user endpoint (2FA and federating auth mitigate) | SSH server
+    inside container (bad practice) | Injected sidecar containers (malicious mutating
+    webhook) | Node to cluster escalation (stolen credentials, node label rebinding
+    attack) | Dynamic resolution (DNS) (DNS tunneling/exfiltration) | Compromise admission
+    controllers | Instance metadata API (workload identity) | Host writable volume
+    mounts |  | Service discovery DoS |'
+  id: totrans-136
+  prefs: []
+  type: TYPE_TB
+- en: '| K8s API server vulnerability (needs CVE and unpatched API server) | Container
+    lifecycle hooks (`postStart` and `preStop` events in pod YAML) | Rewrite container
+    lifecycle hooks (`postStart` and `preStop` events in pod YAML) | Control plane
+    to cloud escalation (keys in Secrets, cloud or control plane credentials) | Shadow
+    admission control or API server |  | Compromise K8s Operator (sensitive RBAC)
+    | Access K8s dashboard |  | PII or IP exfiltration (cluster or cloud datastores,
+    local accounts) |'
+  id: totrans-137
+  prefs: []
+  type: TYPE_TB
+- en: '| Compromised host (credentials leak/stuffing, unpatched services, supply chain
+    compromise) |  | Rewrite liveness probes (exec into and reverse shell in container)
+    | Compromise admission controller (reconfigure and bypass to allow blocked image
+    with flag) |  |  | Access host filesystem (host mounts) | Access tiller endpoint
+    (Helm v3 negates this) |  | Container pull rate limit DoS (container registry)
+    |'
+  id: totrans-138
+  prefs: []
+  type: TYPE_TB
+- en: '| Compromised `etcd` (missing auth) |  | Shadow admission control or API server
+    (privileged RBAC, reverse shell) | Compromise K8s Operator (compromise flux and
+    read any Secrets) |  |  |  | Access K8s Operator |  | SOC/SIEM DoS (event/audit/log
+    rate limit) |'
+  id: totrans-139
+  prefs: []
+  type: TYPE_TB
+- en: '|  |  | K3d botnet (secondary cluster running on compromised nodes) | Container
+    breakout (kernel or runtime vulnerability e.g., DirtyCOW, `/proc/self/exe`, eBPF
+    verifier bugs, Netfilter) |  |  |  |  |  |  |'
+  id: totrans-140
+  prefs: []
+  type: TYPE_TB
+- en: We’ll explore these threats in detail as we progress through the book. But the
+    first threat, and the greatest risk to the isolation model of our systems, is
+    an attacker breaking out of the container itself.
+  id: totrans-141
+  prefs: []
+  type: TYPE_NORMAL
+- en: Container Breakout
+  id: totrans-142
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: A cluster admin’s worst fear is a container breakout; that is, a user or process
+    inside a container that can run code outside of the container’s execution environment.
+  id: totrans-143
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  id: totrans-144
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Speaking strictly, a container breakout should exploit the kernel, attacking
+    the code a container is supposed to be constrained by. In the authors’ opinion,
+    any avoidance of isolation mechanisms breaks the contract the container’s maintainer
+    or operator thought they had with the process(es) inside. This means it should
+    be considered equally threatening to the security of the host system and its data,
+    so we define container breakout to include any evasion of isolation.
+  id: totrans-145
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Container breakouts may occur in various ways:'
+  id: totrans-146
+  prefs: []
+  type: TYPE_NORMAL
+- en: An *exploit* including against the kernel, network or storage stack, or container
+    runtime
+  id: totrans-147
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: A *pivot* such as attacking exposed local, cloud, or network services, or escalating
+    privilege and abusing discovered or inherited credentials
+  id: totrans-148
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: A *misconfiguration* that allows an attacker an easier or legitimate path to
+    exploit or pivot (this is the most likely way)
+  id: totrans-149
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: If the running process is owned by an unprivileged user (that is, one with no
+    root capabilities), many breakouts are not possible. In that case the process
+    or user must gain capabilities with a local privilege escalation inside the container
+    before attempting to break out.
+  id: totrans-150
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Once this is achieved, a breakout may start with a hostile root-owned process
+    running in a poorly configured container. Access to the root user’s capabilities
+    within a container is the precursor to most escapes: without root (and sometimes
+    `CAP_SYS_ADMIN`), many breakouts are nullified.'
+  id: totrans-151
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  id: totrans-152
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The `securityContext` and LSM configurations are vital to constrain unexpected
+    activity from zero-day vulnerabilities, or supply chain attacks (library code
+    loaded into the container and exploited automatically at runtime).
+  id: totrans-153
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'You can define the active user, group, and filesystem group (set on mounted
+    volumes for readability, gated by `fsGroupChangePolicy`) in your workloads’ security
+    contexts, and enforce it with admission control (see [Chapter 8](ch08.xhtml#ch-policy)),
+    as this [example from the docs](https://oreil.ly/YJNS6) shows:'
+  id: totrans-154
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE2]'
+  id: totrans-155
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE2]'
+- en: 'In a container breakout scenario, if the user is root inside the container
+    or has mount capabilities (granted by default under `CAP_SYS_ADMIN`, which root
+    is granted unless dropped), they can interact with virtual and physical disks
+    mounted into the container. If the container is privileged (which among other
+    things disables masking of kernel paths in */dev*), it can see and mount the host
+    filesystem:'
+  id: totrans-156
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE3]'
+  id: totrans-157
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE3]'
+- en: We look at `nsenter` privileged container breakouts, which escape more elegantly
+    by entering the host’s namespaces, in [Chapter 6](ch06.xhtml#ch-storage).
+  id: totrans-158
+  prefs: []
+  type: TYPE_NORMAL
+- en: While you should prevent this attack easily by avoiding the root user and privilege
+    mode, and enforcing that with admission control, it’s an indication of just how
+    slim the container security boundary can be if misconfigured.
+  id: totrans-159
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  id: totrans-160
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'An attacker controlling a containerized process may have control of the networking,
+    some or all of the storage, and potentially other containers in the pod. Containers
+    generally assume other containers in the pod are friendly as they share resources,
+    and we can consider the pod as a trust boundary for the processes inside. Init
+    containers are an exception: they complete and shut down before the main containers
+    in the pod start, and as they operate in isolation may have more security sensitivity.'
+  id: totrans-161
+  prefs: []
+  type: TYPE_NORMAL
+- en: The container and pod isolation model relies on the Linux kernel and container
+    runtime, both of which are generally robust when not misconfigured. Container
+    breakout occurs more often through insecure configuration than kernel exploit,
+    although zero-day kernel vulnerabilities are inevitably devastating to Linux systems
+    without correctly configured LSMs (such as SELinux and AppArmor).
+  id: totrans-162
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  id: totrans-163
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: In [“Architecting Containerized Apps for Resilience”](ch04.xhtml#architecting-apps-resilience)
+    we explore how the Linux DirtyCOW vulnerability could be used to break out of
+    insecurely configured containers.
+  id: totrans-164
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Container escape is rarely plain sailing, and any fresh vulnerabilities are
+    often patched shortly after disclosure. Only occasionally does a kernel vulnerability
+    result in an exploitable container breakout, and the opportunity to harden individually
+    containerized processes with LSMs enables defenders to tightly constrain high-risk
+    network-facing processes; it may entail one or more of:'
+  id: totrans-165
+  prefs: []
+  type: TYPE_NORMAL
+- en: Finding a zero-day in the runtime or kernel
+  id: totrans-166
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Exploiting excess privilege and escaping using legitimate commands
+  id: totrans-167
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Evading misconfigured kernel security mechanisms
+  id: totrans-168
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Introspection of other processes or filesystems for alternate escape routes
+  id: totrans-169
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Sniffing network traffic for credentials
+  id: totrans-170
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Attacking the underlying orchestrator or cloud environment
+  id: totrans-171
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Warning
+  id: totrans-172
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Vulnerabilities in the underlying physical hardware often can’t be defended
+    against in a container. For example, `Spectre` and `Meltdown` (CPU speculative
+    execution attacks), and `rowhammer`, `TRRespass`, and `SPOILER` (DRAM memory attacks)
+    bypass container isolation mechanisms as they cannot intercept the entire instruction
+    stream that a CPU processes. Hypervisors suffer the same lack of possible protection.
+  id: totrans-173
+  prefs: []
+  type: TYPE_NORMAL
+- en: Finding new kernel attacks is hard. Misconfigured security settings, exploiting
+    published CVEs, and social engineering attacks are easier. But it’s important
+    to understand the range of potential threats in order to decide your own risk
+    tolerance.
+  id: totrans-174
+  prefs: []
+  type: TYPE_NORMAL
+- en: We’ll go through a step-by-step security feature exploration to see a range
+    of ways in which your systems may be attacked in [Appendix A](app01.xhtml#appendix-pod-attack).
+  id: totrans-175
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'For more information on how the Kubernetes project manages CVEs, see Anne Bertucio
+    and CJ Cullen’s blog post, [“Exploring Container Security: Vulnerability Management
+    in Open-Source Kubernetes”](https://oreil.ly/wYvv6).'
+  id: totrans-176
+  prefs: []
+  type: TYPE_NORMAL
+- en: Pod Configuration and Threats
+  id: totrans-177
   prefs:
   - PREF_H1
   type: TYPE_NORMAL
-- en: The degree of access and privilege that a guest process has to host features,
-    or virtualized versions of them, impacts the attack surface available to an attacker
-    in control of the guest process.
+- en: We’ve spoken generally about various parts of a pod, so let’s finish off by
+    going into depth on a pod spec to call out any gotchas or potential footguns.
+  id: totrans-178
   prefs: []
   type: TYPE_NORMAL
-- en: This new tranche of sandbox technologies is under active development. It’s code,
-    and like all new code, is at risk of exploitable bugs. This is a fact of software,
-    however, and is infinitely better than no new software at all!
-  prefs: []
-  type: TYPE_NORMAL
-- en: It may be that these sandboxes are not yet a target for attackers. The level
-    of innovation and baseline knowledge to contribute means the barrier to entry
-    is set high. Captain Hashjack is likely to prioritize easier targets.
-  prefs: []
-  type: TYPE_NORMAL
-- en: From an administrator’s perspective, modifying or debugging applications within
-    the sandbox becomes slightly more difficult, similar to the difference between
-    bare metal and containerized processes. These difficulties are not insurmountable
-    but require administrator familiarization with the underlying runtime.
-  prefs: []
-  type: TYPE_NORMAL
-- en: It is still possible to run [privileged sandboxes](https://oreil.ly/xxRnE) that
-    have elevated capabilities within the guest. And although the risks are fewer
-    than for privileged containers, users should be aware that any reduction of isolation
-    increases the risk of running the process inside the sandbox.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Kubernetes Runtime Class
+- en: Warning
+  id: totrans-179
   prefs:
-  - PREF_H1
+  - PREF_H6
   type: TYPE_NORMAL
-- en: Kubernetes and Docker support running multiple container runtimes simultaneously;
-    in Kubernetes, [Runtime Class](https://oreil.ly/dRHzA) is stable from v1.20 on.
-    This means a Kubernetes worker node can host pods running under different Container
-    Runtime Interfaces (CRIs), which greatly enhances workload separation.
+- en: In order to secure a pod or container, the container runtime should be minimally
+    viably secure; that is, not hosting sockets to unauthenticated connections (e.g.,
+    Docker’s */var/run/docker.sock* and `tcp://127.0.0.1:2375`) as it [leads to host
+    takeover](https://oreil.ly/jy8Ol).
+  id: totrans-180
   prefs: []
   type: TYPE_NORMAL
-- en: With `spec.template.spec.runtimeClassName` you can target a sandbox for a Kubernetes
-    workload via CRI.
+- en: 'For the purpose of this example, we are using a `frontend` pod from the [`GoogleCloudPlatform/microservices-demo`
+    application](https://oreil.ly/6WVwV), and it was deployed with the following command:'
+  id: totrans-181
   prefs: []
   type: TYPE_NORMAL
-- en: Docker is able to run any OCI-compliant runtime (e.g., `runc`, `runsc`), but
-    the Kubernetes `kubelet` uses CRI. While Kubernetes has not yet distinguished
-    between types of sandboxes, we can still set node affinity and toleration so pods
-    are scheduled on to nodes that have the relevant sandbox technology installed.
+- en: '[PRE4]'
+  id: totrans-182
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE4]'
+- en: We have updated and added some extra configuration where relevant for demonstration
+    purposes and will progress through these in the following sections.
+  id: totrans-183
   prefs: []
   type: TYPE_NORMAL
-- en: 'To use a new CRI runtime in Kubernetes, create a non-namespaced `RuntimeClass`:'
+- en: Pod Header
+  id: totrans-184
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'The pod header is the standard header of all Kubernetes resources we know and
+    love, defining the type of entity this YAML defines, and its version:'
+  id: totrans-185
   prefs: []
   type: TYPE_NORMAL
 - en: '[PRE5]'
+  id: totrans-186
   prefs: []
   type: TYPE_PRE
-- en: 'Then reference the CRI runtime class in the pod definition:'
+  zh: '[PRE5]'
+- en: 'Metadata and annotations may contain sensitive information like IP addresses
+    or security hints (in this case, for Istio), although this is only useful if the
+    attacker has read-only access:'
+  id: totrans-187
   prefs: []
   type: TYPE_NORMAL
 - en: '[PRE6]'
+  id: totrans-188
   prefs: []
   type: TYPE_PRE
-- en: This has started a new pod using `gvisor`. Remember that `runsc` (gVisor’s runtime
-    component) must be installed on the node that the pod is scheduled on.
+  zh: '[PRE6]'
+- en: 'It also historically holds the `seccomp`, `AppArmor`, and `SELinux` policies:'
+  id: totrans-189
   prefs: []
   type: TYPE_NORMAL
-- en: Conclusion
-  prefs:
-  - PREF_H1
-  type: TYPE_NORMAL
-- en: Generally sandboxes are more secure, and containers are less complex.
+- en: '[PRE7]'
+  id: totrans-190
   prefs: []
-  type: TYPE_NORMAL
-- en: When running sensitive or untrusted workloads, you want to narrow the interface
-    between a sandboxed process and the host. There are trade-offs—debugging a rogue
-    process becomes much harder, and traditional tracing tools may not have good compatibility.
-  prefs: []
-  type: TYPE_NORMAL
-- en: There is a general, minor performance overhead for sandboxes over containers
-    (~50–200ms startup), which may be negligible for some workloads, and benchmarking
-    is strongly encouraged. Options may also be limited by platform or nested virtualization
-    options.
-  prefs: []
-  type: TYPE_NORMAL
-- en: As next-generation runtimes have focused on stripping down legacy compatibility,
-    they are very small and very fast to start up (compared to traditional VMs)—not
-    as fast as LXC or `runc`, but fast enough for FaaS providers to offer aggressive
-    scale rates.
+  type: TYPE_PRE
+  zh: '[PRE7]'
+- en: We look at how to use these annotations in [“Runtime Policies”](ch08.xhtml#policy-runtime-policies).
+  id: totrans-191
   prefs: []
   type: TYPE_NORMAL
 - en: Note
+  id: totrans-192
   prefs:
   - PREF_H6
   type: TYPE_NORMAL
-- en: Traditional container runtimes like LXC and `runc` are faster to start as they
-    run a process on an existing kernel. Sandboxes need to configure their own guest
-    kernel, which leads to slightly longer start times.
+- en: After many years in limbo, `seccomp` in Kubernetes [progressed to General Availability
+    in v1.19](https://oreil.ly/F7zOs).
+  id: totrans-193
   prefs: []
   type: TYPE_NORMAL
-- en: Managed services are easiest to adopt, with gVisor in GKE and Firecracker in
-    AWS Fargate. Both of them, and Kata, will run anywhere virtualization is supported,
-    and the future is bright with the `rust-vmm` library promising many more runtimes
-    to keep valuable workloads safe.
+- en: 'This [changes the syntax](https://oreil.ly/raOrF) from an annotation to a `securityContext`
+    entry:'
+  id: totrans-194
   prefs: []
   type: TYPE_NORMAL
-- en: Segregating the most sensitive workloads on dedicated nodes in sandboxes gives
-    your systems the greatest resistance to practical compromise.
+- en: '[PRE8]'
+  id: totrans-195
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE8]'
+- en: The [Kubernetes Security Profiles Operator](https://oreil.ly/Lrw5d) (SPO) can
+    install `seccomp` profiles on your nodes (a prerequisite to their use by the container
+    runtime), and record new profiles from workloads in the cluster with [oci-seccomp-bpf-hook](https://oreil.ly/A3Ub4).
+  id: totrans-196
+  prefs: []
+  type: TYPE_NORMAL
+- en: The SPO also supports SELinux via [selinuxd](https://oreil.ly/nYQOU), with plenty
+    of details [in this blog post](https://oreil.ly/3ZFui).
+  id: totrans-197
+  prefs: []
+  type: TYPE_NORMAL
+- en: AppArmor is still in beta but annotations will be replaced with first-class
+    fields like `seccomp` once it graduates to GA.
+  id: totrans-198
+  prefs: []
+  type: TYPE_NORMAL
+- en: Let’s move on to a part of the pod spec that is not writable by the client but
+    contains some important hints.
+  id: totrans-199
+  prefs: []
+  type: TYPE_NORMAL
+- en: Reverse Uptime
+  id: totrans-200
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'When you dump a pod spec from the API server (using, for example, `kubectl
+    get` `-o yaml`) it includes the pod’s start time:'
+  id: totrans-201
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE9]'
+  id: totrans-202
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE9]'
+- en: Pods running for longer than a week or two are likely to be at higher risk of
+    unpatched bugs. Sensitive workloads running for more than 30 days will be safer
+    if they’re rebuilt in CI/CD to account for library or operating system patches.
+  id: totrans-203
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Pipeline scanning the existing container image offline for CVEs can be used
+    to inform rebuilds. The safest approach is to combine both: “repave” (that is,
+    rebuild and redeploy containers) regularly, and rebuild through the CI/CD pipelines
+    whenever a CVE is detected.'
+  id: totrans-204
+  prefs: []
+  type: TYPE_NORMAL
+- en: Labels
+  id: totrans-205
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Labels in Kubernetes are not validated or strongly typed; they are metadata.
+    But labels are targeted by things like services and controllers using selectors
+    for referencing, and are also used for security features such as network policy.
+    This makes them security-sensitive and easily susceptible to misconfiguration:'
+  id: totrans-206
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE10]'
+  id: totrans-207
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE10]'
+- en: 'Typos in labels mean they do not match the intended selectors, and so can inadvertently
+    introduce security issues such as:'
+  id: totrans-208
+  prefs: []
+  type: TYPE_NORMAL
+- en: Exclusions from expected network policy or admission control policy
+  id: totrans-209
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Unexpected routing from service target selectors
+  id: totrans-210
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Rogue pods that are not accurately targeted by operators or observability tooling
+  id: totrans-211
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Managed Fields
+  id: totrans-212
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Managed fields were introduced in v1.18 and support [server-side apply](https://oreil.ly/UjXPY).
+    They duplicate information from elsewhere in the pod spec but are of limited interest
+    to us as we can read the entire spec from the API server. They look like this:'
+  id: totrans-213
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE11]'
+  id: totrans-214
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE11]'
+- en: Pod Namespace and Owner
+  id: totrans-215
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: We know the pod’s name and namespace from the API request we made to retrieve
+    it.
+  id: totrans-216
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If we used `--all-namespaces` to return all pod configurations, this shows
+    us the namespace:'
+  id: totrans-217
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE12]'
+  id: totrans-218
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE12]'
+- en: 'From within a pod it’s possible to infer the current namespace from the DNS
+    resolver configuration in */etc/resolv.conf* (which is `secret-namespace` in this
+    example):'
+  id: totrans-219
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE13]'
+  id: totrans-220
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE13]'
+- en: Other less-robust options include the mounted service account (assuming it’s
+    in the same namespace, which it may not be), or the cluster’s DNS resolver (if
+    you can enumerate or scrape it).
+  id: totrans-221
+  prefs: []
+  type: TYPE_NORMAL
+- en: Environment Variables
+  id: totrans-222
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Now we’re getting into interesting configuration. We want to see the environment
+    variables in a pod, partially because they may leak secret information (which
+    should have been mounted as a file), and also because they may list which other
+    services are available in the namespace and so suggest other network routes and
+    applications to attack.
+  id: totrans-223
+  prefs: []
+  type: TYPE_NORMAL
+- en: Warning
+  id: totrans-224
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Passwords set in deployment and pod YAML are visible to the operator that deploys
+    the YAML, the process at runtime and any other processes that can read its environment,
+    and to anybody that can read from the Kubernetes or `kubelet` APIs.
+  id: totrans-225
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Here we see the container’s `PORT` (which is good practice and required by
+    applications running in Knative, Google Cloud Run, and some other systems), the
+    DNS names and ports of its coordinating services, some badly set database config
+    and credentials, and finally a sensibly referenced Secret file:'
+  id: totrans-226
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE14]'
+  id: totrans-227
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE14]'
+- en: That wasn’t too bad, right? Let’s move on to container images.
+  id: totrans-228
+  prefs: []
+  type: TYPE_NORMAL
+- en: Container Images
+  id: totrans-229
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The container image’s filesystem is of paramount importance, as it may hold
+    vulnerabilities that assist in privilege escalation. If you’re not patching regularly,
+    Captain Hashjack might get the same image from a public registry to scan it for
+    vulnerabilities they may be able to exploit. Knowing what binaries and files are
+    available also enables attack planning “offline,” so adversaries can be more stealthy
+    and targeted when attacking the live system.
+  id: totrans-230
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  id: totrans-231
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'The OCI registry specification allows arbitrary image layer storage: it’s a
+    two-step process and the first step uploads the manifest, with the second uploading
+    the blob. If an attacker only performs the second step they gain free arbitrary
+    blob storage.'
+  id: totrans-232
+  prefs: []
+  type: TYPE_NORMAL
+- en: Most registries don’t index this automatically (with Harbour being the exception),
+    and so they will store the “orphaned” layers forever, potentially hidden from
+    view until manually garbage collected.
+  id: totrans-233
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Here we see an image referenced by label, which means we can’t tell what the
+    actual SHA256 hash digest of the container image is. The container tag could have
+    been updated since this deployment as it’s not referenced by digest:'
+  id: totrans-234
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE15]'
+  id: totrans-235
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE15]'
+- en: 'Instead of using image tags, we can use the SHA256 image digests to pull the
+    image by its content address:'
+  id: totrans-236
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE16]'
+  id: totrans-237
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE16]'
+- en: Images should always be referenced by SHA256 or use signed tags; otherwise,
+    it’s impossible to know what’s running as the label may have been updated in the
+    registry since the container start. You can validate what’s being run by inspecting
+    the running container for its image’s SHA256.
+  id: totrans-238
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'It’s possible to specify both a tag and an SHA256 digest in a Kubernetes `image:`
+    key, in which case the tag is ignored and the image is retrieved by digest. This
+    leads to potentially confusing image definitions including a tag and SHA256 such
+    as the following being retrieved as the image matching the SHA rather than the
+    tag:'
+  id: totrans-239
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE17]'
+  id: totrans-240
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE17]'
+- en: '[![1](Images/1.png)](#co_pod_level_resources_CO1-1)'
+  id: totrans-241
+  prefs: []
+  type: TYPE_NORMAL
+- en: Container name, plus the ignored “latest” tag
+  id: totrans-242
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](Images/2.png)](#co_pod_level_resources_CO1-2)'
+  id: totrans-243
+  prefs: []
+  type: TYPE_NORMAL
+- en: Image SHA256, which overrides the “latest” tag defined in the previous line
+  id: totrans-244
+  prefs: []
+  type: TYPE_NORMAL
+- en: being retrieved as the image matching the SHA rather than the tag.
+  id: totrans-245
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If an attacker can influence the local `kubelet` image cache, they can add
+    malicious code to an image and relabel it on the worker node (note: to run this
+    again, don’t forget to remove the `cidfile`):'
+  id: totrans-246
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE18]'
+  id: totrans-247
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE18]'
+- en: '[![1](Images/1.png)](#co_pod_level_resources_CO2-1)'
+  id: totrans-248
+  prefs: []
+  type: TYPE_NORMAL
+- en: Load a malicious shell backdoor and overwrite the container’s default command
+    (`/bin/sh`).
+  id: totrans-249
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](Images/2.png)](#co_pod_level_resources_CO2-2)'
+  id: totrans-250
+  prefs: []
+  type: TYPE_NORMAL
+- en: Commit the changed container using the same.
+  id: totrans-251
+  prefs: []
+  type: TYPE_NORMAL
+- en: While the compromise of a local registry cache may lead to this attack, container
+    cache access probably comes by rooting the node, and so this may be the least
+    of your worries.
+  id: totrans-252
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  id: totrans-253
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The image pull policy of `Always` has a performance drawback in highly dynamic,
+    “autoscaling from zero” environments such as Knative. When startup times are crucial,
+    a potentially multisecond `imagePullPolicy` latency is unacceptable and image
+    digests must be used.
+  id: totrans-254
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'This attack on a local image cache can be mitigated with an image pull policy
+    of `Always`, which will ensure the local tag matches what’s defined in the registry
+    it’s pulled from. This is important and you should always be mindful of this setting:'
+  id: totrans-255
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE19]'
+  id: totrans-256
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE19]'
+- en: Typos in container image names, or registry names, will deploy unexpected code
+    if an adversary has “typosquatted” the image with a malicious container.
+  id: totrans-257
+  prefs: []
+  type: TYPE_NORMAL
+- en: This can be difficult to detect when only a single character changes—for example,
+    `controlplan/hack` instead of `controlplane/hack`. Tools like Notary protect against
+    this by checking for valid signatures from trusted parties. If a TLS-intercepting
+    middleware box intercepts and rewrites an image tag, a spoofed image may be deployed.
+  id: totrans-258
+  prefs: []
+  type: TYPE_NORMAL
+- en: Again, TUF and Notary side-channel signing mitigates against this, as do other
+    container signing approaches like `cosign`, as discussed in [Chapter 4](ch04.xhtml#ch-apps-supply-chain).
+  id: totrans-259
+  prefs: []
+  type: TYPE_NORMAL
+- en: Pod Probes
+  id: totrans-260
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Your liveness probes should be tuned to your application’s performance characteristics,
+    and used to keep them alive in the stormy waters of your production environment.
+    Probes inform Kubernetes if the application is incapable of fulfilling its specified
+    purpose, perhaps through a crash or external system failure.
+  id: totrans-261
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'The Kubernetes audit finding [TOB-K8S-024](https://oreil.ly/OWnq6) shows probes
+    can be subverted by an attacker with the ability to schedule pods: without changing
+    the pod’s `command` or `args` they have the power to make network requests and
+    execute commands within the target container. This yields local network discovery
+    to an attacker as the probes are executed by the `kubelet` on the host networking
+    interface, and not from within the pod.'
+  id: totrans-262
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'A `host` header can be used here to enumerate the local network. The proof
+    of concept exploit is as follows:'
+  id: totrans-263
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE20]'
+  id: totrans-264
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE20]'
+- en: CPU and Memory Limits and Requests
+  id: totrans-265
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Resource limits and requests which manage the pod’s `cgroups` prevent the exhaustion
+    of finite memory and compute resources on the `kubelet` host, and defend from
+    fork bombs and runaway processes. Networking bandwidth limits are not supported
+    in the pod spec, but may be supported by your CNI implementation.
+  id: totrans-266
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`cgroups` are a useful resource constraint. `cgroups` v2 offers more protection,
+    but `cgroups` v1 are not a security boundary and [they can be escaped easily](https://oreil.ly/uDhso).'
+  id: totrans-267
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Limits restrict the potential cryptomining or resource exhaustion that a malicious
+    container can execute. It also stops the host becoming overwhelmed by bad deployments.
+    It has limited effectiveness against an adversary looking to further exploit the
+    system unless they need to use a memory-hungry attack:'
+  id: totrans-268
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE21]'
+  id: totrans-269
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE21]'
+- en: DNS
+  id: totrans-270
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: By default Kubernetes DNS servers provide all records for services across the
+    cluster, preventing namespace segregation unless deployed individually per-namespace
+    or domain.
+  id: totrans-271
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  id: totrans-272
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: CoreDNS supports policy plug-ins, including OPA, to restrict access to DNS records
+    and defeat the following enumeration attacks.
+  id: totrans-273
+  prefs: []
+  type: TYPE_NORMAL
+- en: The default Kubernetes CoreDNS installation leaks information about its services,
+    and offers an attacker a view of all possible network endpoints (see [Figure 2-10](#tweet-rory-hard-dns)).
+    Of course they may not all be accessible due to a network policy in place, as
+    we will see in [“Traffic Flow Control”](ch05.xhtml#workload-network-policies).
+  id: totrans-274
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'DNS enumeration can be performed against a default, unrestricted CoreDNS installation.
+    To retrieve all services in the cluster namespace (output edited to fit):'
+  id: totrans-275
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE22]'
+  id: totrans-276
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE22]'
+- en: '![tweet-rory-hard-dns](Images/haku_0211.png)'
+  id: totrans-277
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 2-10\. The wisdom of Rory McCune on the difficulties of hard multitenancy
+  id: totrans-278
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'For all service endpoints and names do the following (output edited to fit):'
+  id: totrans-279
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE23]'
+  id: totrans-280
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE23]'
+- en: 'To return an IPv4 address based on the query:'
+  id: totrans-281
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE24]'
+  id: totrans-282
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE24]'
+- en: 'The Kubernetes API server service IP information is mounted into the pod’s
+    environment by default:'
+  id: totrans-283
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE25]'
+  id: totrans-284
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE25]'
+- en: The response matches the API server’s `/version` endpoint.
+  id: totrans-285
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  id: totrans-286
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'You can detect Kubernetes API servers with [this nmap script](https://oreil.ly/PAqte)
+    and the following function:'
+  id: totrans-287
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE26]'
+  id: totrans-288
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE26]'
+- en: 'Next up is an important runtime policy piece: the securityContext, initially
+    introduced by Red Hat.'
+  id: totrans-289
+  prefs: []
+  type: TYPE_NORMAL
+- en: Pod securityContext
+  id: totrans-290
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'This pod is running with an empty `securityContext`, which means that without
+    admission controllers mutating the configuration at deployment time, the container
+    can run a root-owned process and has all capabilities available to it:'
+  id: totrans-291
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE27]'
+  id: totrans-292
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE27]'
+- en: Exploiting the capability landscape involves an understanding of the kernel’s
+    flags, and [Stefano Lanaro’s guide](https://oreil.ly/mtvCX) provides a comprehensive
+    overview.
+  id: totrans-293
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Different capabilities may have particular impact on a system, and `CAP_SYS_ADMIN`
+    and `CAP_BPF` are particularly enticing to an attacker. Notable capabilities you
+    should be cautious about granting include:'
+  id: totrans-294
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`CAP_DAC_OVERRIDE`, `CAP_CHOWN`, `CAP_DAC_READ_SEARCH`, `CAP_FORMER`, `CAP_SETFCAP`'
+  id: totrans-295
+  prefs: []
+  type: TYPE_NORMAL
+- en: Bypass filesystem permissions
+  id: totrans-296
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`CAP_SETUID`, `CAP_SETGID`'
+  id: totrans-297
+  prefs: []
+  type: TYPE_NORMAL
+- en: Become the root user
+  id: totrans-298
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`CAP_NET_RAW`'
+  id: totrans-299
+  prefs: []
+  type: TYPE_NORMAL
+- en: Read network traffic
+  id: totrans-300
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`CAP_SYS_ADMIN`'
+  id: totrans-301
+  prefs: []
+  type: TYPE_NORMAL
+- en: Filesystem mount permission
+  id: totrans-302
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`CAP_SYS_PTRACE`'
+  id: totrans-303
+  prefs: []
+  type: TYPE_NORMAL
+- en: All-powerful debugging of other processes
+  id: totrans-304
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`CAP_SYS_MODULE`'
+  id: totrans-305
+  prefs: []
+  type: TYPE_NORMAL
+- en: Load kernel modules to bypass controls
+  id: totrans-306
+  prefs: []
+  type: TYPE_NORMAL
+- en: '`CAP_PERFMON`, `CAP_BPF`'
+  id: totrans-307
+  prefs: []
+  type: TYPE_NORMAL
+- en: Access deep-hooking BPF systems
+  id: totrans-308
+  prefs: []
+  type: TYPE_NORMAL
+- en: These are the precursors for many container breakouts. As [Brad Geesaman](https://oreil.ly/swfMU)
+    points out in [Figure 2-11](#tweet-brad-not-a-container-escape), processes want
+    to be free! And an adversary will take advantage of anything within the pod they
+    can use to escape.
+  id: totrans-309
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![haku 0212](Images/haku_0212.png)'
+  id: totrans-310
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 2-11\. Brad Geesaman’s evocative container freedom cry
+  id: totrans-311
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Note
+  id: totrans-312
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: '`CAP_NET_RAW` is enabled by default in `runc`, and enables UDP (which bypasses
+    TCP service meshes like Istio), ICMP messages, and ARP poisoning attacks. [Aqua
+    found DNS poisoning attacks](https://oreil.ly/ceARf) against Kubernetes DNS, and
+    the `net.ipv4.ping_group_range` `sysctl` flag means [it should be dropped when
+    needed for ICMP](https://oreil.ly/tJ7rQ).'
+  id: totrans-313
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'These are some container breakouts requiring `root` and/or `CAP_SYS_ADMIN`,
+    `CAP_NET_RAW`, `CAP_BPF`, or `CAP_SYS_MODULE` to function:'
+  id: totrans-314
+  prefs: []
+  type: TYPE_NORMAL
+- en: Subpath volume mount traversal and */proc/self/exe* (both described in [Chapter 6](ch06.xhtml#ch-storage)).
+  id: totrans-315
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[CVE-2016-5195](https://oreil.ly/ZdYJ8) is a read-only memory copy-on-write
+    race condition, aka DirtyCow, and detailed in [“Architecting Containerized Apps
+    for Resilience”](ch04.xhtml#architecting-apps-resilience).'
+  id: totrans-316
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[CVE-2020-14386](https://oreil.ly/Scrau) is an unprivileged memory corruption
+    bug that requires `CAP_NET_RAW`.'
+  id: totrans-317
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[CVE-2021-30465](https://oreil.ly/QzkuG), `runc` mount destinations symlink-exchange
+    swap to mount outside the `rootfs`, limited by use of unprivileged user.'
+  id: totrans-318
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[CVE-2021-22555](https://oreil.ly/Zj1Rl) is a `Netfilter` heap out-of-bounds
+    write that requires `CAP_NET_RAW`.'
+  id: totrans-319
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[CVE-2021-31440](https://oreil.ly/VLeQK) is `eBPF` out-of-bounds access to
+    the Linux kernel requiring root or `CAP_BPF`, and `CAPS_SYS_MODULE`.'
+  id: totrans-320
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '[@andreyknvl](https://oreil.ly/wlzra) kernel bugs and [`core_pattern` escape](https://oreil.ly/RWlF0).'
+  id: totrans-321
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: When there’s no breakout, root capabilities are still required for a number
+    of other attacks, such as [CVE-2020-10749](https://oreil.ly/XoxVW) which are Kubernetes
+    CNI plug-in person-in-the-middle (PitM) attacks via IPv6 rogue router advertisements.
+  id: totrans-322
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  id: totrans-323
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The excellent [“A Compendium of Container Escapes”](https://oreil.ly/LAGB9)
+    goes into more detail on some of these attacks.
+  id: totrans-324
+  prefs: []
+  type: TYPE_NORMAL
+- en: We enumerate the options available in a `securityContext` for a pod to defend
+    itself from hostile containers in [“Runtime Policies”](ch08.xhtml#policy-runtime-policies).
+  id: totrans-325
+  prefs: []
+  type: TYPE_NORMAL
+- en: Pod Service Accounts
+  id: totrans-326
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Service Accounts are JSON Web Tokens (JWTs) and are used by a pod for authentication
+    and authorization to the API server. The default service account shouldn’t be
+    given any permissions, and by default comes with no authorization.
+  id: totrans-327
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'A pod’s `serviceAccount` configuration defines its access privileges with the
+    API server; see [“Service accounts”](ch08.xhtml#service-accounts) for the details.
+    The service account is mounted into all pod replicas, and which share the single
+    “workload identity”:'
+  id: totrans-328
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE28]'
+  id: totrans-329
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE28]'
+- en: 'Segregating duty in this way reduces the blast radius if a pod is compromised:
+    limiting an attacker post-intrusion is a primary goal of policy controls.'
+  id: totrans-330
+  prefs: []
+  type: TYPE_NORMAL
+- en: Scheduler and Tolerations
+  id: totrans-331
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'The scheduler is responsible for allocating a pod workload to a node. It looks
+    as follows:'
+  id: totrans-332
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE29]'
+  id: totrans-333
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE29]'
+- en: A hostile scheduler could conceivably exfiltrate data or workloads from the
+    cluster, but requires the cluster to be compromised in order to add it to the
+    control plane. It would be easier to schedule a privileged container and root
+    the control plane `kubelets`.
+  id: totrans-334
+  prefs: []
+  type: TYPE_NORMAL
+- en: Pod Volume Definitions
+  id: totrans-335
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Here we are using a bound service account token, defined in YAML as a projected
+    service account token (instead of a standard service account). The `kubelet` protects
+    this against exfiltration by regularly rotating it (configured for every 3600
+    seconds, or one hour), so it’s only of limited use if stolen. An attacker with
+    persistence is still able to use this value, and can observe its value after it’s
+    rotated, so this only protects the service account after the attack has completed:'
+  id: totrans-336
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE30]'
+  id: totrans-337
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE30]'
+- en: Volumes are a rich source of potential data for an attacker, and you should
+    ensure that standard security practices like discretionary access control (DAC,
+    e.g., files and permissions) is correctly configured.
+  id: totrans-338
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  id: totrans-339
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The downward API reflects Kubernetes-level values into the containers in the
+    pod, and is useful to expose things like the pod’s name, namespace, UID, and labels
+    and annotations into the container. It’s capabilities are [listed in the documentation](https://oreil.ly/UyC90).
+  id: totrans-340
+  prefs: []
+  type: TYPE_NORMAL
+- en: A container is just Linux, and will not protect its workload from incorrect
+    configuration.
+  id: totrans-341
+  prefs: []
+  type: TYPE_NORMAL
+- en: Pod Network Status
+  id: totrans-342
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Network information about the pod is useful to debug containers without services,
+    or that aren’t responding as they should, but an attacker might use this information
+    to connect directly to a pod without scanning the network:'
+  id: totrans-343
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE31]'
+  id: totrans-344
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE31]'
+- en: Using the securityContext Correctly
+  id: totrans-345
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: A pod is more likely to be compromised if a `securityContext` is not configured,
+    or is too permissive. The `securityContext` is your most effective tool to prevent
+    container breakout.
+  id: totrans-346
+  prefs: []
+  type: TYPE_NORMAL
+- en: After gaining an RCE into a running pod, the `securityContext` is the first
+    line of defensive configuration you have available. It has access to kernel switches
+    that can be set individually. Additional Linux Security Modules can be configured
+    with fine-grained policies that prevent hostile applications taking advantage
+    of your systems.
+  id: totrans-347
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Docker’s `containerd` has a default `seccomp` profile that has prevented some
+    zero-day attacks against the container runtime by blocking system calls in the
+    kernel. From Kubernetes v1.22 you should enable this by default for all runtimes
+    with the `--seccomp-default` `kubelet` flag. In some cases workloads may not run
+    with the default profile: observability or security tools may require low-level
+    kernel access. These workloads should have custom `seccomp` profiles written (rather
+    than resorting to running them `Unconfined`, which allows any system call).'
+  id: totrans-348
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Here’s an example of a fine-grained `seccomp` profile loaded from the host’s
+    filesystem under `/var/lib/kubelet/seccomp`:'
+  id: totrans-349
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE32]'
+  id: totrans-350
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE32]'
+- en: '`seccomp` is for system calls, but SELinux and AppArmor can monitor and enforce
+    policy in userspace too, protecting files, directories, and devices.'
+  id: totrans-351
+  prefs: []
+  type: TYPE_NORMAL
+- en: SELinux configuration is able to block most container breakouts (excluding with
+    a label-based approach to filesystem and process access) as it doesn’t allow containers
+    to write anywhere but their own filesystem, nor to read other directories, and
+    comes enabled on OpenShift and Red Hat Linuxes.
+  id: totrans-352
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'AppArmor can similarly monitor and prevent many attacks in Debian-derived Linuxes.
+    If AppArmor is enabled, then `cat /sys/module/apparmor/parameters/enabled` returns
+    `Y`, and it can be used in pod definitions:'
+  id: totrans-353
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE33]'
+  id: totrans-354
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE33]'
+- en: The `privileged` flag was quoted as being “the most dangerous flag in the history
+    of computing” by Liz Rice, but why are privileged containers so dangerous? Because
+    they leave the process namespace enabled to give the illusion of containerization,
+    but actually disable all security features.
+  id: totrans-355
+  prefs: []
+  type: TYPE_NORMAL
+- en: '“Privileged” is a specific `securityContext` configuration: all but the process
+    namespace is disabled, virtual filesystems are unmasked, LSMs are disabled, and
+    all capabilities are granted.'
+  id: totrans-356
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Running as a nonroot user without capabilities, and setting `AllowPrivilegeEscalation`
+    to `false` provides a robust protection against many privilege escalations:'
+  id: totrans-357
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE34]'
+  id: totrans-358
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE34]'
+- en: 'The granularity of security contexts means each property of the configuration
+    must be tested to ensure it is not set: as a defender by configuring admission
+    control and testing YAML or as an attacker with a dynamic test (or [amicontained](https://oreil.ly/BIQCJ))
+    at runtime.'
+  id: totrans-359
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  id: totrans-360
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: We explore how to detect privileges inside a container later in this chapter.
+  id: totrans-361
+  prefs: []
+  type: TYPE_NORMAL
+- en: Sharing namespaces with the host also reduces the isolation of the container
+    and opens it to greater potential risk. Any mounted filesystems effectively add
+    to the mount namespace.
+  id: totrans-362
+  prefs: []
+  type: TYPE_NORMAL
+- en: Ensure your pods’ `securityContext`s are correct and your systems will be safer
+    against known attacks.
+  id: totrans-363
+  prefs: []
+  type: TYPE_NORMAL
+- en: Enhancing the securityContext with Kubesec
+  id: totrans-364
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: '[Kubesec](https://kubesec.io) is a simple tool to validate the security of
+    a Kubernetes resource.'
+  id: totrans-365
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'It returns a risk score for the resource, and advises on how to tighten the
+    `securityContext` (note that we edited the output to fit):'
+  id: totrans-366
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE35]'
+  id: totrans-367
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE35]'
+- en: '[Kubesec.io](https://kubesec.io) documents practical changes to make to your
+    securityContext, and we’ll document some of them here.'
+  id: totrans-368
+  prefs: []
+  type: TYPE_NORMAL
+- en: Tip
+  id: totrans-369
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: Shopify’s excellent [kubeaudit](https://oreil.ly/LHy2P) provides similar functionality
+    for all resources in a cluster.
+  id: totrans-370
+  prefs: []
+  type: TYPE_NORMAL
+- en: Hardened securityContext
+  id: totrans-371
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The NSA published [“Kubernetes Hardening Guidance”](https://oreil.ly/2riDP),
+    which recommends a hardened set of `securityContext` standards. It recommends
+    scanning for vulnerabilities and misconfigurations, least privilege, good RBAC
+    and IAM, network firewalling and encryption, and “to periodically review all Kubernetes
+    settings and use vulnerability scans to help ensure risks are appropriately accounted
+    for and security patches are applied.”
+  id: totrans-372
+  prefs: []
+  type: TYPE_NORMAL
+- en: Assigning least privilege to a container in a pod is the responsibility of the
+    `securityContext` (see details in [Table 2-2](#sec-context-fields)). Note that
+    the PodSecurityPolicy resource discussed in [“Runtime Policies”](ch08.xhtml#policy-runtime-policies)
+    maps onto the config flags available in `securityContext`.
+  id: totrans-373
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 2-2\. `securityContext fields`
+  id: totrans-374
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Field name(s) | Usage | Recommendations |'
+  id: totrans-375
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- |'
+  id: totrans-376
+  prefs: []
+  type: TYPE_TB
+- en: '| `privileged` | Controls whether pods can run privileged containers. | Set
+    to `false`. |'
+  id: totrans-377
+  prefs: []
+  type: TYPE_TB
+- en: '| `hostPID`, `hostIPC` | Controls whether containers can share host process
+    namespaces. | Set to `false`. |'
+  id: totrans-378
+  prefs: []
+  type: TYPE_TB
+- en: '| `hostNetwork` | Controls whether containers can use the host network. | Set
+    to `false`. |'
+  id: totrans-379
+  prefs: []
+  type: TYPE_TB
+- en: '| `allowedHostPaths` | Limits containers to specific paths of the host filesystem.
+    | Use a “dummy” path name (such as `/foo` marked as read-only). Omitting this
+    field results in no admission restrictions being placed on containers. |'
+  id: totrans-380
+  prefs: []
+  type: TYPE_TB
+- en: '| `readOnlyRootFilesystem` | Requires the use of a read only root filesystem.
+    | Set to `true` when possible. |'
+  id: totrans-381
+  prefs: []
+  type: TYPE_TB
+- en: '| `runAsUser`, `runAsGroup`, `supplementalGroups`, `fsGroup` | Controls whether
+    container applications can run with root privileges or with root group membership.
+    | Set `runAsUser` to `MustRunAsNonRoot`.Set `runAsGroup` to `nonzero`.Set `supplementalGroups`
+    to `nonzero`.Set `fsGroup` to `nonzero`. |'
+  id: totrans-382
+  prefs: []
+  type: TYPE_TB
+- en: '| `allowPrivilegeEscalation` | Restricts escalation to root privileges. | Set
+    to `false`. This measure is required to effectively enforce `runAsUser: MustRunAsNonRoot`
+    settings. |'
+  id: totrans-383
+  prefs: []
+  type: TYPE_TB
+- en: '| `SELinux` | Sets the SELinux context of the container. | If the environment
+    supports SELinux, consider adding SELinux labeling to further harden the container.
+    |'
+  id: totrans-384
+  prefs: []
+  type: TYPE_TB
+- en: '| `AppArmor` annotations | Sets the AppArmor profile used by containers. |
+    Where possible, harden containerized applications by employing AppArmor to constrain
+    exploitation. |'
+  id: totrans-385
+  prefs: []
+  type: TYPE_TB
+- en: '| `seccomp` annotations | Sets the `seccomp` profile used to sandbox containers.
+    | Where possible, use a `seccomp` auditing profile to identify required syscalls
+    for running applications; then enable a `seccomp` profile to block all other syscalls.
+    |'
+  id: totrans-386
+  prefs: []
+  type: TYPE_TB
+- en: Let’s explore these in more detail using the `kubesec` static analysis tool,
+    and the selectors it uses to interrogate your Kubernetes resources.
+  id: totrans-387
+  prefs: []
+  type: TYPE_NORMAL
+- en: containers[] .securityContext .privileged
+  id: totrans-388
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: A privileged container running is potentially a bad day for your security team.
+    Privileged containers disable namespaces (except `process`) and LSMs, grant all
+    capabilities, expose the host’s devices through */dev*, and generally make things
+    insecure by default. This is the first thing an attacker looks for in a newly
+    compromised pod.
+  id: totrans-389
+  prefs: []
+  type: TYPE_NORMAL
+- en: .spec .hostPID
+  id: totrans-390
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: '`hostPID` allows traversal from the container to the host through the */proc*
+    filesystem, which symlinks other processes’ root filesystems. To read from the
+    host’s process namespace, `privileged` is needed as well:'
+  id: totrans-391
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE36]'
+  id: totrans-392
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE36]'
+- en: '[![1](Images/1.png)](#co_pod_level_resources_CO3-1)'
+  id: totrans-393
+  prefs: []
+  type: TYPE_NORMAL
+- en: Start a privileged container and share the host process namespace.
+  id: totrans-394
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![2](Images/2.png)](#co_pod_level_resources_CO3-2)'
+  id: totrans-395
+  prefs: []
+  type: TYPE_NORMAL
+- en: As the root user in the container, check the container’s operating system version.
+  id: totrans-396
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![3](Images/3.png)](#co_pod_level_resources_CO3-3)'
+  id: totrans-397
+  prefs: []
+  type: TYPE_NORMAL
+- en: Verify we’re in the host’s process namespace (we can see PID 1, and kernel helper
+    processes).
+  id: totrans-398
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[![4](Images/4.png)](#co_pod_level_resources_CO3-4)'
+  id: totrans-399
+  prefs: []
+  type: TYPE_NORMAL
+- en: Check the distribution version of the host, via the */proc* filesystem inside
+    the containe. This is possible because the PID namespace is shared with the host.
+  id: totrans-400
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  id: totrans-401
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: 'Without `privileged`, the host process namespace is inaccessible to root in
+    the container:'
+  id: totrans-402
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE37]'
+  id: totrans-403
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE37]'
+- en: In this case the attacker is limited to searching the filesystem or memory as
+    their UID allows, hunting for key material or sensitive data.
+  id: totrans-404
+  prefs: []
+  type: TYPE_NORMAL
+- en: .spec .hostNetwork
+  id: totrans-405
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: Host networking access allows us to sniff traffic or send fake traffic over
+    the host adapter (but only if we have permission to do so, enabled by `CAP_NET_RAW`
+    or `CAP_NET_ADMIN`), and evade network policy (which depends on traffic originating
+    from the expected source IP of the adapter in the pod’s network namespace).
+  id: totrans-406
+  prefs: []
+  type: TYPE_NORMAL
+- en: It also grants access to services bound to the host’s loopback adapter (`localhost`
+    in the root network namespace) that traditionally was considered a security boundary.
+    Server Side Request Forgery (SSRF) attacks have reduced the incidence of this
+    pattern, but it may still exist (Kubernetes’ API server `--insecure-port` used
+    this pattern until it was deprecated in v1.10 and finally removed in v1.20).
+  id: totrans-407
+  prefs: []
+  type: TYPE_NORMAL
+- en: .spec .hostAliases
+  id: totrans-408
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: Permits pods to override their local */etc/hosts* files. This may have more
+    operational implications (like not being updated in a timely manner and causing
+    an outage) than security connotations.
+  id: totrans-409
+  prefs: []
+  type: TYPE_NORMAL
+- en: .spec .hostIPC
+  id: totrans-410
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: Gives the pod access to the host’s Interprocess Communication namespace, where
+    it may be able to interfere with trusted processes on the host. It’s likely this
+    will enable simple host compromise via */usr/bin/ipcs* or files in shared memory
+    at */dev/shm*.
+  id: totrans-411
+  prefs: []
+  type: TYPE_NORMAL
+- en: containers[] .securityContext .runAsNonRoot
+  id: totrans-412
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: The root user has special permissions in a Linux system, and although the permissions
+    set is reduced within a container, the root user is still treated differently
+    by lots of kernel code.
+  id: totrans-413
+  prefs: []
+  type: TYPE_NORMAL
+- en: Preventing root from owning the processes inside the container is a simple and
+    effective security measure. It stops many of the container breakout attacks listed
+    in this book, and adheres to standard and established Linux security practice.
+  id: totrans-414
+  prefs: []
+  type: TYPE_NORMAL
+- en: containers[] .securityContext .runAsUser > 10000
+  id: totrans-415
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'In addition to preventing root running processes, enforcing high UIDs for containerized
+    processes lowers the risk of breakout without user namespaces: if the user in
+    the container (e.g., 12345) has an equivalent UID on the host (that is, also 12345),
+    and the user in the container is able to reach them through mounted volume or
+    shared namespace, then resources may accidentally be shared and allow container
+    breakout (e.g., filesystem permissions and authorization checks).'
+  id: totrans-416
+  prefs: []
+  type: TYPE_NORMAL
+- en: containers[] .securityContext .readOnlyRootFilesystem
+  id: totrans-417
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'Immutability is not a security boundary as code can be downloaded from the
+    internet and run by an interpreter (such as Bash, PHP, and Java) without using
+    the filesystem, as the `bashark` post-exploitation toolkit shows:'
+  id: totrans-418
+  prefs: []
+  type: TYPE_NORMAL
+- en: '[PRE38]'
+  id: totrans-419
+  prefs: []
+  type: TYPE_PRE
+  zh: '[PRE38]'
+- en: Filesystem locations like */tmp* and */dev/shm* will probably always be writable
+    to support application behavior, and so read-only filesystems cannot be relied
+    upon as a security boundary. Immutability will prevent against some drive-by and
+    automated attacks, but is not a robust security boundary.
+  id: totrans-420
+  prefs: []
+  type: TYPE_NORMAL
+- en: Intrusion detection tools such as `falco` and `tracee` can detect new Bash shells
+    spawned in a container (or any non-allowlisted applications). Additionally `tracee`
+    can [detect in-memory execution](https://oreil.ly/Ur0wV) of malware that attempts
+    to hide itself by observing */proc/pid/maps* for memory that was once writable
+    but is now executable.
+  id: totrans-421
+  prefs: []
+  type: TYPE_NORMAL
+- en: Note
+  id: totrans-422
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: We look at Falco in more detail in [Chapter 9](ch09.xhtml#ch-intrusion-detection).
+  id: totrans-423
+  prefs: []
+  type: TYPE_NORMAL
+- en: containers[] .securityContext .capabilities .drop | index(“ALL”)
+  id: totrans-424
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: You should always drop all capabilities and only readd those that your application
+    needs to operate.
+  id: totrans-425
+  prefs: []
+  type: TYPE_NORMAL
+- en: containers[] .securityContext .capabilities .add | index(“SYS_ADMIN”)
+  id: totrans-426
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'The presence of this capability is a red flag: try to find another way to deploy
+    any container that requires this, or deploy into a dedicated namespace with custom
+    security rules to limit the impact of compromise.'
+  id: totrans-427
+  prefs: []
+  type: TYPE_NORMAL
+- en: containers[] .resources .limits .cpu, .memory
+  id: totrans-428
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: Limiting the total amount of memory available to a container prevents denial
+    of service attacks taking out the host machine, as the container dies first.
+  id: totrans-429
+  prefs: []
+  type: TYPE_NORMAL
+- en: containers[] .resources .requests .cpu, .memory
+  id: totrans-430
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: Requesting resources helps the scheduler to “bin pack” resources effectively.
+    Over-requesting resources may be an adversary’s attempt to schedule new pods to
+    another Node they control.
+  id: totrans-431
+  prefs: []
+  type: TYPE_NORMAL
+- en: .spec .volumes[] .hostPath .path
+  id: totrans-432
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: A writable */var/run/docker.sock* host mount allows breakout to the host. Any
+    filesystem that an attacker can write a symlink to is vulnerable, and an attacker
+    can use that path to explore and exfiltrate from the host.
+  id: totrans-433
+  prefs: []
+  type: TYPE_NORMAL
+- en: Into the Eye of the Storm
+  id: totrans-434
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: The Captain and crew have had a fruitless raid, but this is not the last we
+    will hear of their escapades.
+  id: totrans-435
+  prefs: []
+  type: TYPE_NORMAL
+- en: As we progress through this book, we will see how Kubernetes pod components
+    interact with the wider system, and we will witness Captain Hashjack’s efforts
+    to exploit them.
+  id: totrans-436
+  prefs: []
+  type: TYPE_NORMAL
+- en: Conclusion
+  id: totrans-437
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: There are multiple layers of configuration to secure for a pod to be used safely,
+    and the workloads you run are the soft underbelly of Kubernetes security.
+  id: totrans-438
+  prefs: []
+  type: TYPE_NORMAL
+- en: The pod is the first line of defense and the most important part of a cluster
+    to protect. Application code changes frequently and is likely to be a source of
+    potentially exploitable bugs.
+  id: totrans-439
+  prefs: []
+  type: TYPE_NORMAL
+- en: To extend the anchor and chain metaphor, a cluster is only a strong as its weakest
+    link. In order to be provably secure, you must use robust configuration testing,
+    preventative control and policy in the pipeline and admission control, and runtime
+    intrusion detection—as nothing is infallible.
+  id: totrans-440
   prefs: []
   type: TYPE_NORMAL

@@ -1,1325 +1,1318 @@
-- en: Chapter 6\. GATK Best Practices for Germline Short Variant Discovery
+- en: Chapter 3\. Computing Technology Basics for Life Scientists
+  id: totrans-0
   prefs:
   - PREF_H1
   type: TYPE_NORMAL
-- en: By now, we’ve introduced all of the major concepts and tools, and we’ve walked
-    through a few examples, calling variants with the GATK `HaplotypeCaller` and exploring
-    its output. It’s time to turn up the dial on the analytical complexity and take
-    a closer look at the three GATK Best Practices workflows.
+- en: In an ideal world, you wouldn’t need to worry too much about computing infrastructure
+    when you’re pursuing your research. In fact, in later chapters we introduce you
+    to systems that are specifically designed to abstract away the nitty-gritty of
+    computing infrastructure in order to help you focus on your science. However,
+    you will find that a certain amount of terminology and concepts are unavoidable
+    in the real world. Investing some effort into learning them will help you to plan
+    and execute your work more efficiently, address performance challenges, and achieve
+    larger scale with less effort. In this chapter, we review the essential components
+    that form the most common types of computing infrastructure, and we discuss how
+    their strengths and limitations inform our strategies for getting work done efficiently
+    at scale. We also go over key concepts such as parallel computing and pipelining,
+    which are essential in genomics because of the need for automation and reproducibility.
+    Finally, we introduce virtualization and lay out the case for cloud infrastructure.
+  id: totrans-1
   prefs: []
   type: TYPE_NORMAL
-- en: 'In this chapter, we explore the most widely used variant discovery pipeline
-    in the genomics community: the GATK Best Practices for germline short variant
-    discovery in multiple samples, which is designed to take advantage of the benefits
-    of including more data in the analysis process. We begin with an overview of the
-    initial data processing and quality control steps that are necessary to render
-    the data suitable for analysis. Then, we’ll dive into the details of the joint
-    calling workflow. In the final part of this chapter, we also cover the highlights
-    of an alternate workflow that supports single-sample calling for use when multisample
-    calling is not an option, as in the context of clinical analysis.'
+- en: The first few sections in this chapter are aimed at readers who have not had
+    much training, if any, in informatics, programming, or systems administration.
+    If you are a computational scientist or an IT professional, feel free to skip
+    ahead until you encounter something that you don’t already know. The last two
+    sections, which together cover pipelining, virtualization, and the cloud, are
+    more specifically focused on the problems that we tackle in this book and should
+    be informative for all readers regardless of background.
+  id: totrans-2
   prefs: []
   type: TYPE_NORMAL
-- en: Data Preprocessing
+- en: Basic Infrastructure Components and Performance Bottlenecks
+  id: totrans-3
   prefs:
   - PREF_H1
   type: TYPE_NORMAL
-- en: As we discussed in the genomics primer, the data produced by the sequencing
-    process is not immediately suitable for performing variant discovery analysis.
-    We need to preprocess that raw output to transform it into the appropriate format
-    and clean up some technical issues. In this section, we outline the key steps
-    and their rationale. However, we don’t run through the entire preprocessing workflow
-    in detail, nor do we perform any hands-on exercises. At this point, it is becoming
-    increasingly more common for the sequencing service providers to perform this
-    as an extension of the data-generation process, and rarer for researchers to need
-    to do this work themselves, so we would rather focus on later stages for which
-    a deeper exploration will likely be of more practical utility to you.
+- en: Don’t worry; we’re not going to make you sit through an exhaustive inventory
+    of computer parts. Rather, we’ve put together a short list of the components,
+    terminology, and concepts that you’re most likely to encounter in the course of
+    your work. In relation to each of these, we’ve summarized the main performance
+    challenges and the strategies that you might need to consider to use them effectively.
+  id: totrans-4
   prefs: []
   type: TYPE_NORMAL
-- en: 'As [Figure 6-1](#the_main_steps_in_the_preprocessing_wor) summarizes, the preprocessing
-    workflow consists of three main steps: mapping reads to the genome reference,
-    marking duplicates, and recalibrating base quality scores. In practice, a full
-    pipeline implementation will typically involve some additional “plumbing” steps.
-    For full details, we recommend consulting the Broad Institute’s reference implementations
-    for [whole-genome processing](https://oreil.ly/XvpGZ) and for [exome processing](https://oreil.ly/YThVc).'
+- en: Let’s begin with a brief overview of the types of processors that you might
+    come across in scientific computing today.
+  id: totrans-5
   prefs: []
   type: TYPE_NORMAL
-- en: '![The main steps in the preprocessing workflow.](Images/gitc_0601.png)'
-  prefs: []
-  type: TYPE_IMG
-- en: Figure 6-1\. The main steps in the preprocessing workflow.
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: Note
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: Old versions of the preprocessing included an additional step called *Indel
-    Realignment*, which corrected for alignment errors in the mapping step. That step
-    is no longer needed if you use a graph-based variant caller for calling short
-    variants, as discussed in the section on the `HaplotypeCaller` tool in [Chapter 5](ch05.xhtml#first_steps_with_gatk).
-  prefs: []
-  type: TYPE_NORMAL
-- en: The preprocessing workflow is designed to operate independently on data from
-    individual samples. The per-sample data is usually further divided into distinct
-    subsets called *read groups*. As a reminder, read groups correspond to the intersection
-    of DNA libraries and flowcell lanes generated through multiplexing, as explained
-    in [Chapter 2](ch02.xhtml#genomics_in_a_nutshell_a_primer_for_new).
-  prefs: []
-  type: TYPE_NORMAL
-- en: Some sequence providers collapse multiple read groups into a single FASTQ file,
-    with the very unfortunate consequence that you lose the ability to distinguish
-    read groups. This is bad for two reasons. First, it forces you to process a large
-    monolithic file through the mapping step, which is going to be a performance bottleneck
-    in the pipeline, requiring you to do extra work in the workflow implementation.
-    Second, it hamstrings the base recalibration algorithm, which prefers to operate
-    per read group for reasons that we get to shortly.
-  prefs: []
-  type: TYPE_NORMAL
-- en: In contrast, keeping read group data in separate files in the initial stages
-    allows us to process those read groups independently through the mapping step,
-    which is computationally more favorable. We’ll bring those read groups together
-    into a single file for each step when we run the duplicate marking step.
-  prefs: []
-  type: TYPE_NORMAL
-- en: We apply the same preprocessing steps for almost all sequencing data that are
-    destined for variant calling, regardless of the type of variants we’re looking
-    for, with a few exceptions. For example, we use a different mapper for RNAseq
-    in order to deal with intronic regions appropriately. Fortunately, if we’re looking
-    for multiple types of variants in the same data, we need to do this preprocessing
-    only once; the resulting BAM file is suitable for input to all the GATK Best Practices
-    variant discovery workflows.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Mapping Reads to the Genome Reference
+- en: 'Types of Processor Hardware: CPU, GPU, TPU, FPGA, OMG'
+  id: totrans-6
   prefs:
   - PREF_H2
   type: TYPE_NORMAL
-- en: 'Because the sequencer spits out individual reads without any indication of
-    where each read belongs in the genome, the first essential step in the workflow
-    is to map reads to the reference genome and assign an exact position for each
-    base in the read. As a result, mapping is sometimes called *alignment* instead,
-    but we prefer to use the term *mapping* because it is more reflective of the primary
-    value we draw from this step: identifying where the read belongs in the genome.
-    As you’ll see later in this chapter, we don’t completely trust the fine local
-    alignment provided by the mapper. It’s a bit like the GPS navigation system in
-    a car: you can usually trust it to get you to your desired street location, but
-    you wouldn’t trust it to parallel park the car along the curb.'
+- en: At its simplest, a *processor* is a component in your computer that performs
+    computations. There are various types of processors, with the most common being
+    the *central processing unit* (CPU) that serves as the main processor in general-use
+    computers, including personal computers such as laptops. The CPU in your laptop
+    may have multiple cores, subunits that can process operations more or less independently.
+  id: totrans-7
   prefs: []
   type: TYPE_NORMAL
-- en: Many mappers are available, and in theory you could choose to use whatever mapper
-    conforms to the main requirements of the GATK Best Practices guidelines in terms
-    of inputs and outputs, and produces high-quality results. However, in practice,
-    the GATK development team currently recommends using a specific tool, [`bwa mem`](https://arxiv.org/abs/1303.3997),
-    in order for your data to be compatible for cross-analysis with other datasets,
-    for the reasons we outlined in [“Functional Equivalence Pipeline Specification”](ch02.xhtml#functional_equivalence_pipeline_specifi).
-    It is possible that this recommendation might change in the future.
+- en: In addition to a CPU, your personal computer also has a *graphical processing
+    unit* (GPU) that processes the graphical information for display on your screen.
+    GPUs came into the limelight with the development of modern video games, which
+    require extremely fast processing to ensure smooth visual rendering of game action.
+    In essence, the GPU solution outsources the rather specific type of processing
+    involved in mathematical calculations like matrix and vector operations from the
+    CPU to a secondary processing unit that specializes in handling certain types
+    of calculations that are applied to graphical data very efficiently. As a result,
+    GPUs are also becoming a popular option for certain types of scientific computing
+    applications that involve a lot of matrix or vector operations.
+  id: totrans-8
   prefs: []
   type: TYPE_NORMAL
-- en: 'Here’s an example of a simple command used to map sequence data with `bwa mem`
-    on an interleaved FASTQ file, which contains both forward and reverse reads for
-    each pair, sorted by query name (you don’t need to run this on your VM; it’s just
-    for illustration):'
+- en: The third type of processor you should know about is called a *field-programmable
+    gate array* (FPGA), which, despite breaking with the *PU naming convention, is
+    also a type of processing unit; however, it’s unlikely that you’ll find one in
+    your laptop. What’s interesting about FPGAs is that unlike GPUs, FPGAs were not
+    developed for a specific type of application; quite the contrary, they were developed
+    to be adaptable for custom types of computations. Hence “field-programmable” as
+    part of their name.
+  id: totrans-9
   prefs: []
   type: TYPE_NORMAL
-- en: '[PRE0]'
-  prefs: []
-  type: TYPE_PRE
-- en: This command takes the FASTQ file and produces an aligned SAM format file containing
-    the mapped read data. Each read record now includes read mapping position and
-    alignment information as well as additional metadata. The reads are sorted in
-    the same order in the output as they were in the input FASTQ file.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Note
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: In previous chapters, you’ve seen us use a prompt with `$` to indicate commands
-    to run on your VM and a prompt with `#` to indicate a command to run inside a
-    Docker container. When we show you sample commands that don’t start with `$` or
-    `#`, these commands are just for your reference, and we don’t intend you to run
-    them directly.
+- en: On GCP, you might also come across something called a *tensor processing unit*
+    (TPU), which is a kind of processor developed and branded by Google for machine
+    learning applications that involve tensor data. A *tensor* is a mathematical concept
+    used to represent and manipulate multiple layers of data related to vectors and
+    matrices. Consider that a vector is a tensor with one dimension, and a matrix
+    is a tensor with two dimensions; more generally, tensors can have arbitrary numbers
+    of dimensions beyond that, so they are very popular in machine learning applications.
+    TPUs belong to a category of processors called [application-specific integrated
+    circuit](https://oreil.ly/bz4mv) (ASIC), which are custom designed for specialized
+    uses rather than general use.
+  id: totrans-10
   prefs: []
   type: TYPE_NORMAL
-- en: In the Broad Institute’s production implementation of the GATK Best Practices,
-    the unmapped read data is stored in unmapped BAM files instead of FASTQ. As we
-    noted in [Chapter 2](ch02.xhtml#genomics_in_a_nutshell_a_primer_for_new), read
-    data can be stored in BAM format without any mapping information. The advantage
-    of using this format is that it allows us to store metadata associated with the
-    sequence (such as read group) within the same file, rather than relying on additional
-    files for that purpose. This simplifies data management operations and reduces
-    the chance that metadata might be lost or associated with the wrong data. This
-    does, however, add a few steps to the pipeline implementation, which you can see
-    in action in the [reference implementation workflow](https://oreil.ly/qw1j-).
+- en: Now that you have the basic types of processors down, let’s talk about how they
+    are organized in typical high-performance computing setups.
+  id: totrans-11
   prefs: []
   type: TYPE_NORMAL
-- en: When processing sample data that is distributed into multiple read groups, we
-    run this step individually per read group, which speeds up processing if you are
-    able to run the read group data in parallel on multiple machines. In addition,
-    because mapping operates on each read independently of any others, it can be further
-    parallelized at the CPU level. The example command we provided specifies that
-    the process should use seven threads (`-t 7`) to maximize efficiency on a common
-    type of machine with eight cores available. However, you can parallelize this
-    step to a much higher degree if you have specialized hardware available. That
-    is how computing platforms that offer accelerated genomics pipelines such as DRAGEN
-    can derive major speed gains from boosting parallelization of the mapping step
-    through specialized hardware such as FPGAs (see [Chapter 3](ch03.xhtml#computing_technology_basics_for_life_sc)
-    for an explanation of these terms).
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'As soon as we have generated the mapped data in BAM (or equivalent) format,
-    we could technically go straight to the variant calling step. However, we know
-    there are some technical sources of error that we can deal with at this stage:
-    the presence of duplicate reads and of systematic biases in the assignment of
-    base quality scores. Let’s apply the recommended mitigation strategies before
-    we try to call variants, as prescribed by the GATK Best Practices.'
-  prefs: []
-  type: TYPE_NORMAL
-- en: Marking Duplicates
+- en: 'Levels of Compute Organization: Core, Node, Cluster, and Cloud'
+  id: totrans-12
   prefs:
   - PREF_H2
   type: TYPE_NORMAL
-- en: '*Duplicate reads* are reads that are derived from the same original physical
-    fragment in the DNA library, originating at two different stages of the preparation
-    and sequencing processes. During library preparation itself, if the protocol involves
-    a PCR amplification step, each cycle of PCR will produce increasing amounts of
-    duplicate fragments. This used to be necessary to generate enough starting material
-    for the sequencing process, but recent improvements in the technology have made
-    PCR amplification unnecessary in most modern protocols, so that source of duplicates
-    has been significantly reduced. The other major source of duplicates, during the
-    sequencing process, is caused by various optical confusions—for example, when
-    a single DNA cluster on the Illumina flowcell is called as two distinct clusters
-    and treated as two different reads.'
+- en: When you move beyond personal computers and into the world of high-performance
+    computing, you’ll hear people talk about cores, nodes, and either clusters or
+    clouds, as illustrated in [Figure 3-1](#levels_of_compute_organization). Let’s
+    review what these mean and how they relate to one another.
+  id: totrans-13
   prefs: []
   type: TYPE_NORMAL
-- en: We consider these duplicates to be nonindependent observations, so we want to
-    take only one representative of each group into account in downstream analyses.
-    To that end, we’ll use a Picard tool called `MarkDuplicates` that identifies groups
-    of duplicates, scores them to determine which one has the highest sequence quality,
-    and marks all the other ones with a tag that allows downstream tools (such as
-    variant callers) to ignore them, as illustrated in [Figure 6-2](#duplicate_marking_logicdot).
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![Duplicate marking logic.](Images/gitc_0602.png)'
+- en: '![Levels of compute organization ](Images/gitc_0301.png)'
+  id: totrans-14
   prefs: []
   type: TYPE_IMG
-- en: Figure 6-2\. Reads marked as duplicates because they originated from the same
-    DNA fragment in the library.
+- en: Figure 3-1\. Levels of compute organization.
+  id: totrans-15
   prefs:
   - PREF_H6
   type: TYPE_NORMAL
-- en: 'This processing step is performed per sample across read groups, if applicable.
-    When processing sample data that is distributed into multiple read groups, this
-    is the step where we consolidate the read group data files into a single per-sample
-    file by feeding all read group input files to the `MarkDuplicates` tool. Conveniently,
-    the tool will produce a single sorted file containing the data from all the read
-    groups. This means that we can avoid running the consolidation in a separate step.
-    Here’s an example showing what the command looks like when run on data from three
-    read groups belonging to the same sample:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE1]'
-  prefs: []
-  type: TYPE_PRE
-- en: The BAM file output by the duplicate marking step still contains all of the
-    same reads as before, but now some of them have been tagged, and downstream tools
-    can choose to use them or ignore them, depending on what is appropriate for their
-    purposes, as shown in [Figure 6-3](#the_effect_of_duplicate_marking_visuali).
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![The effect of duplicate marking visualized in Integrated Genome Viewer.](Images/gitc_0603.png)'
-  prefs: []
-  type: TYPE_IMG
-- en: Figure 6-3\. The effect of duplicate marking visualized in Integrated Genome
-    Viewer.
+- en: 'Low level: core'
+  id: totrans-16
   prefs:
-  - PREF_H6
+  - PREF_H3
   type: TYPE_NORMAL
-- en: This step has long constituted a major bottleneck in traditional pipelines because
-    it involves making a large number of comparisons between all of the read pairs
-    belonging to the sample, across all of its read groups. It also requires a sorting
-    operation because it operates across all reads belonging to the sample. To address
-    this issue, the GATK team ported `MarkDuplicates` in the GATK4 framework using
-    Spark to speed up its operation, which yields major performance gains when using
-    multicore CPUs for processing. The `MarkDuplicatesSpark` tool has not yet been
-    integrated into the reference implementation of the Best Practices pipeline, but
-    that should happen in the near future.
+- en: 'A *core* is the smallest indivisible processing unit within a machine’s, or
+    node’s, processor unit, which can comprise one or more cores. If your laptop or
+    desktop is relatively recent, its CPU probably has at least two cores, and is
+    therefore called *dual-core*. If it has four, it’s a *quad-core*, and so on. High-end
+    consumer machines can have more than that; for example, the latest Mac Pro has
+    a twelve-core CPU (which should be called dodeca-core if we follow the Latin terminology)
+    but the CPUs on professional-grade machines can have tens or hundreds of cores,
+    and GPUs typically have an order of magnitude more, into the thousands. Meanwhile,
+    TPUs have core counts in the single digits like consumer CPUs, and FPGAs break
+    the mold entirely: their cores are defined by how they are programmed, not by
+    how they are built.'
+  id: totrans-17
   prefs: []
   type: TYPE_NORMAL
-- en: Recalibrating Base Quality Scores
+- en: 'Mid level: node/machine'
+  id: totrans-18
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: A *node* is really just a computer that is part of a cluster or cloud. It is
+    analogous to the laptop or desktop computer that most of us interact with primarily
+    in our day-to-day work, except without the dedicated monitor and peripherals we
+    are used to seeing associated with personal computers. A node is also sometimes
+    simply called a *machine*.
+  id: totrans-19
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Top level: cluster and cloud'
+  id: totrans-20
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: A cluster and a cloud are both a collection of machines/nodes.
+  id: totrans-21
+  prefs: []
+  type: TYPE_NORMAL
+- en: A *cluster* is an HPC structure composed of nodes networked together to some
+    extent. If you have access to a cluster, the chances are that either it belongs
+    to your institution, or your company is renting time on it. A cluster can also
+    be called a *server farm* or a *load-sharing facility*.
+  id: totrans-22
+  prefs: []
+  type: TYPE_NORMAL
+- en: A *cloud* is different from a cluster in that in its resting state, its nodes
+    are not explicitly networked together. Rather, it is a collection of independent
+    machines that are available to be networked (or not) depending on your needs.
+    We cover that in more detail in the final section of this chapter, along with
+    the concept of virtualization, which gives us virtual machines (VMs), and containerization,
+    which gives us Docker containers.
+  id: totrans-23
+  prefs: []
+  type: TYPE_NORMAL
+- en: For now, however, we move on to the very common concern of how to use a given
+    set of computing infrastructure effectively, which typically revolves around identifying
+    and solving key computational bottlenecks. As with the rest of this chapter, an
+    in-depth exploration of this topic would be beyond the scope of this book, so
+    we’re aiming simply to familiarize you with the key concepts and terminology.
+  id: totrans-24
+  prefs: []
+  type: TYPE_NORMAL
+- en: Addressing Performance Bottlenecks
+  id: totrans-25
   prefs:
   - PREF_H2
   type: TYPE_NORMAL
-- en: The final processing step we need to apply to our data aims to detect and correct
-    for patterns of systematic errors in the base quality scores, which you’ll recall
-    are the confidence scores emitted by the sequencer for each base. Base quality
-    scores play an important role in weighing the evidence for or against possible
-    variant alleles during the variant discovery process for short variants, so it’s
-    important to correct any systematic bias observed in the data. Such biases can
-    originate from biochemical processes during library preparation and sequencing,
-    from manufacturing defects in the flowcell chips, or instrumentation defects in
-    the sequencer.
+- en: You’ll occasionally find that some computing operations seem slow and you’ll
+    need to figure out how to make them go faster (if possible). The solutions available
+    to you will depend on the nature of the bottleneck you’re facing.
+  id: totrans-26
   prefs: []
   type: TYPE_NORMAL
-- en: '*Base Quality Score Recalibration* (BQSR) involves collecting covariate statistics
-    from all base calls in the dataset, building a model from those statistics, and
-    applying base quality adjustments to the dataset based on the resulting model.'
+- en: 'At a very high level, following are the main operations that the computer typically
+    has to perform (not necessarily in a linear order):'
+  id: totrans-27
   prefs: []
   type: TYPE_NORMAL
-- en: '[Figure 6-4](#visualizing_the_effect_of_bqsrdot) shows two plots that help
-    us understand the effect of BQSR. In panel A, we’re comparing the base qualities
-    reported by the instrument (Reported Quality) against the base qualities that
-    we derive from gathering all the observations with the same reported quality and
-    seeing how many errors there are (Empirical Quality). For example, before applying
-    the BQSR correction to the data (Original series, pink/gray), we find that a base
-    with a quality of 30 according to the instrument should in fact be given a quality
-    of 25, according to the quality assessed by counting mismatches in this group.
-    This tells us that the sequencer was overly confident of its own accuracy for
-    that subset of data, and indeed we observe that this is the case for most of the
-    bases in this particular dataset, although there are a few bins where this trend
-    is reversed. After applying the BQSR correction, if we run the modeling procedure
-    again on the recalibrated data (Recalibrated series, blue/black), all of the dots
-    align on the diagonal, which tells us that there is no longer a gap between the
-    qualities assigned to the bases and the observed quality.'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![Visualizing the effect of BQSR.](Images/gitc_0604.png)'
-  prefs: []
-  type: TYPE_IMG
-- en: Figure 6-4\. Visualizing the effect of BQSR.
+- en: Read some data into memory from the permanent storage where it resides at rest
+  id: totrans-28
   prefs:
-  - PREF_H6
+  - PREF_OL
   type: TYPE_NORMAL
-- en: Note that panel A in [Figure 6-4](#visualizing_the_effect_of_bqsrdot) shows
-    overall effect, which is based on calculations from multiple covariates. In panel
-    B, we’re looking at one of those covariates, the dinucleotide context. This takes
-    into account the sequence context of each base (specifically, the two bases before
-    the base of interest), which we know can affect the accuracy of sequencing. This
-    plot shows the average error in the base quality assignment for each of the possible
-    dinucleotides (note that the axis legend does not show all labels; use the order
-    A, C, G, T to identify the missing labels), where Error is defined as the difference
-    between the quality estimated by the model (Empirical) and the quality reported
-    by the instrument (Reported). Negative values mean that the instrument was overconfident;
-    for example, we can say based on this plot that in this dataset, a base called
-    after CG typically had a quality score that was inflated by ~7.5 before recalibration
-    compared to what it should have been. After recalibration, the Error goes to zero
-    for all bins, which means there is no longer a difference between the assigned
-    base qualities and those calculated by modeling.
-  prefs: []
+- en: Have the processor execute instructions, transforming data and producing results
+  id: totrans-29
+  prefs:
+  - PREF_OL
   type: TYPE_NORMAL
-- en: 'The patterns of base quality biases that we find in the data are specific to
-    each library and flowcell, so they must be modeled anew every time; it is not
-    possible to create a model on one dataset and apply it subsequently to other data.
-    Here is an example command for building the model:'
-  prefs: []
+- en: Write results back to the permanent storage
+  id: totrans-30
+  prefs:
+  - PREF_OL
   type: TYPE_NORMAL
-- en: '[PRE2]'
-  prefs: []
-  type: TYPE_PRE
-- en: 'This command takes the reference genome (*reference.fasta*) and the BAM file
-    containing the mapped read data that has already been processed through duplicate
-    marking (*sample_markdups.bam*) as well as a VCF file of variants that have been
-    previously reported for the organism of interest (*known_variation.vcf*). The
-    latter plays an important role in the recalibration model; the algorithm uses
-    the known sites to mask out positions that it should not use in building the model.
-    For a complete explanation of why and how this works, see the [BQSR method documentation](https://oreil.ly/B69n1).
-    The output of the command is a text file containing recalibration tables produced
-    by the modeling process, which we then use to apply the model to the data. Here
-    is an example command for applying the recalibration:'
+- en: 'Data storage and I/O operations: hard drive versus solid state'
+  id: totrans-31
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: Steps 1 and 3 are called *I/O operations* (I/O stands for input/output). You
+    might hear people describe some software programs as being “I/O-bound,” which
+    means the part of the program that takes the longest is reading and writing data
+    to and from relatively slow storage. This is typically the case for simple programs
+    that do things like file format conversions, in which you’re just reading in some
+    data and writing it out in a different shape, and you’re not doing any real computing
+    (i.e., there’s little to no math involved). In those cases, you can speed up operation
+    by using faster storage drives; for example, solid-state drives (SSDs) rather
+    than hard-disk drives (HDDs). The key difference between them is that HDDs have
+    physical disks called platters that spin and an armature that reads data from
+    and writes it to the platter via magnetics—like a tiny high-tech turntable—whereas
+    SSDs have no moving parts. That makes SSDs less prone to physical malfunctions
+    and also quite a bit faster at accessing data.
+  id: totrans-32
   prefs: []
   type: TYPE_NORMAL
-- en: '[PRE3]'
-  prefs: []
-  type: TYPE_PRE
-- en: This produces the final output (*sample_markdups_recal.bam*), a BAM file containing
-    the read data with recalibrated base qualities that is ready for analysis.
-  prefs: []
-  type: TYPE_NORMAL
-- en: This processing step is performed per sample, but the algorithm itself will
-    differentiate between read groups because many of the biases it tracks are read
-    group specific. The initial statistics collection can be parallelized by scattering
-    across genomic coordinates, typically by chromosome or batches of chromosomes,
-    but this can be broken down further to boost throughput if needed. Gathering per-region
-    statistics into a single genome-wide model of covariation cannot be parallelized,
-    but it is computationally trivial and therefore not a bottleneck. The final application
-    of recalibration rules is best parallelized in the same way as the initial statistics
-    collection, over genomic regions, then followed by a final file merge operation
-    to produce a single analysis-ready file per sample.
+- en: If you’re working with a networked infrastructure in which the storage drives
+    are not directly connected to the computing nodes, you will also be limited by
+    the speed at which data can be transferred over the network connections. That
+    can be determined by hardware factors as pedestrian as the kind of cables used
+    to connect the network parts. Although you might not notice the difference when
+    computing on small files, you definitely will notice it when running on whole
+    genomes; and even on a network with very fast transfer speeds, transferring whole
+    genomes will consume some noticeable time.
+  id: totrans-33
   prefs: []
   type: TYPE_NORMAL
-- en: Joint Discovery Analysis
+- en: 'Memory: cache or crash'
+  id: totrans-34
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: Step 2 is where your program is taking data and applying some kind of transformation
+    or calculation, aka the interesting part. For a lot of applications, the calculation
+    requires holding a lot of information in memory. In those cases, if your machine
+    doesn’t have enough memory, it might resort to *caching*, which is a way of using
+    local storage space as a substitute for real memory. That allows you to keep working,
+    but now your processes become I/O bound because they need to copy data back and
+    forth to slow storage, which takes you back to the first bottleneck. In extreme
+    cases, the program can stall indefinitely, fail to complete, or crash. Sometimes,
+    it’s possible for a developer to rewrite the program to be smarter about the information
+    it needs to see concurrently, but when it’s not, the solution is to simply add
+    more memory. Fortunately, unlike memory in humans, computer memory is just hardware,
+    and it comes relatively cheap.
+  id: totrans-35
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Specialized hardware and code optimizations: navigating the trade-offs'
+  id: totrans-36
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: At times, the nature of the program requires the processor itself to do a lot
+    of heavy lifting. For example, in the widely used GATK tool `HaplotypeCaller`,
+    an operation can calculate genotype likelihoods; we need to compute the likelihood
+    of every single sequence read given each candidate allele using a hidden Markov
+    model (HMM) called *PairHMM* (don’t worry if this sounds like gibberish at the
+    moment—it’s just a bunch of genomics-specific math). In some areas of the genome,
+    that leads us to do millions of computations per site across a very large number
+    of sites. We know from performance profiling tests, which record how much time
+    is spent in processing for each operation in the program, that PairHMM is by far
+    the biggest bottleneck for this tool. We can reduce this bottleneck in some surface-level
+    ways; for example, by making the program skip some of the computations for cases
+    in which we can predict they will be unnecessary on uninformative. After all,
+    the fastest way to calculate something is to not calculate it at all.
+  id: totrans-37
+  prefs: []
+  type: TYPE_NORMAL
+- en: Being lazy gets us only so far, however, so to get to the next level, we need
+    to think about the kind of processor we can (or should) use for the work we need
+    to do. Not just because some processors run faster than others, but also because
+    it’s possible to write program instructions in a way that is very specific to
+    a particular type and architecture of processor. If done well, the program will
+    be extra efficient in that context and therefore run faster. That is what we call
+    *code optimization*, and more specifically *native* code optimization because
+    it must be written in a low-level language that the processor understands “natively”
+    without going through additional translation layers.
+  id: totrans-38
+  prefs: []
+  type: TYPE_NORMAL
+- en: Within a type of processor like CPUs, different manufacturers (e.g., Intel and
+    AMD) develop different *architectures* for different generations of their products
+    (e.g., Intel Skylake and Haswell), and these different architectures provide opportunities
+    for optimizing the software. For example, the GATK package includes several code
+    modules corresponding to alternative implementations of the PairHMM algorithm
+    that are optimized for specific Intel processor architectures. The program automatically
+    activates the most appropriate version when it finds itself running on Intel processors,
+    which provides some useful speed gains.
+  id: totrans-39
+  prefs: []
+  type: TYPE_NORMAL
+- en: However, the benefits of hardware optimizations are most obvious across processor
+    types; for example, if you compare how certain algorithms perform when implemented
+    to run on FPGAs instead of CPUs. The Illumina DRAGEN toolkit (originally developed
+    by Edico Genome) includes implementations of tools like `HaplotypeCaller` that
+    are optimized to run on FPGAs and as a result are much faster than the original
+    Java software version.
+  id: totrans-40
+  prefs: []
+  type: TYPE_NORMAL
+- en: The downside of hardware-optimized implementations is that by definition, they
+    require specialized hardware. This can be a big problem for the many research
+    labs that rely on shared institutional computing systems and don’t have access
+    to other hardware. In contrast, applications written in Java, like GATK, can run
+    on a wide range of hardware architectures because the Java Virtual Machine (JVM)
+    translates the application code (called *bytecode* in the Java world) into instructions
+    appropriate for the machine. This *separation of concerns* (SoC) between the bytecode
+    of Java and what actually is executed on the machine is called an *abstraction
+    layer* and it’s incredibly convenient for everyone involved. Developers don’t
+    need to worry about exactly what kind of processor we have in our laptops, and
+    we don’t need to worry about what kind of processor they had in mind when they
+    wrote the code. It also guarantees that the software can be readily deployed on
+    standard off-the-shelf hardware, which makes it usable by anyone in the world.
+  id: totrans-41
+  prefs: []
+  type: TYPE_NORMAL
+- en: Sometimes, you’ll need to choose between different implementations of the same
+    algorithms depending on what is most important to you, including how much you
+    prize speed over portability and interoperability. Other times, you’ll be able
+    to enjoy the best of both worlds. For example, the GATK team at the Broad Institute
+    has entered into a collaboration with the DRAGEN team at Illumina, and the two
+    teams are now working together to produce unified DRAGEN-GATK pipelines that will
+    be available both as a free open source version (via Broad) and as a licensed
+    hardware-accelerated version (via Illumina). A key goal of the collaboration is
+    to make the two implementations functionally equivalent—meaning that you could
+    run either version and get the same results within a margin of error considered
+    to be insignificant. This will benefit the research community immensely in that
+    it will be possible to combine samples analyzed by either pipeline into downstream
+    analyses without having to worry about batch effects, which we discussed briefly
+    in the previous chapter.
+  id: totrans-42
+  prefs: []
+  type: TYPE_NORMAL
+- en: Parallel Computing
+  id: totrans-43
   prefs:
   - PREF_H1
   type: TYPE_NORMAL
-- en: Finally, the real fun begins! We’re going to call variants on a cohort of multiple
-    people. But before we get into the weeds of how it works, let’s take a few minutes
-    to talk about why we do it this way.
+- en: When you can’t go faster, go parallel. In the context of computing, *parallel
+    computing*, or *parallelism*, is a way to make a program finish sooner by performing
+    several operations in parallel rather than sequentially (i.e., waiting for each
+    operation to finish before starting the next one). Imagine that you need to cook
+    rice for 64 people, but your rice cooker can make enough rice for only 4 people
+    at a time. If you need to cook all of the batches of rice sequentially, it’s going
+    to take all night. But if you have eight rice cookers that you can use in parallel,
+    you can finish up to eight times sooner.
+  id: totrans-44
   prefs: []
   type: TYPE_NORMAL
-- en: When it comes to understanding germline variation, a single person’s genome
-    is rarely useful in isolation. Most research questions in this area will benefit
-    from looking at data from multiple people, whether it’s a small number, as in
-    the case of the investigation of disease inheritance from parents to their children,
-    or a much larger number, as in the case of population genetics. So, from a scientific
-    standpoint, we’re usually going to want to analyze multiple samples together.
-    In addition, there are technical advantages to grouping data from multiple samples,
-    mostly related to statistical power and compensation for technical noise.
+- en: 'This is a simple idea but it has a key requirement: you must be able to break
+    the job into smaller tasks that can be performed independently. It’s easy enough
+    to divide portions of rice because rice itself is a collection of discrete units.
+    But you can’t always make that kind of division: for example, it takes one pregnant
+    woman nine months to grow a baby, but you can’t do it in one month by having nine
+    women share the work.'
+  id: totrans-45
   prefs: []
   type: TYPE_NORMAL
-- en: Overview of the Joint Calling Workflow
+- en: The good news is that most genomic analyses are more like rice than like babies—they
+    essentially consist of a series of many small independent operations that can
+    be parallelized. So how do we get from cooking rice to executing programs?
+  id: totrans-46
+  prefs: []
+  type: TYPE_NORMAL
+- en: Parallelizing a Simple Analysis
+  id: totrans-47
   prefs:
   - PREF_H2
   type: TYPE_NORMAL
-- en: In the early days of variant discovery, multisample analysis was done by running
-    variant calling on each sample independently and then combining the resulting
-    lists of variants. This approach had several weaknesses, including that it didn’t
-    account for the difference between “no variant call because no variation” versus
-    “no variant call because no data.” Joint analysis solves this problem because
-    it takes only one sample with a variant of interest for a call to be made at the
-    corresponding site across all samples. The output will then contain detailed genotyping
-    information for all samples, allowing us to make the necessary distinctions, as
-    demonstrated in [Figure 6-5](#sites_that_would_be_omitted_from_the_vc).
+- en: 'Consider that when you run an analysis program, you’re just telling the computer
+    to execute a set of instructions.  Suppose that we have a text file and we want
+    to count the number of lines in it. The set of instructions to do this can be
+    as simple as this:'
+  id: totrans-48
   prefs: []
   type: TYPE_NORMAL
-- en: '![Sites that would be omitted from the VCF in a single-sample callset.](Images/gitc_0605.png)'
-  prefs: []
-  type: TYPE_IMG
-- en: Figure 6-5\. Sites that would be omitted from the VCF in a single-sample callset.
+- en: Open the file; count the number of lines in it; tell us the number; close the
+    file.
+  id: totrans-49
   prefs:
-  - PREF_H6
+  - PREF_BQ
   type: TYPE_NORMAL
-- en: 'The other big advantage of joint analysis is that it allows us to boost the
-    statistical power of the variant calling calculations by increasing the amount
-    of data that we can take into account. This comes into play in two places: at
-    the initial stage of calculating the confidence score of a particular variant
-    call, and a little later, at the stage of filtering variants. The fundamental
-    principle at play here is that when we don’t have much data to work with, we are
-    more vulnerable to technical artifacts. For example, consider the first sample
-    shown in [Figure 6-6](#seeing_concordant_evidence_in_multiple). We have only a
-    handful of reads covering a particular site in that sample, and we see only one
-    or two reads that carry what looks like a variant allele, so we’re going to be
-    very skeptical because that could easily be a library preparation artifact or
-    a sequencing error. We might emit a variant call, but with a very low score that
-    is likely to get it thrown out in filtering. However, when we look at data from
-    multiple samples, we find that we see the same potential variant allele in another
-    sample, so we’ll be more inclined to believe there is real variation here, and
-    we’ll give the variant a better score.'
+- en: Note that “tell us the number” can mean writing it to the console or storing
+    it somewhere for use later on—let’s not worry about that right now.
+  id: totrans-50
   prefs: []
   type: TYPE_NORMAL
-- en: '![Seeing concordant evidence in multiple samples boosts our confidence that
-    there is real variation.](Images/gitc_0606.png)'
+- en: 'Now suppose that we want to know the number of words on each line. The set
+    of instructions would be as follows:'
+  id: totrans-51
   prefs: []
-  type: TYPE_IMG
-- en: Figure 6-6\. Seeing concordant evidence in multiple samples boosts our confidence
-    that there is real variation.
+  type: TYPE_NORMAL
+- en: Open the file; read the first line; count the number of words; tell us the number;
+    read the second line; count the number of words; tell us the number; read the
+    third line; count the number of words; tell us the number.
+  id: totrans-52
   prefs:
-  - PREF_H6
+  - PREF_BQ
   type: TYPE_NORMAL
-- en: Note
+- en: 'And so on until we’ve read all the lines, and then finally we can close the
+    file. It’s pretty straightforward, but if our file has a lot of lines, it will
+    take a long time, and it will probably not use all the computing power we have
+    available. So, to parallelize this program and save time, we just cut up this
+    set of instructions into separate subsets, like this:'
+  id: totrans-53
+  prefs: []
+  type: TYPE_NORMAL
+- en: Open the file; index the lines.
+  id: totrans-54
   prefs:
-  - PREF_H6
+  - PREF_UL
   type: TYPE_NORMAL
-- en: Boosting confidence when we see a variant in multiple samples does not mean
-    we penalize those that show up in only one sample in a cohort, which are called
-    *singletons*. The joint calling algorithm is designed to avoid penalizing singletons,
-    so a singleton that is well supported by read data will still be called confidently.
-  prefs: []
-  type: TYPE_NORMAL
-- en: In addition to this signal-boosting effect, which acts at the stage of calculating
-    confidence scores, we also see important benefits later on during filtering. Having
-    data from many samples compensates for fluctuations in data quality, reduces the
-    effect of extreme outliers, and stabilizes the distribution of variant context
-    annotations, a type of metadata collected during the variant calling process that
-    we discuss in more detail in the filtering section. The benefits of joint calling
-    for filtering are especially obvious in cohorts of up to a few hundred samples;
-    then the gains begin to taper off, providing diminishing returns as you keep adding
-    more samples. You can read more about this pattern in the [HaplotypeCaller preprint](https://oreil.ly/Sdcm3).
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'So how does it work? In earlier versions of the variant discovery phase, you
-    had to run the variant caller directly on multiple per-sample BAM files. However,
-    that scaled very poorly with the number of samples, posing unacceptable limits
-    on the size of the study cohorts that could be analyzed in that way. In addition,
-    it was not possible to add samples incrementally to a study; you had to redo all
-    variant calling work when you added new samples. This is called the *N + 1 problem*:
-    imagine you’ve analyzed a cohort of *N* samples at considerable expense of time
-    and money, and then you add one more sample and need to redo all that work ([Figure 6-7](#traditional_multisample_analysis_scales)).
-    That’s a big problem.'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![Traditional multisample analysis scales poorly and causes the "N + 1 problem"](Images/gitc_0607.png)'
-  prefs: []
-  type: TYPE_IMG
-- en: Figure 6-7\. Traditional multisample analysis scales poorly and causes the N
-    + 1 problem
+- en: Read the first line; count the number of words; tell us the number.
+  id: totrans-55
   prefs:
-  - PREF_H6
+  - PREF_UL
   type: TYPE_NORMAL
-- en: 'Starting with GATK version 3.0, the GATK team introduced a new approach, which
-    decoupled the two internal processes that previously composed variant calling:
-    (1) the initial per-sample collection of variant context statistics and calculation
-    of all possible genotype likelihoods, given each sample by itself, which requires
-    access to the original BAM file reads and is computationally expensive; and (2)
-    the calculation of the posterior probability of each site being variant, given
-    the genotype likelihoods across all samples in the cohort, which is computationally
-    cheap. The tool developers separated these two steps as described shortly, enabling
-    incremental growth of cohorts as well as scaling to large cohort sizes.'
-  prefs: []
-  type: TYPE_NORMAL
-- en: This workflow, illustrated in [Figure 6-8](#the_gvcf_workflow_improves_the_scaling),
-    is designed to operate on a set of per-sample BAM files that have been preprocessed
-    as described in the first section of this chapter.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![The GVCF workflow improves the scaling of joint calling and solves the N
-    + 1 problem.](Images/gitc_0608.png)'
-  prefs: []
-  type: TYPE_IMG
-- en: Figure 6-8\. The GVCF workflow improves the scaling of joint calling and solves
-    the N + 1 problem.
+- en: Read the second line; count the number of words; tell us the number.
+  id: totrans-56
   prefs:
-  - PREF_H6
+  - PREF_UL
   type: TYPE_NORMAL
-- en: The very first step is to call variants with `HaplotypeCaller` per sample in
-    *reference confidence mode*, also colloquially called *GVCF mode*, which generates
-    an intermediate file called a GVCF. We cover the GVCF format in more detail in
-    the hands-on exercise portion of this section; for now, just consider that it
-    is an intermediate output that contains information for every single position
-    of the genome territory covered by the analysis, including the many positions
-    for which the tool did not see any evidence of variation.
-  prefs: []
-  type: TYPE_NORMAL
-- en: After we have GVCFs for all the samples that we want to joint-call, we consolidate
-    them into a `GenomicsDB` datastore, which is similar to a database that takes
-    the form of a collection of files. We can then perform joint-calling to produce
-    the raw cohort callset, which contains variant calls made across all samples,
-    with detailed genotype information for each sample. This step, shown in [Figure 6-9](#progression_from_per_sample_gvcfs_to_fi),
-    runs quite quickly and can be rerun at any point when samples are added to the
-    cohort, thereby solving the *N* + 1 problem.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![Progression from per-sample GVCFs to final cohort VCF.](Images/gitc_0609.png)'
-  prefs: []
-  type: TYPE_IMG
-- en: Figure 6-9\. Progression from per-sample GVCFs to final cohort VCF.
+- en: Read the third line; count the number of words; tell us the number.
+  id: totrans-57
   prefs:
-  - PREF_H6
+  - PREF_UL
   type: TYPE_NORMAL
-- en: This cohort-wide analysis empowers sensitive detection of variants even at difficult
-    sites, and produces a squared-off matrix of genotypes that provides information
-    about all sites of interest in all samples considered, which is important for
-    many downstream analyses.
+- en: '[Repeat for all lines.]'
+  id: totrans-58
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Collect final results and close the file.
+  id: totrans-59
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Here, the “read the *N*th line” steps can be performed in parallel because they
+    are all independent operations.
+  id: totrans-60
   prefs: []
   type: TYPE_NORMAL
-- en: Whew, that was a lot of theory. Are you ready to get your hands back on the
-    keyboard for a few exercises? That’s right; it’s time to start up your VM again
-    and jump back into your GATK container, just as you did in [Chapter 5](ch05.xhtml#first_steps_with_gatk).
-    You’re going to work from within the */home/book/data/germline* directory and
-    use the same sandbox directory that you created in [Chapter 5](ch05.xhtml#first_steps_with_gatk).
+- en: You’ll notice that we added a step, “index the lines.” That’s a little bit of
+    preliminary work that allows us to perform the “read the *N*th line” steps in
+    parallel (or in any order we want) because it tells us how many lines there are
+    and, importantly, where to find each one within the file. It makes the entire
+    process much more efficient. As you will see in the following chapters, tools
+    like GATK require index files for the main data files (reference genome, read
+    data and variant calls). The reason is to have that indexing step already done
+    so that we can have the program look up specific chunks of data by their position
+    in the genome.
+  id: totrans-61
   prefs: []
   type: TYPE_NORMAL
-- en: Calling Variants per Sample to Generate GVCFs
+- en: 'Anyway, that’s the general principle: you transform your linear set of instructions
+    into several subsets of instructions. There’s usually one subset that has to be
+    run first and one that has to be run last, but all the subsets in the middle can
+    be run at the same time (in parallel) or in whatever order you want.'
+  id: totrans-62
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'From Cores to Clusters and Clouds: Many Levels of Parallelism'
+  id: totrans-63
   prefs:
   - PREF_H2
   type: TYPE_NORMAL
-- en: 'First, we’re going to run `HaplotypeCaller` in GVCF mode on the mother BAM
-    file we played with in [Chapter 5](ch05.xhtml#first_steps_with_gatk). It’s almost
-    exactly the same command, except now we’re adding the `-ERC GVCF` argument and
-    naming the output with a `.g.vcf` extension (plus `.gz` for compression purposes).
-    Make sure you run this from within the */home/book/data/germline* directory in
-    the container on your VM:'
+- en: So how do we go from rice cookers to parallelizing the execution of a genomic
+    analysis program? Overall, the action of parallelizing computing operations consists
+    of sending subsets of the work we want done to multiple cores for processing.
+    We can do that by splitting up the work across the cores of a single multicore
+    machine, or we can dispatch work to other machines if we have access to a cluster
+    or cloud. In fact, we can combine the two ideas and dispatch work to multicore
+    machines, in which the work is further split up among each machine’s cores. Going
+    back to the rice-cooking example, it’s as if instead of cooking the rice yourself,
+    you hired a catering company to do it for you. The company assigns the work to
+    several people, who each have their own cooking station with multiple rice cookers.
+    Now, you can feed a lot more people in the same amount of time! And you don’t
+    even need to clean the dishes.
+  id: totrans-64
   prefs: []
   type: TYPE_NORMAL
-- en: '[PRE4]'
-  prefs: []
-  type: TYPE_PRE
-- en: 'This produces a GVCF file that contains likelihoods for each possible genotype
-    for the variant alleles, including a symbolic allele, `<NON-REF>` in the `ALT`
-    column. This symbolic allele is present in all records, whether they are variant
-    records or nonvariant records. You can view what the calls look like the same
-    way as before, using the `zcat` tool, `grep`, to get rid of the header lines,
-    and `head` to limit the number of lines you want to look at:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE5]'
-  prefs: []
-  type: TYPE_PRE
-- en: 'These are nonvariant sites for which `HaplotypeCaller` found no evidence of
-    variation. The first is a block that covers positions 20:10,000,000 to 20:10,000,008,
-    whereas the second covers only position 20:10,000,009\. If you look a little further
-    in the file, you’ll also find some actual variant calls like this one:'
+- en: 'Whether we want to distribute the work across multiple cores on a single machine
+    or across multiple machines, we’re going to need a system that splits up the work,
+    dispatches jobs for execution, monitors them for completion, and then compiles
+    the results. Several kinds of systems can do that, falling broadly into two categories:
+    internal or external to the analysis program itself. In the first case, the parallelization
+    happens “inside” the program that we’re running: we run that program’s command
+    line, and the parallelization happens without any additional “wrapping” on our
+    part. We call that *multithreading*. In the second case, we need to use a separate
+    program to run multiple instances of the program’s command line. An example of
+    an external parallelization is writing a script that runs a given tool separately
+    on the data from each chromosome in a genome and then combines the result with
+    an additional merge step. We call that approach *scatter-gather*. We cover that
+    in more detail in the next section when we introduce workflow management systems.
+    In [Figure 3-2](#scatter_gather_allows_parallel_executio), you can see how we
+    can use multithreading and scatter-gather parallelism in the course of an analysis.'
+  id: totrans-65
   prefs: []
   type: TYPE_NORMAL
-- en: '[PRE6]'
-  prefs: []
-  type: TYPE_PRE
-- en: Now see what GVCFs look like in the IGV. We supply precomputed GVCF files for
-    all three members of the CEU Trio (Mother, Father, and Son), but you could generate
-    them yourself in the same way as the first from the BAMs we also provide.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Start a new session to clear your IGV screen (File > New Session) and then load
-    the GVCF for each CEU Trio member (*gvcfs/mother.g.vcf*, *gvcfs/father.g.vcf*,
-    *gvcfs/son.g.vcf*) using the paths to the file locations in the book bucket.^([1](ch06.xhtml#idm45625633075784))
-    This time, be sure to provide the index file paths to IGV because it is unable
-    to get them automatically for compressed files. Zoom in on the genomic coordinates
-    20:10,002,371-10,002,546\. You should see something like [Figure 6-10](#gvcfs_viewed_in_igv_show_tiled_nonvaria).
-  prefs: []
-  type: TYPE_NORMAL
-- en: Notice anything different in the GVCF compared to the VCFs that you saw in [Chapter 5](ch05.xhtml#first_steps_with_gatk)?
-    Instead of just seeing a few variant sites, you see many gray blocks. If you click
-    one to examine the details of the call, you’ll see that the genotype assignment
-    is homozygous reference, and the position information includes an END coordinate,
-    which indicates that the block covers an interval of one or more bases. These
-    blocks represent intervals where the sample appears to be nonvariant and for which
-    the contiguous sites it covers have similar genotype likelihoods. `HaplotypeCaller`
-    groups nonvariant sites into blocks during the calling process based on their
-    likelihoods as a way of compressing the information in the GVCF without losing
-    useful information in areas where there is more variability in the quality of
-    the available information.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![GVCFs viewed in IGV show tiled nonvariant blocks.](Images/gitc_0610.png)'
+- en: '![Scatter-gather allows parallel execution of tasks on different CPU cores
+    (on a single machine or multiple machines depending on how it’s implemented).](Images/gitc_0302.png)'
+  id: totrans-66
   prefs: []
   type: TYPE_IMG
-- en: Figure 6-10\. GVCFs viewed in IGV show tiled nonvariant blocks.
+- en: Figure 3-2\. Scatter-gather allows parallel execution of tasks on different
+    CPU cores (on a single machine or multiple machines, depending on how it’s implemented).
+  id: totrans-67
   prefs:
   - PREF_H6
   type: TYPE_NORMAL
-- en: The `HaplotypeCaller` calculates the likelihoods for these GVCF blocks using
-    an abstract nonreference allele that represents all the possible variation that
-    it did not observe; they serve as an estimate of how confident we are that these
-    sites are truly nonvariant. Later, the joint calling step will retain only sites
-    that are likely enough to be variant compared to the reference in at least one
-    sample in the cohort. For variant sites, the nonreference allele serves to estimate
-    the likelihood that a new allele seen in one sample was missed in the other samples.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Consolidating GVCFs
+- en: 'Trade-Offs of Parallelism: Speed, Efficiency, and Cost'
+  id: totrans-68
   prefs:
   - PREF_H2
   type: TYPE_NORMAL
-- en: 'For the next step, we need to consolidate the GVCFs into a `GenomicsDB` datastore
-    in order to improve scalability and speed in the next step, joint genotyping.
-    That might sound complicated, but it’s actually very straightforward. Let’s try
-    running this on two of the samples we have available:'
+- en: Parallelism is a great way to speed up processing on large amounts of data,
+    but it has overhead costs. Without getting too technical at this point, let’s
+    just say that parallelized jobs need to be managed, you need to set aside memory
+    for them, regulate file access, collect results, and so on. So it’s important
+    to balance the costs against the benefits, and avoid dividing the overall work
+    into too many small jobs. Going back to our earlier example, you wouldn’t want
+    to use a thousand tiny rice cookers that each boil a single grain of rice. They
+    would take far too much space on your countertop, and the time required to distribute
+    each grain and then collect it when it’s cooked would more than negate any benefits
+    from parallelizing in the first place.
+  id: totrans-69
   prefs: []
   type: TYPE_NORMAL
-- en: '[PRE7]'
-  prefs: []
-  type: TYPE_PRE
-- en: This will create a new directory called *trio-gdb* containing the datastore
-    contents. We named our datastore `trio-gdb` aspirationally, because, ultimately,
-    we want to include all three samples from the family in the analysis, but we’re
-    pretending that the son’s sample hasn’t been completed yet—some kind of delay
-    happened in the lab.
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'The way the consolidated GVCF information is represented in the database makes
-    it difficult to examine directly, so if we want to visualize it, we need to extract
-    the combined data from the `GenomicsDB` database using `SelectVariants`:'
+- en: More generally, although it’s tempting to think of parallelism as a way to make
+    things go faster, it’s important to remember that the impression of speed is entirely
+    subjective to the observer. In reality, the computation being run on each piece
+    of data is not going any faster. We’re just running more computations at the same
+    time, and we’re limited by the parallel capacity of our computing setup (typically
+    measured in number of nodes or cores) as well as hardware limitations like I/O
+    and network speeds. It’s more realistic to think of parallelism as a way to optimize
+    available resources in order to finish tasks *sooner*, rather than making individual
+    tasks run *faster*.
+  id: totrans-70
   prefs: []
   type: TYPE_NORMAL
-- en: '[PRE8]'
-  prefs: []
-  type: TYPE_PRE
-- en: 'This time, when you run `zcat` to view the contents, you’ll see that you now
-    have two columns with genotype information, one for each of the samples that we
-    originally included:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE9]'
-  prefs: []
-  type: TYPE_PRE
-- en: This extraction step is not part of the routine pipeline, but it can be helpful
-    for understanding what happens under the hood when we combine GVCFs from multiple
-    samples. It also comes in handy when we need to troubleshoot unexpected or problematic
-    results.
+- en: This distinction might seem pedantic given that, from the point of view of the
+    human at the keyboard, the elapsed time (often called *wall-clock time*; that
+    is, “the time shown by the clock on the wall”) is shorter. And isn’t that what
+    we all understand as going faster? However, from the point of view of the resources
+    we utilize, if we add up the time spent doing computation by the processor across
+    all the cores we use, we might find that the overall job takes *more* time to
+    complete compared to purely sequential execution because of the overhead costs.
+  id: totrans-71
   prefs: []
   type: TYPE_NORMAL
-- en: 'OK, so we just combined the GVCFs from the mother and father samples. Now,
-    let’s imagine that the son’s sample was just delivered, and we want to add it
-    to our datastore without having to rerun everything. We’re going to use the `GenomicsDBImport`
-    tool  again, but this time we’re going to make it update the existing datastore
-    (rather than creating a new one) by using `--genomicsdb-update-workspace-path`
-    instead of `--genomicsdb-workspace-path` to specify the datastore:'
+- en: 'That brings us to another important question: what is the monetary cost of
+    utilizing those resources? If we’re working with a dedicated machine that is just
+    sitting there with multiple cores and nothing else to do, the parallelization
+    is still absolutely worth it, even with the overhead. We’ll want to parallelize
+    the heck out of everything we do on that machine in order to maximize efficiency.
+    However, when we start working in the cloud environment, as we do in [Chapter 4](ch04.xhtml#first_steps_in_the_cloud),
+    and we need to start paying for itemized resources as we go, we’ll want to look
+    more carefully at the trade-offs between minimizing wall-clock time and the size
+    of the bill.'
+  id: totrans-72
   prefs: []
   type: TYPE_NORMAL
-- en: '[PRE10]'
-  prefs: []
-  type: TYPE_PRE
-- en: 'You can check that the datastore was updated with the son’s samples by running
-    the same basic extraction command as before:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE11]'
-  prefs: []
-  type: TYPE_PRE
-- en: 'Run `zcat` again to view the contents of the new file (which we named slightly
-    differently), and you should now see three columns with genotype information:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE12]'
-  prefs: []
-  type: TYPE_PRE
-- en: Success! You just defeated the *N* + 1 problem by adding samples incrementally
-    to a `GenomicsDB` datastore.
-  prefs: []
-  type: TYPE_NORMAL
-- en: This ability to add samples incrementally to a `GenomicsDB` datastore is subject
-    to a few limitations. The [tool documentation](https://oreil.ly/kT8-J) recommends
-    making a backup of the datastore before proceeding to update it, because any interruptions
-    of the process could corrupt the data and leave it in an unusable state. In addition,
-    it’s not possible to specify new intervals when updating an existing datastore;
-    the tool will automatically use the intervals that were originally used to create
-    it. That’s why our second `GenomicsDB​Im⁠port` command didn’t include any intervals.
-  prefs: []
-  type: TYPE_NORMAL
-- en: It’s important to understand that the process of consolidating GVCFs that you
-    just worked through is not equivalent to the joint genotyping step, which we tackle
-    in a minute. We can’t consider variants in the resulting merged GVCF as having
-    been called jointly. No analysis was involved; this is really just a matter of
-    organizing the information differently for logistical reasons.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Note
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: Prior to GATK4, this step was done through hierarchical merges with a tool called
-    `CombineGVCFs`. That tool is included in GATK4 for legacy purposes, but performance
-    is far superior when using `GenomicsDBImport`, as in the previous example.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Applying Joint Genotyping to Multiple Samples
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: 'It’s time to apply the joint calling tool, `GenotypeGVCFs`, to the consolidated
-    GVCF or `GenomicsDB` datastore. The tool will look at the available information
-    for each site from both variant and nonvariant samples across all the samples
-    in the cohort and will produce a VCF containing only the sites that it found to
-    be variant in at least one sample:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE13]'
-  prefs: []
-  type: TYPE_PRE
-- en: 'Finally, we have our multisample callset! If we compare that final VCF to the
-    original GVCFs, we’ve now removed sites that were nonvariant in all the samples
-    that we joint-called, and the symbolic `<NON_REF>` allele is gone, as well, because
-    it has served its purpose:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE14]'
-  prefs: []
-  type: TYPE_PRE
-- en: The calls made by `GenotypeGVCFs` and `HaplotypeCaller` run in multisample mode
-    should mostly be equivalent, especially as cohort sizes increase. However, borderline
-    calls can have marginal differences; for instance, low-quality variant sites,
-    in particular for small cohorts with low coverage. Since the release of GATK 4.1,
-    this should be less of a problem, thanks to the introduction of a new QUAL score
-    model (available to some earlier versions via the `-new-qual` flag). Alternatively,
-    it is possible to perform joint genotyping directly with `HaplotypeCaller` on
-    small cohorts.
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'This is what the command to run `HaplotypeCaller` jointly on the three samples
-    would look like:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE15]'
-  prefs: []
-  type: TYPE_PRE
-- en: You can run it if you want to compare the calls to the joint-called results
-    we generated earlier.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Now let’s circle back to the locus we examined at the start. Load *sandbox/trioGGVCF.vcf*
-    into IGV and navigate to the genomic coordinates 20:10,002,376-10,002,550\. As
-    shown in [Figure 6-11](#variant_call_with_genotype_assignment_f), you should see
-    the variant call on the top track and the genotypes for each of the three samples
-    below.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![Variant call with genotype assignment for the three samples.](Images/gitc_0611.png)'
-  prefs: []
-  type: TYPE_IMG
-- en: Figure 6-11\. Variant call with genotype assignment for the three samples.
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: Now we have genotypes at this site for both the father (NA12877) and son (NA12882)
-    in addition to the mother. If you click each one, you’ll see both the mother and
-    the son were called homozygous variant, yet the father was called homozygous reference;
-    that is, nonvariant. Given the familial relationship for the three samples, what
-    do you think about this set of genotype calls?
-  prefs: []
-  type: TYPE_NORMAL
-- en: If you’re thinking it doesn’t make sense, you’re right! The evidence we have
-    for both the mother and the child being truly homozygous variant is fairly strong,
-    but then the father is extremely unlikely to be homozygous reference because that’s
-    a flagrant Mendelian violation (i.e., it breaks Mendel’s rules of genetic inheritance).
-    That would mean the son received one variant allele from his mother and one reference
-    allele from his father, and then experienced an early mutation that produced a
-    matching *de novo* variant—not impossible, but very unlikely. So two possibilities
-    exist here; either the daddy is not the daddy (it happens more often than you
-    want to know), or the tool made an error in one or more of the genotypes. We happen
-    to know from other sources that NA12877’s paternity is not in question, so we
-    need to accept that the tool made a mistake. This is not so unusual when there
-    is some ambiguity in the data, especially when homopolymers are involved, as is
-    the case here.
-  prefs: []
-  type: TYPE_NORMAL
-- en: In fact, we ran a few tests with other pipelines and found that other variant
-    callers also stumbled on the genotype assignments for this variant in the same
-    data. Some of them also called the father homozygous reference, whereas others
-    called it heterozygous. So this is a site in the genome where joint calling allows
-    us to make a good variant call, in that we are confident that one or more samples
-    in the group show some variation there, but some of the individual genotypes might
-    be questionable. How do we deal with this? Well, we’re going to put this problem
-    in the fridge for now, because our first order of business after calling is filtering
-    out the bad variant calls, which does not involve taking individual genotypes
-    into account. However, when that’s done, we’ll circle back to deal with the genotypes
-    using a process called *Genotype Refinement*.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Filtering the Joint Callset with Variant Quality Score Recalibration
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: At this point in the variant discovery process, we have in hand a set of raw
-    variant calls, but we know that some of our raw calls are most probably artifacts,
-    given that the caller is explicitly designed to be very permissive. That is why
-    we now need to filter the variant calls to distinguish those that are most likely
-    to be real variants in the biological material from those that are most probably
-    just artifacts introduced by biochemical processes or technical errors.
-  prefs: []
-  type: TYPE_NORMAL
-- en: In [Chapter 5](ch05.xhtml#first_steps_with_gatk), we practiced hard filtering,
-    an approach to filtering variants that involves setting thresholds for individual
-    variant context annotations. That approach can produce reasonable results in the
-    hands of an experienced analyst, but it is labor intensive and difficult to extend
-    consistently across different studies and datasets. For a more scalable and standardizable
-    solution, we look to machine learning approaches that enable us to build models
-    of what real variants and artifacts look like in our data, respectively.
-  prefs: []
-  type: TYPE_NORMAL
-- en: When filtering a multisample callset, the GATK Best Practices recommendation
-    is to use the Variant Quality Score Recalibration (VQSR) method. This method involves
-    using variant context annotations from variants that are present in a training
-    set to model how variants that are likely to be real cluster together. Then, it’s
-    a matter of applying the model to all of the variants in our callset of interest.
-    You can think of this as a process in which we’re measuring where each variant
-    lies relative to the clusters of real variants across all of the annotation dimensions.
-    The closer a variant is to a cluster, the more likely it is to be real. Of course,
-    this can be difficult to visualize when we take all the annotations into account
-    because there are more than the three that our puny human brains are generally
-    limited to handling at a time. So we usually represent subsets of the model by
-    making pairwise scatter plots of two annotations at a time to visualize the clustering
-    process, as shown in [Figure 6-12](#gaussian_clusters_learned_from_a_traini).
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![Gaussian clusters learned from a training set are applied to novel variant
-    calls.](Images/gitc_0612.png)'
-  prefs: []
-  type: TYPE_IMG
-- en: Figure 6-12\. Gaussian clusters learned from a training set are applied to novel
-    variant calls.
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: In practice, the VQSR tools use the model to assign a new confidence score to
-    each variant, called VQSLOD, which is more reliable than the QUAL confidence score
-    originally calculated by the caller because it takes more information into account.
-    Specifically, this new score takes into account all the variant context annotations
-    that would be informative enough for hard filtering, and the resulting score encapsulates
-    the information contributed by every one of those annotations in a single value.
-  prefs: []
-  type: TYPE_NORMAL
-- en: In [Figure 6-13](#conceptual_explanation_of_how_the_vqslo), each dot at the
-    bottom is an individual variant, plotted where its annotation value falls on the
-    x-axis. The variants clustering to the left are considered good based on preliminary
-    scoring, whereas those on the right are considered bad. The density curves above
-    them show the positive model (left) and negative model (right), respectively,
-    representing the proportion of variants with corresponding annotation values.
-    The VQSLOD for a given variant is the log ratio of the variant’s probabilities
-    of belonging to the positive model and to the negative model, respectively. Here
-    we’re showing how this applies to a single annotation; in reality, we’ll calculate
-    the VQSLOD score based on multiple annotations, so the tools will do some additional
-    mathematical integration that we don’t show here to produce a single unified score.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![Conceptual explanation of how the VQSLOD score is calculated for an individual
-    annotation.](Images/gitc_0613.png)'
-  prefs: []
-  type: TYPE_IMG
-- en: Figure 6-13\. How the VQSLOD score is calculated for an individual annotation.
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: This single unified score is very convenient because it means that all that
-    remains for us to do is to set a filtering threshold for that single score instead
-    of trying to set thresholds for all the annotations separately. Contrast that
-    to what we covered on the topic of hard filtering; you can see this is much handier.
-  prefs: []
-  type: TYPE_NORMAL
-- en: So how do we set a threshold on that one score? Indirectly. There is no absolute
-    scale that tells us what is a good VQSLOD. Instead, given a truth set that overlaps
-    substantially with our callset, we can use a truth sensitivity threshold as a
-    more meaningful proxy for finding the “right” VQSLOD score. This means that we
-    can specify a target sensitivity—for example, 99.9%—and have the tools internally
-    determine whatever VQSLOD would be appropriate for the filtering process to guarantee
-    that 99.9% of the variants we know are true will still be considered real in the
-    resulting filtered callset. In other words, this comes down to saying, “Filter
-    my callset with whatever VQSLOD would give me back 99.9% of the variants that
-    I know are true in this callset.” That target sensitivity value itself is not
-    an absolute recommendation, given that different projects might require different
-    levels of sensitivity and precision, but at least it provides a principled basis
-    for the analyst to choose their threshold.
-  prefs: []
-  type: TYPE_NORMAL
-- en: We don’t provide hands-on exercises for this step, because the VQSR algorithm
-    is greedy for data—it needs to see all the variant data at once—so it’s difficult
-    to create an example case that will run in a short amount of time. Instead, here
-    are example commands for the two steps involved in VQSR.
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'To build the model and apply it to a joint-called dataset and calculate VQSLOD
-    scores for the variants it contains, we would use `VariantRecalibrator`, as follows:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE16]'
-  prefs: []
-  type: TYPE_PRE
-- en: 'This is one of the longer GATK commands you’re likely to encounter, so it’s
-    worth taking a minute to go over what it involves. In addition to the reference
-    genome of the VCF of joint calls, which are its main input, the command takes
-    in a set of resource files (via the `--resource` parameter) that play an essential
-    role in the modeling process. These should be sets of variant calls that have
-    been previously reported and curated to some degree of confidence expressed by
-    the `prior` metric. Here, we show the resources that are used for human genome
-    analysis; for other organisms, you would have to adapt the resources you use accordingly.
-    The `-an` parameters specify the variant context annotations that we want to use
-    in the recalibration process, and here we show the default recommendations provided
-    by the GATK team. The `-mode` parameter controls which kind of variants the tool
-    should recalibrate. Because of some key differences between how SNPs and indels
-    show up in the sequence, we need to recalibrate them in separate passes, so we
-    would run this once in SNP mode and then once again in INDEL mode. Finally, the
-    command will produce two output files: the main recalibration file (*output.recal*),
-    and a tranches file (*output.tranches*) that maps several confidence levels to
-    specific VQSLOD cutoffs.'
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'After we’ve run that, we still need to choose a confidence level to use as
-    sensitivity threshold and actually generate a filtered VCF for our callset, which
-    we would do by using `ApplyVQSR`, as follows:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE17]'
-  prefs: []
-  type: TYPE_PRE
-- en: In this command, we’re mostly just feeding in the reference, original data and
-    the two files output by `VariantRecalibrator`, the tranches files, and the recalibration
-    file. We also pass in the confidence level we want to use with the `--truth-sensitivity-filter-level`
-    argument, using 99.9% because it is the recommended default for SNPs in human
-    genomic analysis, but keep in mind that this is something you would need to decide
-    based on your experimental goals. The final output of the procedure will be the
-    filtered callset, which will still contain all the original variant sites, but
-    the ones that fail to pass the VQSLOD threshold will be marked as filtered and
-    ignored in downstream analyses.
-  prefs: []
-  type: TYPE_NORMAL
-- en: The downside of how variant recalibration works is that the algorithm requires
-    high-quality sets of known variants to use as training and truth resources, which
-    for many organisms are not yet available. It also requires quite a lot of data
-    in order to learn the profiles of good versus bad variants, so it can be difficult
-    or even impossible to use on small datasets containing only one or a few samples,
-    on targeted sequencing data, on RNAseq, and on nonmodel organisms. If for any
-    of these reasons you cannot perform variant recalibration on your data, you will
-    need to use either the neural networks–based technique referenced in [“Single-Sample
-    Calling with CNN Filtering”](#single_sample_calling_with_cnn_filterin), or hard
-    filtering, which consists of setting flat thresholds for specific annotations
-    and applying them to all variants equally, as described in [Chapter 5](ch05.xhtml#first_steps_with_gatk).
-  prefs: []
-  type: TYPE_NORMAL
-- en: You can learn more about the variant recalibration algorithm from [its documentation](https://oreil.ly/wCLrk)
-    and see these tools in action in the [reference implementation](https://oreil.ly/Uk7-I)
-    of the joint genotyping workflow.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Refining Genotype Assignments and Adjusting Genotype Confidence
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: Now that we have filtered our callset at the site level, we can be reasonably
-    confident that we have the right variant calls, but as we observed earlier, some
-    unresolved ambiguity might remain at the genotype level. For studies that require
-    high-quality genotype information (sooo...most of them) we’re going to add on
-    an optional step called *Genotype Refinement* that uses supplemental sources of
-    information like pedigree (i.e., familial relationships) and allele frequencies
-    observed in relevant populations to refine genotype assignments. Where applicable,
-    this will lead us to adjust our confidence in specific genotypes or even change
-    what genotype we assign.
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'Let’s apply this to the two “problem” calls we produced for the mother-father-son
-    trio earlier—and yes, we’re back to working hands-on in the GATK container on
-    your VM. In the command that follows, we provide the genotype refinement tool,
-    `CalculateGenotypePosteriors`, with a pedigree file that describes how the three
-    individuals are related (mother, father, and child) and a sites-only VCF file
-    that contains allele frequencies observed in a large database of known variation
-    called [gnomAD](https://oreil.ly/_t0kq):'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE18]'
-  prefs: []
-  type: TYPE_PRE
-- en: Run that and then load the resulting VCF into IGV and check out the genotype
-    assignment we now have for the father. Zoom in on the genomic coordinates 20:10,002,438-10,002,479\.
-    What happened here? Between the trio pedigree and the population file, the tool
-    decided that the father’s genotype was highly questionable, so it downgraded the
-    genotype quality score, as depicted in [Figure 6-14](#genotype_assignments_corrected_on_the_b),
-    to the point that this genotype would be filtered out as being unreliable for
-    downstream analysis.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![Genotype assignments corrected on the basis of pedigree and population priors.](Images/gitc_0614.png)'
-  prefs: []
-  type: TYPE_IMG
-- en: Figure 6-14\. Genotype assignments corrected on the basis of pedigree and population
-    priors.
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: It’s important to understand that the tool does not “brute-force” the genotype
-    assignment; if we had a confident genotype call to begin with, the external information
-    would not be sufficient to overturn the caller’s initial judgment. However, when
-    we have a low-confidence call, where the caller is essentially telling us “here’s
-    my best guess but I’m probably wrong,” the supplemental information allows us
-    to resolve the ambiguity and rescue a variant call that might otherwise be unusable
-    for downstream analysis, as in the case of the SNP. Or, as in the case of the
-    indel, it recalibrates the confidence we have in the genotype call.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Next Steps and Further Reading
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: This concludes the whistle-stop tour of the joint discovery workflow, at least
-    as far as this book is concerned. There is a lot more to learn about how the algorithms
-    and tools that we presented here operate, and about how you can customize these
-    commands to suit your particular data and experimental goals. We recommend that
-    you check out the [relevant documentation](https://oreil.ly/SBnZc) on the GATK
-    website as well as the [reference implementations](https://oreil.ly/WDqVr) of
-    the workflows, though you might benefit from waiting until you’ve worked through
-    the rest of this book to tackle those. If you’re not familiar with WDL workflows,
-    you’ll especially want to read [Chapter 8](ch08.xhtml#automating_analysis_execution_with_work)
-    through [Chapter 11](ch11.xhtml#running_many_workflows_conveniently_in) first,
-    in which we teach you what you need to know to decipher the workflows and use
-    them effectively for your own work.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Before we move on to somatic variant calling, however, let’s consider the case
-    of single-sample calling, which is a bit of a niche use case compared to joint
-    calling but is of great importance in clinical genomics.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Single-Sample Calling with CNN Filtering
+- en: Pipelining for Parallelization and Automation
+  id: totrans-73
   prefs:
   - PREF_H1
   type: TYPE_NORMAL
-- en: As discussed earlier, sometimes we are constrained to analyzing a single sample
-    at a time. When that’s the case, we don’t need to follow the GVCF workflow; instead,
-    we can simply apply the basic command for `HaplotypeCaller`, as shown in the very
-    first exercise in this chapter. However, that leads us to having too little data
-    (specifically, too few variants) for filtering with VQSR, which, as we have noted,
-    is a very greedy algorithm that requires lots of data.
+- en: Many genomic analyses involve running a lot of routine data-processing operations
+    that need to be parallelized for efficiency and automated to reduce human error.
+    We do this by describing the workflow in a machine-readable language, which we
+    then can feed into a workflow management system for execution. We go over how
+    this works in practice in [Chapter 8](ch08.xhtml#automating_analysis_execution_with_work),
+    but first let’s set the stage by introducing basic concepts, definitions, and
+    key software components. As we go, please keep in mind that this field currently
+    has no such thing as a one-size-fits-all solution, and it’s ultimately up to you
+    to review your needs and available options before picking a particular option.
+    However, we can identify general principles to guide your selection, and we demonstrate
+    these principles in action using the open source pipelining solution that is recommended
+    by the GATK development team and used in production at the Broad Institute. As
+    with most of this book, the goal here is not to prescribe the use of specific
+    software, but to show through working examples how all of this fits together in
+    practice.
+  id: totrans-74
   prefs: []
   type: TYPE_NORMAL
-- en: 'Over the years, the GATK development team tried a variety of algorithms to
-    address this issue. Then, a breakthrough: the advent of “cheap and easy” machine
-    learning tools, and the rise of deep learning in particular, empowered the team
-    to apply a technique called *Convolutional Neural Networks*, or CNN. This new
-    approach proved to be impressively effective for single-sample germline short
-    variant calling, performing well even on indels, which are traditionally the more
-    difficult problem in this space compared to SNVs.'
+- en: One tricky aspect is that we have dozens of scripting languages and workflow
+    management systems to choose from in the bioinformatics world—likely hundreds
+    if you look at a wider range of fields. It can be difficult to compare them directly
+    because they tend to be developed with a particular type of audience in mind,
+    leading to very different modalities of user experience. They are often tuned
+    for particular use cases and are sometimes optimized to operate on certain classes
+    of infrastructure. We often see one solution that is preferred by one group prove
+    to be particularly difficult or frustrating to use for another. These various
+    solutions are also generally not interoperable, meaning that you can’t take a
+    workflow script written for one workflow management system and run it unmodified
+    on the next one over. This lack of standardization is a topic of both humor and
+    desperation in just about every field of research known to humankind, as is illustrated
+    in [Figure 3-3](#xkcd_comic_on_the_proliferation_of_stan).
+  id: totrans-75
   prefs: []
   type: TYPE_NORMAL
-- en: This is a deep topic about which there is a lot to learn, but it can be quite…convoluted,
-    so to speak. In the interest of not turning this book into a treatise on machine
-    learning, let’s skip straight to how it differs from previous approaches and how
-    we apply the relevant tools in practice.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Overview of the CNN Single-Sample Workflow
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: 'At a very high level, the procedure for applying CNN to variant calling appears
-    similar to VQSR, which we covered earlier: the tools build a model of what real
-    variation looks like based on training sets, and when we apply that model to our
-    callset, we get a new confidence score for each of our variants. Under the hood,
-    however, the modeling architecture is wildly different—and quite a bit more complicated.
-    Again, the good news is that you don’t need to care too much about how it works
-    at that level, as long as you understand its key benefit: we can include more
-    information than just the variant context annotations in the modeling process.
-    So far, we were limited to using annotations, which are essentially summaries
-    of the original sequence data, for both hard filtering and VQSR.'
-  prefs: []
-  type: TYPE_NORMAL
-- en: Now, with CNN, we can also take advantage of what we know about the reference
-    sequence context, and we can even take into account the raw read data itself.
-    That gives us more power to discriminate between real variants and artifacts,
-    especially for indels in difficult areas of the genome where the sequence context
-    is littered with *short tandem repeats* (repetitions of the same few bases, like
-    TATATATATA) and *homopolymers* (runs of the same one base, like AAAAAAAAAA) that
-    are classic confounding factors for variant calling. In practice, we’ll refer
-    to the basic approach that uses annotations supplemented with just reference context
-    information as *1-D CNN*, and the somewhat more sophisticated approach that also
-    uses read data as *2-D CNN*.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Another important benefit of how the CNN modeling works is that it allows us
-    to create models that can be applied out of the box to new datasets as long as
-    they are similar enough to the original training data in terms of experimental
-    design and technology (i.e., how the sequencing was done). This is also a big
-    difference compared to the VQSR method, which requires that you train a new model
-    for every new callset that you want to filter. The GATK package includes a set
-    of precomputed models trained on highly validated callsets produced from reference
-    datasets such as [SynDip](https://oreil.ly/WyPhN), [GiaB](https://oreil.ly/XJlBQ),
-    and [Platinum Genomes](https://oreil.ly/aW1on). For convenience, the GATK CNN
-    tools are set to use the appropriate default model (1D or 2D modeling) based on
-    which inputs are provided (or not). That being said, you can train your own models
-    if you prefer.
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'Let’s run through the main two options for running with a precomputed model.
-    You’ll see that this method is easy to use even if you don’t understand the underlying
-    algorithm in detail. Note that because the CNN tools are very new as of this writing,
-    the examples use a separate set of resource files, so you now need to change our
-    working directory within the GATK container: you were previously in */home/book/data/germline*,
-    so now you need to change your working directory to */home/book/data/cnn*. To
-    be clear, the CNN tools are intended for germline variant discovery; the naming
-    and file bundle structure simply reflects the fact that these tools have a somewhat
-    special status for now:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE19]'
-  prefs: []
-  type: TYPE_PRE
-- en: As previously, you create a sandbox for collecting the outputs of the commands
-    that you’re going to run.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Applying 1D CNN to Filter a Single-Sample WGS Callset
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: The simplest form, or architecture, of CNN modeling available in GATK is called
-    *1D* for one-dimensional. That term may seem a little misleading because it takes
-    into account variant context annotations and reference sequence context, all of
-    which most of us would probably not think of as representing a single dimension.
-    Nevertheless, as with much of the machine learning jargon, it might be best to
-    just accept it and move on with your life. If it helps, you can think of the dimensions
-    as if you were visualizing the read data in IGV. 1D is a line, which is the reference.
-    2D is that reference line and also the depth of all the reads.
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'Conveniently, the GATK package includes a precomputed 1D model that is compatible
-    with our tutorial data. To apply it to our callset of interest, we simply feed
-    our VCF to the `CNNScoreVariants` tool, which will calculate a new confidence
-    score called `CNN_1D` for each variant. The precomputed model is used by default
-    unless we explicitly specify a model file on the command line (we demonstrate
-    that usage later in this section):'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE20]'
-  prefs: []
-  type: TYPE_PRE
-- en: 'This produces a new VCF file in which our variants have not yet been filtered,
-    just annotated with the new score as well as sensitivity tranche information.
-    To actually apply a filtering rule, we use the same sensitivity-based logic as
-    VQSR, providing known variant callsets as resources and the desired thresholds
-    to the generalized filtering tool `FilterVariantTranches`:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE21]'
-  prefs: []
-  type: TYPE_PRE
-- en: 'We choose 99.9% and 95.0% for the SNP and indel sensitivity thresholds because
-    those are the same recommended defaults as we encountered in the VQSR filtering
-    section, but remember that the same admonition applies: you should choose these
-    settings based on your experimental goals.'
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'The tool helpfully includes a filtering summary at the end of its run:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE22]'
-  prefs: []
-  type: TYPE_PRE
-- en: 'This command produces the filtered VCF in which variants are annotated with
-    the modeling verdict in the `FILTER` field: `PASS` for variants classified as
-    real and the name of the tranche for variants classified as artifacts. The tool
-    accepts an optional `--invalidate-previous-filters` flag (not used here) that
-    allows us to clear any previously annotated filtering information if desired.
-    This is what the output looks like for the preceding command:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE23]'
-  prefs: []
-  type: TYPE_PRE
-- en: 'If you look at more lines of output, you can find sites like this candidate
-    indel call that has been filtered out by the 1D CNN modeling:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE24]'
-  prefs: []
-  type: TYPE_PRE
-- en: Note
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: You might have noticed that, unlike for the VQSR protocol, we did not need to
-    run the CNN model application and filtering on SNPs and indels separately. Algorithmically,
-    these tools still treat the two variant classes differently, just like the VQSR
-    tools, but they handle this internally for us. This is a deliberate decision on
-    the part of the developers to make the tools easier to use.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Applying 2D CNN to Include Read Data in the Modeling
-  prefs:
-  - PREF_H2
-  type: TYPE_NORMAL
-- en: As noted earlier, the CNN tools are capable of taking in the read data underlying
-    the variant calls that we want to filter. This might seem redundant with the variant
-    context annotations, which are, after all, intended to summarize the salient aspects
-    of the read data in a more compact form. Yet that is one of their main flaws,
-    given that the act of summarizing the information causes us to lose some of the
-    more fine-grained detail in the reads.
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'That puts us at the mercy of two limiting factors: the fidelity of the mathematical
-    formula chosen to summarize the data, and the imagination of the developers who
-    decided which aspects of the data would be useful for filtering purposes. Even
-    though it is arguably not difficult to identify a few heuristics that are bound
-    to play a big role in predicting variant quality for the majority of calls—some
-    form of coverage evaluation, strand orientation bias, and base quality, perhaps—it
-    is much more challenging to identify the subtle effects that will tip the scales
-    in difficult cases. That is a big part of what makes deep learning so appealing
-    for variant filtering; it promises to identify (and quantify!) those effects for
-    us without a ton of up-front analysis.'
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'To include read data in the scoring process (while still using a precomputed
-    model), we provide the `CNNScoreVariants` tool with a bamout produced by `HaplotypeCaller`,
-    and we add the `--tensor-type read_tensor` argument to switch on the 2D model
-    architecture. This will automatically activate the default precomputed 2D model,
-    unless you specify your own on the command line:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE25]'
-  prefs: []
-  type: TYPE_PRE
-- en: Notice that we feed a bamout file (created by `HaplotypeCaller`) to `CNNScoreVariants`
-    when we run it the 2D mode, not just the original read data. We do this because
-    the read alignments must match what `HaplotypeCaller` saw when it made the variant
-    calls. This does mean that you need to add the `-bamout` argument to your initial
-    `HaplotypeCaller` command when you do the variant calling step, which we don’t
-    normally do, so it’s something you should plan for ahead of time.
-  prefs: []
-  type: TYPE_NORMAL
-- en: Note
-  prefs:
-  - PREF_H6
-  type: TYPE_NORMAL
-- en: If you’re using a different variant caller than `HaplotypeCaller` that doesn’t
-    generate a bamout equivalent, this doesn’t apply, and you simply provide the original
-    read data. Keep in mind that if you use another local alignment caller like Platypus,
-    you could run into the problem of calls that don’t quite match the original read
-    mapping.
-  prefs: []
-  type: TYPE_NORMAL
-- en: 'When you run the command, it produces a VCF with a new confidence score called
-    `CNN_2D` annotated to each variant along with tranche information. To apply filtering,
-    we run the `FilterVariantTranches` as before, switching the filtering `info-key`
-    appropriately:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE26]'
-  prefs: []
-  type: TYPE_PRE
-- en: 'The output is similar but not identical to what we produced using the 1D model
-    architecture:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE27]'
-  prefs: []
-  type: TYPE_PRE
-- en: 'And a little farther down, that indel we looked at earlier is still filtered
-    out:'
-  prefs: []
-  type: TYPE_NORMAL
-- en: '[PRE28]'
-  prefs: []
-  type: TYPE_PRE
-- en: If you’d like to inspect these in more detail to compare calls filtered by one
-    but not the other, an easy way is to load the VCFs in IGV as described previously
-    and scroll until you find a difference like the one shown in [Figure 6-16](#different_calls_made_by_1d_and_2d_cnn_m).
-    Note the lighter colors for one of the variant call markers in the `2D_CNN` track;
-    that indicates the call was filtered.
-  prefs: []
-  type: TYPE_NORMAL
-- en: '![Different calls made by 1D and 2D CNN models.](Images/gitc_0616.png)'
+- en: '![XKCD comic on the proliferation of standards.](Images/gitc_0303.png)'
+  id: totrans-76
   prefs: []
   type: TYPE_IMG
-- en: Figure 6-16\. Different calls made by 1D and 2D CNN models.
+- en: 'Figure 3-3\. XKCD comic on the proliferation of standards (source: https://xkcd.com/927).'
+  id: totrans-77
   prefs:
   - PREF_H6
   type: TYPE_NORMAL
-- en: Finally, keep in mind that the model provided by default is tailored to Illumina
-    short read sequencing data from humans. It should be widely applicable also to
-    other organisms sequenced with the same or similar technology, but the further
-    out you go, the less fidelity you’ll get because the precomputed model will not
-    be as good a fit for the reality of your data. At some point, you might be better
-    off generating your own custom model. There is a Python script for training custom
-    models that is available in the GATK repository on GitHub, but the GATK team has
-    not yet developed formal recommendations for how to use it because it is an area
-    of ongoing development. For additional resources, see the [Best Practices documentation](https://oreil.ly/NHY4e).
+- en: In recent years, we have seen some high-profile initiatives such as the Global
+    Alliance GA4GH emerge with the explicit mission of developing common standards
+    and consolidating efforts around a subset of solutions that have interoperability
+    as a core value. For example, the GA4GH Cloud Work Stream has converged on a small
+    set of workflow languages for its driver projects, including CWL, Nextflow, and
+    WDL, which we use in this book. At the same time, given the recognition that no
+    single language is likely to satisfy all needs and preferences, several groups
+    are working to increase interoperability by building support for multiple workflow
+    languages into their workflow management systems. The workflow management system
+    we use in this book, Cromwell, supports both WDL and CWL, and it could be extended
+    to support additional languages in the future.
+  id: totrans-78
   prefs: []
   type: TYPE_NORMAL
-- en: Note
+- en: Workflow Languages
+  id: totrans-79
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: In principle, we could write our workflows in almost any programming language
+    we like; but in practice, some are more amenable than others for describing workflows.
+    Just like natural languages, programming languages also exhibit a fascinating
+    diversity and can be classified in various ways including grammar, mode of execution,
+    and the programming paradigms that they support.
+  id: totrans-80
+  prefs: []
+  type: TYPE_NORMAL
+- en: From a practical standpoint, we begin by making a distinction between all-purpose
+    programming languages, which are intended to be usable for a wide range of applications,
+    and domain-specific languages (DSLs) that are, as the name indicates, specifically
+    designed for a particular domain or activity. The latter are typically preloaded
+    with things like specially formulated data structures (i.e., ways to represent
+    and manipulate data that “understand” the nature of the underlying information)
+    and convenience functions that act as shortcuts; for example, handling domain-specific
+    file formats, applying common processing actions, and so on. As a result, a DSL
+    can be an attractive option if your needs fit well within the intended scope of
+    the language, especially if your computational background is limited, given that
+    the DSL typically enables you to get your work done without having to learn a
+    lot of programming concepts and syntax.
+  id: totrans-81
+  prefs: []
+  type: TYPE_NORMAL
+- en: On the other hand, if your needs are more varied or you are used to having the
+    more expansive toolbox of a general-purpose language at your disposal, you might
+    find yourself uncomfortably constrained by the DSL. In that case, you might prefer
+    to use a general-purpose language, especially one enriched with domain-specific
+    libraries that provide relevant data structures and convenience functions (e.g.,
+    Python with Biopython and related libraries). In fact, using a general-purpose
+    language is more likely to enable you to use the same language for writing the
+    data-processing tasks themselves and for managing the flow of operations, which
+    is how many have traditionally done this kind of work. What we’re seeing now in
+    the field, however, is a move toward separation of description and content, which
+    manifests as increased adoption of DSLs specifically designed to describe workflows
+    as well as of specialized workflow management systems. This evolution is strongly
+    associated with the push for interoperability and portability.
+  id: totrans-82
+  prefs: []
+  type: TYPE_NORMAL
+- en: Popular Pipelining Languages for Genomics
+  id: totrans-83
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'When we look at the cross-section of people who find themselves at the intersection
+    of bioinformatics and genomics, we see a wide range of backgrounds, computational
+    experience, and needs. Some come from a software engineering background and prefer
+    languages that are full featured and highly structured, offering great power at
+    the cost of accessibility. Some come from systems administration and believe every
+    problem can be solved with judicious application of Bash, sed, and awk, the duct
+    tape of the Unix-verse. On the “bio” side of the fence, the more computationally
+    trained tend to feel most at home with analyst favorites like Python and R, which
+    have been gaining ground over old-time classics Perl and MATLAB; some also tend
+    to gravitate toward DSLs. Meanwhile wetlab-trained researchers might find themselves
+    baffled by all of this, on initial contact at least. (Author’s note and disclaimer:
+    Geraldine identifies as one of the initially baffled, having trained as a traditional
+    microbiologist and eventually learned the rudiments of Perl and Python in a desperate
+    bid to escape the wetlab workbench. Spoiler: it worked!)'
+  id: totrans-84
+  prefs: []
+  type: TYPE_NORMAL
+- en: Based on recent polling, some of the languages that are most popular with workflow
+    authors in the genomics space are SnakeMake and Nextflow. Both are noted for their
+    high degree of flexibility and ease of use. Likewise, CWL and WDL are picking
+    up steam because of their focus on portability and computational reproducibility.
+    Of the two, CWL is more frequently preferred by people who have a technical background
+    and enjoy its high level of abstraction and expressiveness. In contrast, WDL is
+    generally considered to be more accessible to a wide audience.
+  id: totrans-85
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'At the end of the day, when it comes to picking a workflow language, we look
+    at four main criteria: what kind of data structures the language supports (i.e.,
+    how we can represent and pass around information), how it enables us to control
+    the flow of operations, how accessible it is to read and write for the intended
+    audience, and how it affects our ability to collaborate with others. Whatever
+    we choose, it’s unlikely that we can satisfy everyone’s requirements. However,
+    if we were to boil all this down to just one recommendation, it would be this:
+    if you want your workflow scripts to be widely used and understood in your area
+    of research, pick a language that is open and accessible enough to newcomers yet
+    scales well enough to the ambitions of the more advanced. And, of course, try
+    to pick a language that you can run across different workflow management systems
+    and computing platforms, because you never know what environment you or your collaborators
+    might find yourselves in next.'
+  id: totrans-86
+  prefs: []
+  type: TYPE_NORMAL
+- en: Workflow Management Systems
+  id: totrans-87
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: Many workflow management systems exist, but in general they follow the same
+    basic pattern. First, the workflow engine reads and interprets the instructions
+    laid out in the workflow script, translating the instruction calls into executable
+    jobs that are associated with a list of inputs (including data and parameters).
+    It then sends out each job with its list of inputs to another program, generally
+    called a *job scheduler*, that is responsible for orchestrating the actual execution
+    of the work on the designated computing environment. Finally, it retrieves any
+    outputs produced when the job is done. Most workflow management systems have some
+    built-in logic for controlling the flow of execution; that is, the order in which
+    they dispatch jobs for execution and for determining how they deal with errors
+    and communicate with the compute infrastructure.
+  id: totrans-88
+  prefs: []
+  type: TYPE_NORMAL
+- en: Another important advance for increasing portability and interoperability of
+    analyses is the adoption of container technology, which we cover in detail in
+    the last section of this chapter. For now, assume that a container is a mechanism
+    that allows you to encapsulate all software requirements for a particular task,
+    from the deepest levels of the operating system (OS) all the way to library imports,
+    environment variables, and accessory configuration files.
+  id: totrans-89
+  prefs: []
+  type: TYPE_NORMAL
+- en: Virtualization and the Cloud
+  id: totrans-90
+  prefs:
+  - PREF_H1
+  type: TYPE_NORMAL
+- en: Up to this point, we have been assuming that whether you’re working with a single
+    computer or a cluster, you’re dealing with “real” physical machines that are each
+    set up with a given OS and software stack, as represented in [Figure 3-4](#representation_of_aright_parenthesis_th)
+    A. Unfortunately, interacting with that kind of system has several disadvantages,
+    especially in a shared environment like an institutional cluster. As an end user,
+    you typically don’t have a choice regarding the OS, environment, and installed
+    software packages. If you need to use something that isn’t available, you can
+    ask an administrator to install it, but they might decline your request or the
+    package you want might not be compatible with existing software. For the system
+    administrators on the other side of the helpdesk, it can be a headache to keep
+    track of what users want, manage versions, and deal with compatibility issues.
+    Such systems take effort to update and scale.
+  id: totrans-91
+  prefs: []
+  type: TYPE_NORMAL
+- en: That is why most modern systems use various degrees of *virtualization*, which
+    is basically a clever bit of abstraction that makes it possible to run multiple
+    different software configurations on top of the same hardware through virtual
+    machines (VMs) and containers as represented in [Figure 3-4](#representation_of_aright_parenthesis_th)
+    B and C respectively. These constructs can be utilized in many contexts, including
+    optionally on local systems (you can even use containers on your laptop!), but
+    they are absolutely essential for cloud infrastructure.
+  id: totrans-92
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Representation of A) The software stack installed on a physical machine;
+    B) a server providing clients with access to individual VMs; C) VMs and containers
+    side by side comparison.](Images/gitc_0304.png)'
+  id: totrans-93
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 3-4\. A) The software stack installed on a physical machine; B) a system
+    hosting multiple VMs; C) a system hosting multiple containers.
+  id: totrans-94
   prefs:
   - PREF_H6
   type: TYPE_NORMAL
-- en: This concludes the exercises for this chapter, so unless you’re moving on to
-    the next chapter right away (what stamina!), remember to stop your VM so you don’t
-    end up paying while you’re not playing.
+- en: VMs and Containers
+  id: totrans-95
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: A VM is an infrastructure-level construct that includes its own OS. The VM sits
+    on top of a virtualization layer that runs on the actual OS of the underlying
+    physical machine(s). In the simplest case, VMs can be run on a single physical
+    machine, with the effect of turning that physical machine into multiple servers
+    that share the underlying resources. However, the most robust systems utilize
+    multiple physical machines to support the layer of VMs, with a complex layer between
+    them that manages the allocation of physical resources. The good news is that
+    for end users, this should not make any difference—all you need to know is that
+    you can interact with a particular VM in isolation without worrying about what
+    it’s sitting on.
+  id: totrans-96
+  prefs: []
+  type: TYPE_NORMAL
+- en: A container is similar in principle to a VM, but it is an application-level
+    construct that is much lighter and more mobile, meaning that it can be deployed
+    easily to different sites, whereas VMs are typically tied to a particular location’s
+    infrastructure. Containers are intended to bundle all the software required to
+    run a particular program or set of programs. This makes it a lot easier to reproduce
+    the same analysis on any infrastructure that supports running the container, from
+    your laptop to a cloud platform, without having to go through the pain of identifying
+    and installing all the software dependencies involved. You can even have multiple
+    containers running on the same machine, so you can easily switch between different
+    environments if you need to run programs that have incompatible system requirements.
+  id: totrans-97
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'If you’re thinking, “These both sound great; which one should I use?” here’s
+    some good news: you can use both in combination, as illustrated in [Figure 3-5](#representation_of_a_system_with_three_v).'
+  id: totrans-98
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![Representation of a system with three VMs, of which two are running containers.](Images/gitc_0305.png)'
+  id: totrans-99
+  prefs: []
+  type: TYPE_IMG
+- en: 'Figure 3-5\. A system with three VMs: the one on the left is running two containers,
+    serving App #1 and App #2; the middle is running a single container, serving App
+    #3; the right is serving App #4 directly (no container).'
+  id: totrans-100
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: There are several registries for sharing and obtaining containers, including
+    [Docker Hub](https://hub.docker.com), [Quay.io](https://quay.io), and [GCR](https://cloud.google.com/container-registry),
+    Google’s general-purpose container registry in GCP. In the registry, the container
+    is packaged as an *image*. Note that this has nothing to do with pictures; here
+    the word *image* is used in the same software-specific way that refers to a special
+    type of file. You know how sometimes when you need to install new software on
+    your computer, the download file is called a *disk image*? That’s because the
+    file you download is in a format that your OS is going to treat as if it were
+    a physical disk on your machine. This is basically the same thing. To use a container,
+    you first tell the Docker program to download, or *pull*, a container image file
+    from a registry—for example, Docker Hub (more on Docker shortly)—and then you
+    tell it to initialize the container, which is conceptually equivalent to booting
+    up a VM. And after the container is running, you can run any software within it
+    that is installed on its system. You can also install additional packages or perform
+    additional configurations as needed. [Figure 3-6](#the_relationship_between_containercomma)
+    illustrates the relationship between container, image, and registry.
+  id: totrans-101
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![The relationship between container, image, and registry.](Images/gitc_0306.png)'
+  id: totrans-102
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 3-6\. The relationship between registry, image, and container.
+  id: totrans-103
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: The most widely used brand of container systems is Docker, produced by the company
+    of the same name. As a result of Docker’s ubiquitousness, people will often say
+    “a docker” instead of “a container,” much like when “xerox” became a replacement
+    for “copy machines” (in the US at least) because of the dominance of the Xerox
+    company. However, `docker` with a lowercase *d* is also the command-line program
+    that you install on your machine to run Docker containers. Similarly, although
+    the action of bundling a software tool, package, or analysis into a Docker container
+    should rightly be called “containerizing,” people often call it “dockerizing,”
+    as in, “I dockerized my Python script.” Dockerizing a tool involves writing a
+    script called a Dockerfile that describes all installations and environment configurations
+    necessary to *build* the Docker image, as demonstrated in [Figure 3-7](#the_process_for_creating_a_docker_conta).
+  id: totrans-104
+  prefs: []
+  type: TYPE_NORMAL
+- en: '![The process for creating a Docker container.](Images/gitc_0307.png)'
+  id: totrans-105
+  prefs: []
+  type: TYPE_IMG
+- en: Figure 3-7\. The process for creating a Docker image.
+  id: totrans-106
+  prefs:
+  - PREF_H6
+  type: TYPE_NORMAL
+- en: As noted earlier, it is possible to use containers in various contexts, including
+    local machines, HPC, and the cloud. One important restriction is that Docker specifically
+    is usually not allowed in shared environments like most institutions’ HPCs, because
+    it requires a very high level of access permissions called *root*. In that kind
+    of setting, system administrators will prefer *Singularity*, an alternative system
+    that achieves the same results. Fortunately, it is possible to run Docker containers
+    within a Singularity system.
+  id: totrans-107
+  prefs: []
+  type: TYPE_NORMAL
+- en: Introducing the Cloud
+  id: totrans-108
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: 'Finally, we get to the topic many of you have been waiting for: what is this
+    cloud thing anyway? The surprisingly easy answer is that the cloud is a bunch
+    of computers that you can rent. In practice, that means that as a user, you can
+    easily launch a VM and select how much RAM, storage, and what CPUs you want. You
+    want a VM with 1 TB of RAM and 32 CPUs for genome assembly? No problem! Most of
+    the VMs in the cloud are running some form of Linux as the OS, which you get to
+    choose when you launch it, and are typically accessed using a remote shell via
+    Secure Shell (SSH).'
+  id: totrans-109
+  prefs: []
+  type: TYPE_NORMAL
+- en: Although some VMs include free storage, this is typically ephemeral and will
+    go away when you stop and start your VM. Instead, use block storage (a persistent
+    device) to store data, scripts, and so on on your VM. You can think of these very
+    much like a USB thumb drive that you can have “plugged” into your VM whenever
+    you like. Even when you terminate your VM, files on block storage will be OK and
+    safely saved. Files can also be stored in object store—think of this more like
+    Google Drive or Dropbox, where files can be read and written by multiple VMs at
+    the same time, but you don’t typically use these as a normal filesystem. Instead,
+    they are more akin to an SSH File Transfer Protocol (SFTP) server for sharing
+    files between VMs, where you transfer files through a utility to and from the
+    object storage system. The final basic component of a cloud is networking. With
+    a virtual networking service, you can control who has access to your VMs, locking
+    it down tightly to ensure that only you (or others you trust) have access.
+  id: totrans-110
+  prefs: []
+  type: TYPE_NORMAL
+- en: Clouds are not fluffy
+  id: totrans-111
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: When you think about clouds, they are fluffy, distant, and elusive, not at all
+    concrete, real things that you can touch, feel, and capture. Unlike their namesake,
+    the cloud infrastructure that most of us use directly (or indirectly) today ultimately
+    is composed of real, physical computers racked up and blinking away in huge datacenters.
+    What makes it different, though, from previous models for compute (and rings true
+    to their name) is its ephemeral nature. Just like clouds coming and going—popping
+    up, dumping their rain, and then blowing away—cloud computing is transient for
+    the end user. The cloud allows you as a researcher, developer, or analyst to request
+    computational infrastructure when you need it, to use it for computing as long
+    as you need it, and then you can release all the resources when you’re done.
+  id: totrans-112
+  prefs: []
+  type: TYPE_NORMAL
+- en: This approach is great because it saves time and money insomuch as you can spin
+    up a lot of resources at once, get your work done, and spin these back down, saving
+    on the costs or running hardware continuously. You don’t need to think too much
+    about where the servers are racked, how they are configured, the health of the
+    hardware, power consumption, or myriad other infrastructure concerns. These are
+    all *abstracted away* from you and are taken care of without you having to think
+    about it too much. What you focus on, instead, is the computational work that
+    you need to perform, the resources you need to do it, and how to most effectively
+    use these resources both from a time and money perspective.
+  id: totrans-113
+  prefs: []
+  type: TYPE_NORMAL
+- en: Evolution of cloud infrastructure and services
+  id: totrans-114
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: Amazon launched the first widely successful commercial public cloud service
+    in 2006, but the basic idea has been around for a long time. Mainframes in the
+    1960s were often rented for use, which made a ton of sense, given the massive
+    costs of buying and operating them. Regardless of the invention of the personal
+    computer, the idea of renting computing infrastructure has cropped up again over
+    and over in the intervening decades. In academic groups and industry, the concept
+    of shared grid computing in the 1990s and 2000s was the more modern equivalent
+    of rented mainframe time. Groups banded together to build cheap but powerful Linux-based
+    HPC clusters that were often centrally managed and allocated out to multiple groups
+    based on some sort of financial split.
+  id: totrans-115
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Today’s public clouds are different, though, in the level of abstraction. Hence,
+    the adoption of the fluffy, amorphous name to reflect the fact that an understanding
+    of the underlying details is not required in order to run large-scale analysis
+    on clouds. When working with a given cloud, you might know the general region
+    of the world that hosts your infrastructure (e.g., North Virginia for AWS `us-east-1`),
+    but many of the details are hidden from you: how many people are using the underlying
+    hardware of your VM, where the datacenter is really located, how the network is
+    set up, and so on. What you do know are key details that affect service cost and
+    job execution time, like how many CPUs are available, how much RAM the VM has,
+    the uptime guarantees of the file storage system, and the regulations the system
+    conforms to.'
+  id: totrans-116
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'There are now many public cloud providers—clouds available to anyone who can
+    pay for the service. The most dominant currently in the Western hemisphere are
+    AWS, Microsoft Azure, and GCP. Each provides a similar mix of services that range
+    from simple VMs rentable by the hour (or minute), file storage services, and networking
+    to more specialized services such as Google’s Cloud TPU service, which allows
+    you to perform accelerated machine learning operations. The important feature,
+    though, is that these resources are provided as services: you use what you need
+    per hour, minute, second, or API call, and are charged accordingly.'
+  id: totrans-117
+  prefs: []
+  type: TYPE_NORMAL
+- en: Pros and cons of the cloud
+  id: totrans-118
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: One of the major advantages that many people point to when discussing the cloud
+    is cost. When building a datacenter, the fixed costs are enormous. You must hire
+    people to rack and maintain physical servers, monitor the network for intrusion,
+    deal with power fluctuations, backups, air conditioning, and so on. Honestly,
+    it is a lot of work! For a datacenter that supports hundreds of users, the costs
+    associated with maintaining the infrastructure can be worth it. But many researchers,
+    developers, analysts, and others are realizing that they don’t need to have hundreds
+    of computers always available and running, just waiting for a task. Instead, it
+    makes a lot more sense to use a cloud environment in which you can do local work
+    on your laptop, without extensive resources, and then, when your analysis is ready,
+    you can scale up to hundreds or thousands of machines. Commercial public clouds
+    allow you to easily *burst* your capacity and do a huge analysis when you need
+    to, as opposed to waiting weeks, months, or even years for a dedicated local cluster
+    to finish your tasks. Likewise, you don’t need to pay for the maintenance of local
+    infrastructure for all the time you spend developing your algorithms and perfecting
+    your analysis locally.
+  id: totrans-119
+  prefs: []
+  type: TYPE_NORMAL
+- en: Finally, as a public cloud user, you have full control of your environment.
+    Need a specific version of Python? Do you have a funky library that compiles only
+    if very specific tool chains are installed? No problem! The cloud lets you have
+    full control over your VMs, something that a shared, local infrastructure would
+    never allow. Even with this control, when they are set up following cloud vendor
+    best practices, public cloud solutions are invariably more secure than on-premises
+    infrastructure because of the vast amount of resources dedicated to security services
+    in these environments and the isolation between users afforded by virtualization.
+  id: totrans-120
+  prefs: []
+  type: TYPE_NORMAL
+- en: Although the public cloud platforms are amazing, powerful, flexible and, in
+    many cases, can be used effectively to save a ton of money in the long run, there
+    are some disadvantages to look out for. If you are looking to always process a
+    fixed number of genomes produced by your sequencing group per month, the public
+    cloud might be less attractive and it would make more sense to build a small local
+    compute environment for this very predictable workload of data produced locally.
+    This is assuming, of course, that you have IT professionals who can act as administrators.
+    Another consideration is expertise. Using the cloud demands a certain level of
+    expertise, and an unsuspecting novice user might accidentally use VMs with weak
+    passwords, set up data storage buckets with weak security, share credentials in
+    an insecure way, or just be totally lost in the process of managing a fleet of
+    Linux VMs. Even these potential downfalls, though, are generally outweighed by
+    the benefits of working flexibly on commercial cloud environments for many people.
+  id: totrans-121
+  prefs: []
+  type: TYPE_NORMAL
+- en: Categories of Research Use Cases for Cloud Services
+  id: totrans-122
+  prefs:
+  - PREF_H2
+  type: TYPE_NORMAL
+- en: The basic components of the cloud described in the previous section are really
+    just the tip of the iceberg. Many more services are available on the main commercial
+    cloud platforms. In fact, there are far too many services, some universal and
+    some unique to a particular cloud, than we can describe here. But let’s take a
+    look at how researchers might use the services or the cloud most commonly. [Table 3-1](#an_overview_of_the_types_of_usage_of_cl)
+    provides an overall summary.
+  id: totrans-123
+  prefs: []
+  type: TYPE_NORMAL
+- en: Table 3-1\. An overview of the types of usage of cloud infrastructure
+  id: totrans-124
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Usage type | Cloud environment | Description | Positives | Negatives |'
+  id: totrans-125
+  prefs: []
+  type: TYPE_TB
+- en: '| --- | --- | --- | --- | --- |'
+  id: totrans-126
+  prefs: []
+  type: TYPE_TB
+- en: '| Lightweight development | Google Cloud Shell | Using a simple-to-launch free
+    VM for editing code and scripts |'
+  id: totrans-127
+  prefs: []
+  type: TYPE_TB
+- en: Free
+  id: totrans-128
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Extremely easy to launch and log in to
+  id: totrans-129
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '|'
+  id: totrans-130
+  prefs: []
+  type: TYPE_NORMAL
+- en: Extremely limited VM
+  id: totrans-131
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '|'
+  id: totrans-132
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Intermediate analysis and development | Single VM | Launching a single VM,
+    logging in, performing development and analysis work |'
+  id: totrans-133
+  prefs: []
+  type: TYPE_TB
+- en: Can control the resources on the VM launched
+  id: totrans-134
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: VMs can be powerful enough to perform realistic analysis
+  id: totrans-135
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '|'
+  id: totrans-136
+  prefs: []
+  type: TYPE_NORMAL
+- en: Launching a VM requires more configuration
+  id: totrans-137
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Larger VMs have increased costs
+  id: totrans-138
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '|'
+  id: totrans-139
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Batch analysis | Multiple VMs via batch system | Using a system like AWS
+    Batch or Google Cloud Pipelines API to launch many VMs and analyze data in parallel
+    |'
+  id: totrans-140
+  prefs: []
+  type: TYPE_TB
+- en: Allows for parallel, scaled-up analysis
+  id: totrans-141
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: Workflow management systems like Cromwell support these with little effort
+  id: totrans-142
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '|'
+  id: totrans-143
+  prefs: []
+  type: TYPE_NORMAL
+- en: Increased costs and complexity
+  id: totrans-144
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '|'
+  id: totrans-145
+  prefs: []
+  type: TYPE_NORMAL
+- en: '| Framework analysis | Multiple VMs via a framework | Using Spark, Hadoop,
+    or other framework for data analysis |'
+  id: totrans-146
+  prefs: []
+  type: TYPE_TB
+- en: These frameworks allow for specialty analysis
+  id: totrans-147
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '|'
+  id: totrans-148
+  prefs: []
+  type: TYPE_NORMAL
+- en: Increased costs and complexity
+  id: totrans-149
+  prefs:
+  - PREF_UL
+  type: TYPE_NORMAL
+- en: '|'
+  id: totrans-150
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Lightweight development: Google Cloud Shell'
+  id: totrans-151
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: The cloud is a fantastic place for software development. Even though many researchers
+    will want to use their own laptops or workstation for development, there can be
+    some really compelling reasons for using the cloud as a primary development environment,
+    especially for testing. On GCP, for example, you can use the Google Cloud Shell
+    from the Google Cloud Console for light development and testing. This is a free
+    (yes, *free*!) VM with one virtual CPU core and 5 GB of storage that you can use
+    just by clicking the terminal icon in the web console. This is a fantastic environment
+    for some light coding and testing; just remember to copy code off of your free
+    instance (using Git, for example) because there are quotas for total runtime per
+    week, and, if you don’t use the service for a while, your 5 GB volume might get
+    cleaned out. Still, this is a great option for quickly getting started with the
+    cloud and performing lightweight tasks. You just need a web browser, and the GCP
+    tools are all preinstalled and configured for you. Many other tools that you might
+    want to work with are already installed as well, including Git and Docker, along
+    with languages like Java and Python. You’ll have a chance to try it out early
+    on in the next chapter.
+  id: totrans-152
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Intermediate development and analysis: single VM'
+  id: totrans-153
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: 'Although the Google Cloud Shell is great for many purposes, easy to use, and
+    free, sometimes you might need a bit more power, especially if you want to test
+    your code or analysis at the next scale up, so you spin up your own dedicated
+    VM. This is perhaps the most commonly used option because of the mix of flexibility
+    and simplicity it offers: you can customize your VM, ensuring you have enough
+    CPU cores, RAM, and local storage to accomplish your goal. Unlike the Google Cloud
+    Shell, you must pay for each hour or minute you run this VM; however, you have
+    full control over the nature of the VM. You might use this for software or algorithm
+    development, testing your analysis approach, or spinning up a small fleet of these
+    VMs to perform analysis on multiple VMs simultaneously. Keep in mind, however,
+    that if you are manually launching these VMs, fewer tools will be preinstalled
+    on them and ready to go for you. That makes using utilities such as Git and Docker
+    very helpful for moving your analysis tasks from VM to VM. You’ll have a chance
+    to use this extensively in [Chapter 4](ch04.xhtml#first_steps_in_the_cloud) through
+    [Chapter 7](ch07.xhtml#gatk_best_practices_for_somatic_variant).'
+  id: totrans-154
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Batch analysis: multiple VMs via batch services'
+  id: totrans-155
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: This approach is really the sweet spot for most users who are aware of it. Although
+    you might use your laptop or Google Cloud Shell for software and script development,
+    and one or more VMs for testing them on appropriately sized hardware, you ultimately
+    don’t want to manually manage VMs if your goal is to scale up your analysis. Imaging
+    running 10,000 genome alignments at the same time; you need systems that can batch
+    up the work, provision VMs automatically for you, and turn the VMs off when your
+    work is done. Batch systems are designed just for this task; Google Cloud, for
+    example, offers the Google Cloud Pipelines API, which you can use to submit a
+    large batch of multiple jobs simultaneously. The service will take care of spinning
+    up numerous VMs to perform your analysis and then automatically clean them up
+    after collecting the output files. This is extremely convenient if you need to
+    perform noninteractive analysis on a ton of samples. You’ll see in [Chapter 8](ch08.xhtml#automating_analysis_execution_with_work)
+    through [Chapter 11](ch11.xhtml#running_many_workflows_conveniently_in) that workflow
+    engines like Cromwell are designed to take advantage of these batch services,
+    which take care of all the details of launching batch jobs. That makes it much
+    easier for you to focus on the details of the analysis you’re performing rather
+    than on the infrastructure involved.
+  id: totrans-156
+  prefs: []
+  type: TYPE_NORMAL
+- en: 'Framework analysis: multiple VMs via framework services'
+  id: totrans-157
+  prefs:
+  - PREF_H3
+  type: TYPE_NORMAL
+- en: The final approach that many researchers will use involves interactive, iterative
+    analysis. In genomics, you can use a batch system to perform large-scale alignment
+    and variant calling but, after you have VCF files for your variants, you might
+    choose to move to a Spark cluster, RStudio, Jupyter Notebook, or any of a large
+    number of analytical environments for subsequent analysis. In [Chapter 12](ch12.xhtml#interactive_analysis_in_jupyter_noteboo),
+    we explore how this works in Terra, which you can use to easily create a custom
+    environment for data processing with a Jupyter interface for interactive analysis,
+    generating plots for your publications, and sharing results with others.
+  id: totrans-158
   prefs: []
   type: TYPE_NORMAL
 - en: Wrap-Up and Next Steps
+  id: totrans-159
   prefs:
   - PREF_H1
   type: TYPE_NORMAL
-- en: You have now successfully worked through the most widely used germline joint
-    variant discovery pipeline and its alternate single-sample form. You have a solid
-    understanding of the overall logic of the pipeline, you’ve applied most of the
-    key steps to real data, and you’ve observed the results for yourself. Next up,
-    we tackle somatic variant discovery, mainly as it applies to cancer research.
-  prefs: []
-  type: TYPE_NORMAL
-- en: First, we go over a few important challenges that affect the design of analytical
-    approaches in cancer genomics. Then, we dive into the pipeline for somatic short
-    variant analysis and work through some exercises to get a firm grasp of the key
-    steps. After that, we branch out into the exploration of somatic copy-number alterations,
-    which involves a very different approach compared to short variant analysis.
-  prefs: []
-  type: TYPE_NORMAL
-- en: ^([1](ch06.xhtml#idm45625633075784-marker)) The full file paths are *gs://genomics-in-the-cloud/v1/data/germline/gvcfs/mother.g.vcf.gz*,
-    *gs://genomics-in-the-cloud/v1/data/germline/gvcfs/mother.g.vcf.gz.tbi*, *gs://genomics-in-the-cloud/v1/data/germline/gvcfs/father.g.vcf.gz*,
-    *gs://genomics-in-the-cloud/v1/data/germline/gvcfs/father.g.vcf.gz.tbi*, *gs://genomics-in-the-cloud/v1/data/germline/gvcfs/son.g.vcf.gz*,
-    and *gs://genomics-in-the-cloud/v1/data/germline/gvcfs/son.g.vcf.gz.tbi*.
+- en: In this chapter, we completed the primer topics, which gave you a background
+    on genomics ([Chapter 2](ch02.xhtml#genomics_in_a_nutshell_a_primer_for_new))
+    and computing technologies (this chapter). We delved into the nitty-gritty details
+    of computer hardware, parallel computing, and virtualization and gave you a glimpse
+    of the power of using workflow execution systems to scale out your analysis on
+    the cloud. In [Chapter 4](ch04.xhtml#first_steps_in_the_cloud), we take our first
+    baby steps to the cloud environment and show you how to get started with your
+    own VMs running in GCP.
+  id: totrans-160
   prefs: []
   type: TYPE_NORMAL
