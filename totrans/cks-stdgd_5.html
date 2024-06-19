@@ -1,0 +1,812 @@
+<html><head></head><body>
+<div id="sbo-rt-content"><section data-pdf-bookmark="Chapter 5. Minimizing Microservice Vulnerabilities" data-type="chapter" epub:type="chapter"><div class="chapter" id="minimize_microservice_vulnerabilities">
+<h1><span class="label">Chapter 5. </span>Minimizing Microservice Vulnerabilities</h1>
+<p><a data-primary="microservice vulnerabilities" data-secondary="about" data-type="indexterm" id="idm46394753447392"/><a data-primary="microservice vulnerabilities" data-type="indexterm" id="mv_ch"/>Application stacks operated in a Kubernetes cluster often follow a microservices architecture. The domain “minimize microservice vulnerabilities” covers governance and enforcement of security settings on the Pod level. We’ll touch on Kubernetes core features, as well as external tooling, that help with minimizing security vulnerabilities. Additionally, we’ll also talk about encrypted network communication between Pods running microservices.</p>
+<p>At a high level, this chapter covers the following concepts:</p>
+<ul>
+<li>
+<p>Setting up appropriate OS-level security domains with security contexts, Pod Security Admission (PSA), and Open Policy Agent Gatekeeper</p>
+</li>
+<li>
+<p>Managing Secrets</p>
+</li>
+<li>
+<p>Using container runtime sandboxes, such as gVisor and Kata Containers</p>
+</li>
+<li>
+<p>Implementing Pod-to-Pod communication encryption via mutual Transport Layer Security (TLS)</p>
+</li>
+</ul>
+<section class="less_space" data-pdf-bookmark="Setting Appropriate OS-Level Security Domains" data-type="sect1"><div class="sect1" id="idm46394753441488">
+<h1>Setting Appropriate OS-Level Security Domains</h1>
+<p><a data-primary="OPA (Open Policy Agent) Gatekeeper" data-secondary="about" data-type="indexterm" id="idm46394753439808"/><a data-primary="Pod Security Admission" data-type="indexterm" id="idm46394753438960"/><a data-primary="microservice vulnerabilities" data-secondary="setting OS-level security domains" data-type="indexterm" id="mv_set"/><a data-primary="security" data-secondary="setting OS-level domains" data-type="indexterm" id="sec_set"/>Both core Kubernetes and the Kubernetes ecosystem offer solutions for defining, enforcing, and governing security settings on the Pod and container level. This section will discuss security contexts, Pod Security Admission, and Open Policy Agent Gatekeeper. You will learn how to apply each of the features and tools using examples that demonstrate their importance to security. Let’s begin by setting up a scenario.</p>
+<section class="less_space pagebreak-before" data-pdf-bookmark="Scenario: An Attacker Misuses root User Container Access" data-type="sect2"><div class="sect2" id="idm46394753435920">
+<h2>Scenario: An Attacker Misuses root User Container Access</h2>
+<p><a data-primary="scenarios" data-secondary="attacker misuses root user container access" data-type="indexterm" id="idm46394753434496"/>By default, containers run with root privileges. A vulnerability in the application could grant an attacker <code>root</code> access to the container. The container’s root user is the same as the root user on the host machine. Not only can the attacker then inspect or modify the application, but they can also potentially install additional tooling that allows the attacker to break out of the container and step into host namespace with <code>root</code> permissions. The attacker could also copy sensitive data from the host’s filesystem to the container. <a data-type="xref" href="#root-user-attacker">Figure 5-1</a> illustrates the scenario.</p>
+<figure><div class="figure" id="root-user-attacker">
+<img alt="ckss 0501" height="529" src="assets/ckss_0501.png" width="966"/>
+<h6><span class="label">Figure 5-1. </span>An attacker misuses root user container access</h6>
+</div></figure>
+<p>For that reason, running a container with the default root user is a bad idea. The next sections will explain how to declare a security context for the container that enforces the use of a non-root user or a specific user and/or group identifier. We’ll also discuss other security context settings relevant to shielding host access from the container.</p>
+</div></section>
+<section data-pdf-bookmark="Understanding Security Contexts" data-type="sect2"><div class="sect2" id="idm46394753429504">
+<h2>Understanding Security Contexts</h2>
+<p><a data-primary="security contexts" data-type="indexterm" id="idm46394753428496"/>Kubernetes, as the container orchestration engine, can apply additional configuration to increase container security. You do so by defining a security context. A security context defines privilege and access control settings for a Pod or a container. The following list provides some examples:</p>
+<ul>
+<li>
+<p>The user ID that should be used to run the Pod and/or container</p>
+</li>
+<li>
+<p>The group ID that should be used for filesystem access</p>
+</li>
+<li>
+<p>Granting a running process inside the container some privileges of the root user but not all of them</p>
+</li>
+</ul>
+<p><a data-primary="PodSecurityContext API" data-type="indexterm" id="idm46394753424112"/><a data-primary="SecurityContext API" data-type="indexterm" id="idm46394753423408"/>The security context is not a Kubernetes primitive. It is modeled as a set of attributes under the directive <code>securityContext</code> within the Pod specification. Security settings defined on the Pod level apply to all containers running in the Pod; however, container-level settings take precedence. For more information on Pod-level security attributes, see the <a href="https://oreil.ly/cJWXA">PodSecurityContext API</a>. Container-level security attributes can be found in the <a href="https://oreil.ly/XOy2a">SecurityContext API</a>.</p>
+</div></section>
+<section data-pdf-bookmark="Enforcing the Usage of a Non-Root User" data-type="sect2"><div class="sect2" id="idm46394753420384">
+<h2>Enforcing the Usage of a Non-Root User</h2>
+<p><a data-primary="non-root users, enforcing usage of" data-type="indexterm" id="idm46394753418512"/>We’ll have a look at a use case to make the functionality more transparent. Some images, like the one for the open source reverse-proxy server nginx, must be run with the <code>root</code> user. Say you wanted to enforce that containers cannot be run as the <code>root</code> user as a means to support a more sensible security strategy. The YAML manifest file <code>container-non-root-user-error.yaml</code> shown in <a data-type="xref" href="#non-root-security-context-error">Example 5-1</a> defines the security configuration specifically for a container. This security context only applies to this very container, but not others if you were to define more.</p>
+<div data-type="example" id="non-root-security-context-error">
+<h5><span class="label">Example 5-1. </span>Enforcing a non-root user on an image that needs to run with the root user</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Pod</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">non-root-error</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">containers</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">nginx:1.23.1</code><code class="w"/>
+<code class="w">    </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">nginx</code><code class="w"/>
+<code class="w">    </code><code class="nt">securityContext</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">runAsNonRoot</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">true</code><code class="w"/></pre></div>
+<p>The container fails during the startup process with the status <code>CreateContainer​Confi⁠gError</code>. A look at the Pod’s event log reveals that the image tries to run with the <code>root</code> user. The configured security context does not allow it:</p>
+<pre data-type="programlisting"><strong>$ kubectl apply -f container-non-root-user-error.yaml</strong>
+pod/non-root-error created
+<strong>$ kubectl get pod non-root-error</strong>
+NAME             READY   STATUS                       RESTARTS   AGE
+non-root-error   0/1     CreateContainerConfigError   0          9s
+<strong>$ kubectl describe pod non-root-error</strong>
+...
+Events:
+  Type     Reason     Age               From               Message
+  ----     ------     ----              ----               -------
+  Normal   Scheduled  24s               default-scheduler  Successfully \
+  assigned default/non-root to minikube
+  Normal   Pulling    24s               kubelet            Pulling image \
+  "nginx:1.23.1"
+  Normal   Pulled     16s               kubelet            Successfully \
+  pulled image "nginx:1.23.1" in 7.775950615s
+  Warning  Failed     4s (x3 over 16s)  kubelet            Error: container \
+  has runAsNonRoot and image will run as root (pod: "non-root-error_default \
+  (6ed9ed71-1002-4dc2-8cb1-3423f86bd144)", container: secured-container)
+  Normal   Pulled     4s (x2 over 16s)  kubelet            Container image \
+  "nginx:1.23.1" already present on machine</pre>
+<p>There are alternative nginx container images available that are not required to run with the <code>root</code> user. An example is <a href="https://oreil.ly/EnvzT">bitnami/nginx</a>. <a data-type="xref" href="#non-root-security-context-success">Example 5-2</a> shows the contents of the file <code>container-non-root-user-success.yaml</code>. The major change in this file is the value assigned to the <code>spec.containers[].image</code> attribute.</p>
+<div data-type="example" id="non-root-security-context-success">
+<h5><span class="label">Example 5-2. </span>Enforcing a non-root user on an image that supports running with a user ID</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Pod</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">non-root-success</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">containers</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">bitnami/nginx:1.23.1</code><code class="w"/>
+<code class="w">    </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">nginx</code><code class="w"/>
+<code class="w">    </code><code class="nt">securityContext</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">runAsNonRoot</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">true</code><code class="w"/></pre></div>
+<p>Starting the container with the <code>runAsNonRoot</code> directive will work just fine. The container transitions into the “Running” status:</p>
+<pre data-type="programlisting"><strong>$ kubectl apply -f container-non-root-user-success.yaml</strong>
+pod/non-root-success created
+<strong>$ kubectl get pod non-root-success</strong>
+NAME               READY   STATUS    RESTARTS   AGE
+non-root-success   1/1     Running   0          7s</pre>
+<p>Let’s quickly check which user ID the container runs with. Shell into the container and run the <code>id</code> command. The output renders the user ID, the group ID, and the IDs of supplemental groups. The image <code>bitnami/nginx</code> sets the user ID to 1001 with the help of an instruction when the container image is built:</p>
+<pre data-type="programlisting"><strong>$ kubectl exec non-root-success -it -- /bin/sh</strong>
+$ id
+uid=1001 gid=0(root) groups=0(root)
+$ exit</pre>
+</div></section>
+<section data-pdf-bookmark="Setting a Specific User and Group ID" data-type="sect2"><div class="sect2" id="idm46394753419728">
+<h2>Setting a Specific User and Group ID</h2>
+<p><a data-primary="group ID, setting" data-type="indexterm" id="idm46394753266992"/><a data-primary="user ID, setting" data-type="indexterm" id="idm46394753266288"/>Many container images do not set an explicit user ID or group ID. Instead of running with the <code>root</code> default user, you can set the desired user ID and group ID to minimize potential security risks. The YAML manifest stored in the file 
+<span class="keep-together"><code>container-user-id.yaml</code></span> shown in <a data-type="xref" href="#user-group-id-security-context-success">Example 5-3</a> sets the user ID to 1000 and the group ID to 3000.</p>
+<div data-type="example" id="user-group-id-security-context-success">
+<h5><span class="label">Example 5-3. </span>Running the container with a specific user and group ID</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Pod</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">user-id</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">containers</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">busybox:1.35.0</code><code class="w"/>
+<code class="w">    </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">busybox</code><code class="w"/>
+<code class="w">    </code><code class="nt">command</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">[</code><code class="s">"sh"</code><code class="p-Indicator">,</code><code class="w"> </code><code class="s">"-c"</code><code class="p-Indicator">,</code><code class="w"> </code><code class="s">"sleep</code><code class="nv"> </code><code class="s">1h"</code><code class="p-Indicator">]</code><code class="w"/>
+<code class="w">    </code><code class="nt">securityContext</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">runAsUser</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">1000</code><code class="w"/>
+<code class="w">      </code><code class="nt">runAsGroup</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">3000</code><code class="w"/></pre></div>
+<p>Creating the Pod will work without issues. The container transitions into the “Running” status:</p>
+<pre data-type="programlisting"><strong>$ kubectl apply -f container-user-id.yaml</strong>
+pod/user-id created
+<strong>$ kubectl get pods user-id</strong>
+NAME      READY   STATUS    RESTARTS   AGE
+user-id   1/1     Running   0          6s</pre>
+<p>You can inspect the user ID and group ID after shelling into the container. The current user is not allowed to create files in the <code>/</code> directory. Creating a file in the <code>/tmp</code> directory will work, as most users have the permissions to write to it:</p>
+<pre data-type="programlisting"><strong>$ kubectl exec user-id -it -- /bin/sh</strong>
+/ $ id
+uid=1000 gid=3000 groups=3000
+/ $ touch test.txt
+touch: test.txt: Permission denied
+/ $ touch /tmp/test.txt
+/ $ exit</pre>
+</div></section>
+<section data-pdf-bookmark="Avoiding Privileged Containers" data-type="sect2"><div class="sect2" id="idm46394753140208">
+<h2>Avoiding Privileged Containers</h2>
+<p><a data-primary="containers" data-secondary="using in privileged mode" data-type="indexterm" id="idm46394753138672"/><a data-primary="privileged containers, avoiding" data-type="indexterm" id="idm46394753137728"/>Kubernetes establishes a clear separation between the container namespace and the host namespace for processes, network, mounts, user ID, and more. You can configure the container’s security context to gain privileges to certain aspects of the host namespace. Assume the following implications when using a privileged container:</p>
+<ul>
+<li>
+<p>Processes within a container almost have the same privileges as processes on the host.</p>
+</li>
+<li>
+<p>The container has access to all devices on the host.</p>
+</li>
+<li>
+<p>The root user in the container has similar privileges to the <code>root</code> user on the host.</p>
+</li>
+<li>
+<p>All directories on the host’s filesystem can be mounted in the container.</p>
+</li>
+<li>
+<p>Kernel settings can be changed, e.g., by using the <a href="https://oreil.ly/YEcOs"><code>sysctl</code> command</a>.</p>
+</li>
+</ul>
+<div data-type="warning" epub:type="warning"><h1>Using containers in privileged mode</h1>
+<p>Configuring a container to use privileged mode should be a rare occasion. Most applications and processes running in a container do not need elevated privileges beyond the container namespace. Should you encounter a Pod that has been configured to use privileged mode, contact the team or developer in charge to clarify, as it will open a loophole for attackers to gain access to the host system.</p>
+</div>
+<p>Let’s compare the behavior of a non-privileged container with one configured to run in privileged mode. First, we are going to set up a regular Pod, as shown in <a data-type="xref" href="#non-privileged-container">Example 5-4</a>. No security context has been set on the Pod or container level.</p>
+<div data-type="example" id="non-privileged-container">
+<h5><span class="label">Example 5-4. </span>A Pod with a container in non-privileged mode</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Pod</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">non-privileged</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">containers</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">busybox:1.35.0</code><code class="w"/>
+<code class="w">    </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">busybox</code><code class="w"/>
+<code class="w">    </code><code class="nt">command</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">[</code><code class="s">"sh"</code><code class="p-Indicator">,</code><code class="w"> </code><code class="s">"-c"</code><code class="p-Indicator">,</code><code class="w"> </code><code class="s">"sleep</code><code class="nv"> </code><code class="s">1h"</code><code class="p-Indicator">]</code><code class="w"/></pre></div>
+<p>Create the Pod and ensure that it comes up properly:</p>
+<pre data-type="programlisting"><strong>$ kubectl apply -f non-privileged.yaml</strong>
+pod/non-privileged created
+<strong>$ kubectl get pods</strong>
+NAME             READY   STATUS    RESTARTS   AGE
+non-privileged   1/1     Running   0          6s</pre>
+<p><a data-primary="sysctl command" data-type="indexterm" id="idm46394753057040"/><a data-primary="commands" data-secondary="sysctl" data-type="indexterm" id="idm46394753056400"/>To demonstrate the isolation between the container namespace and host’s namespace, we’ll try to use the <code>sysctl</code> to change the hostname. As you can see in the output of the command, the container will clearly enforce the restricted privileges:</p>
+<pre data-type="programlisting"><strong>$ kubectl exec non-privileged -it -- /bin/sh</strong>
+/ # sysctl kernel.hostname=test
+sysctl: error setting key 'kernel.hostname': Read-only file system
+/ # exit</pre>
+<p>To make a container privileged, simply assign the value <code>true</code> to the security context attribute <code>privileged</code>. The YAML manifest in <a data-type="xref" href="#privileged-security-context">Example 5-5</a> shows an example.</p>
+<div data-type="example" id="privileged-security-context">
+<h5><span class="label">Example 5-5. </span>A Pod with a container configured to run in privileged mode</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Pod</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">privileged</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">containers</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">busybox:1.35.0</code><code class="w"/>
+<code class="w">    </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">busybox</code><code class="w"/>
+<code class="w">    </code><code class="nt">command</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">[</code><code class="s">"sh"</code><code class="p-Indicator">,</code><code class="w"> </code><code class="s">"-c"</code><code class="p-Indicator">,</code><code class="w"> </code><code class="s">"sleep</code><code class="nv"> </code><code class="s">1h"</code><code class="p-Indicator">]</code><code class="w"/>
+<code class="w">    </code><code class="nt">securityContext</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">privileged</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">true</code><code class="w"/></pre></div>
+<p>Create the Pod as usual. The Pod should transition into the “Running” status:</p>
+<pre data-type="programlisting"><strong>$ kubectl apply -f privileged.yaml</strong>
+pod/privileged created
+<strong>$ kubectl get pod privileged</strong>
+NAME         READY   STATUS    RESTARTS   AGE
+privileged   1/1     Running   0          6s</pre>
+<p>You can now see that the same <code>sysctl</code> will allow you to change the hostname:</p>
+<pre data-type="programlisting"><strong>$ kubectl exec privileged -it -- /bin/sh</strong>
+/ # sysctl kernel.hostname=test
+kernel.hostname = test
+/ # exit</pre>
+<p>A container security context configuration related to privileged mode is the attribute <code>allowPrivilegeEscalation</code>. This attribute will allow a process running the container to gain more privileges than the parent process. The default value for the attribute is <code>false</code>, but if you see the attribute set to <code>true</code>, critically question its use. In most cases, you do not need the functionality.</p>
+</div></section>
+<section data-pdf-bookmark="Scenario: A Developer Doesn’t Follow Pod Security Best Practices" data-type="sect2"><div class="sect2" id="idm46394753139616">
+<h2>Scenario: A Developer Doesn’t Follow Pod Security Best Practices</h2>
+<p><a data-primary="scenarios" data-secondary="developer doesn't follow pod security best practices" data-type="indexterm" id="idm46394752919440"/>It is unfair to assume that developers of all trades and levels of seniority have extensive knowledge of Kubernetes features, especially the ones that apply to security best practices. In the previous section, we learned about the security context and which settings to avoid. Developers are probably unaware of those best practices without continued education and therefore may create Pods that use problematic security settings or none at all. <a data-type="xref" href="#privileged-mode-attacker">Figure 5-2</a> shows a developer creating a Pod in privileged mode enabled by a copied manifest found on the internet. An attacker will gladly use this setup to their advantage.</p>
+<figure><div class="figure" id="privileged-mode-attacker">
+<img alt="ckss 0502" height="533" src="assets/ckss_0502.png" width="1373"/>
+<h6><span class="label">Figure 5-2. </span>A developer creates a Pod with enabled privileged mode</h6>
+</div></figure>
+<p>This is where you, as the Kubernetes security specialist, come in. The Kubernetes ecosystem provides core features and external tooling for enforcing security standards for Pods so that objects without the right configuration will be rejected, or at least audited. The next section explores the Kubernetes core feature named Pod Security Admission.</p>
+</div></section>
+<section data-pdf-bookmark="Understanding Pod Security Admission (PSA)" data-type="sect2"><div class="sect2" id="idm46394752914928">
+<h2>Understanding Pod Security Admission (PSA)</h2>
+<p><a data-primary="PSP (Pod Security Policies)" data-type="indexterm" id="idm46394752892656"/><a data-primary="PSS (Pod Security Standard)" data-type="indexterm" id="idm46394752892048"/><a data-primary="PSA (Pod Security Admission)" data-type="indexterm" id="idm46394752891392"/>Older versions of Kubernetes shipped with a feature called Pod Security Policies (PSP). Pod Security Policies are a concept that help with enforcing security standards for Pod objects. Kubernetes 1.21 deprecated Pod Security Policies and introduced the replacement functionality Pod Security Admission. PSA determines which Pod Security Standard (PSS) to follow. A PSS defines a range of security policies from highly restrictive to highly permissive.</p>
+<p>However, the Kubernetes release 1.25 completely removed Pod Security Policies. You may still see the feature listed in older versions of the CKS curriculum. We will only focus on Pod Security Admission in this book. PSA is enabled by default with Kubernetes 1.23; however, you will need to declare which Pods should adhere to the security standards. All you need to do to opt into the PSA feature is to add a label with a specific format to a namespace. All Pods in that namespace will have to follow the standards declared.</p>
+<p><a data-primary="mode" data-type="indexterm" id="idm46394752889552"/><a data-primary="prefix" data-type="indexterm" id="idm46394752888848"/>The label consists of three parts: a prefix, a mode, and a level. The <em>prefix</em> always uses the hard-coded value <code>pod-security.kubernetes.io</code> followed by a slash. The <em>mode</em> determines the handling of a violation. Finally, the <em>level</em> dictates the degree of security standards to adhere to. An example of such a label could look as follows:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">pod-security.kubernetes.io/enforce</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">restricted</code><code class="w"/></pre>
+<p><a data-primary="audit mode" data-type="indexterm" id="idm46394752881104"/><a data-primary="baseline level" data-type="indexterm" id="idm46394752880496"/><a data-primary="enforce mode" data-type="indexterm" id="idm46394752879888"/><a data-primary="warn mode" data-type="indexterm" id="idm46394752879216"/><a data-primary="privileged level" data-type="indexterm" id="idm46394752861680"/><a data-primary="restricted level" data-type="indexterm" id="idm46394752861008"/>The mode allows for setting three different options, shown in <a data-type="xref" href="#psa-modes">Table 5-1</a>.</p>
+<table id="psa-modes">
+<caption><span class="label">Table 5-1. </span>Pod Security Admission modes</caption>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><p><code>enforce</code></p></td>
+<td><p>Violations will cause the Pod to be rejected.</p></td>
+</tr>
+<tr>
+<td><p><code>audit</code></p></td>
+<td><p>Pod creation will be allowed. Violations will be appended to the audit log.</p></td>
+</tr>
+<tr>
+<td><p><code>warn</code></p></td>
+<td><p>Pod creation will be allowed. Violations will be rendered on the console.</p></td>
+</tr>
+</tbody>
+</table>
+<p><a data-type="xref" href="#psa-levels">Table 5-2</a> illustrates the security policies determined by the level set for the PSA.</p>
+<table id="psa-levels">
+<caption><span class="label">Table 5-2. </span>Pod Security Admission levels</caption>
+<thead>
+<tr>
+<th>Level</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><p><code>privileged</code></p></td>
+<td><p>Fully unrestricted policy.</p></td>
+</tr>
+<tr>
+<td><p><code>baseline</code></p></td>
+<td><p>Minimally restrictive policy that covers crucial standards.</p></td>
+</tr>
+<tr>
+<td><p><code>restricted</code></p></td>
+<td><p>Heavily restricted policy following best practices for hardening Pods from a security perspective.</p></td>
+</tr>
+</tbody>
+</table>
+<p>See the <a href="https://oreil.ly/DYziy">Kubernetes documentation</a> for details on the PSA, including usage examples.</p>
+</div></section>
+<section data-pdf-bookmark="Enforcing Pod Security Standards for a Namespace" data-type="sect2"><div class="sect2" id="idm46394752893504">
+<h2>Enforcing Pod Security Standards for a Namespace</h2>
+<p><a data-primary="namespaces, enforcing pod security standards for" data-type="indexterm" id="idm46394752824160"/><a data-primary="Pods" data-secondary="enforcing security standards for namespaces" data-type="indexterm" id="idm46394752823424"/><a data-primary="security" data-secondary="enforcing standards for namespaces" data-type="indexterm" id="idm46394752822448"/>Let’s apply a PSA to a Pod in the namespace <code>psa</code>. <a data-type="xref" href="#psa-namespace-label">Example 5-6</a> shows the definition of the namespace and the declaration of the relevant label. The label will enforce a PSS on the highest level of security standards.</p>
+<div data-type="example" id="psa-namespace-label">
+<h5><span class="label">Example 5-6. </span>A namespace enforcing the highest level of security standards</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Namespace</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">psa</code><code class="w"/>
+<code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">pod-security.kubernetes.io/enforce</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">restricted</code><code class="w"/></pre></div>
+<p>Make sure that the Pod is created in the namespace <code>psa</code>. <a data-type="xref" href="#psa-violating-pod">Example 5-7</a> shows the YAML manifest for a simple Pod running the <code>busybox</code> image.</p>
+<div data-type="example" id="psa-violating-pod">
+<h5><span class="label">Example 5-7. </span>A Pod violating the PSA restrictions</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Pod</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">busybox</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">psa</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">containers</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">busybox:1.35.0</code><code class="w"/>
+<code class="w">    </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">busybox</code><code class="w"/>
+<code class="w">    </code><code class="nt">command</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">[</code><code class="s">"sh"</code><code class="p-Indicator">,</code><code class="w"> </code><code class="s">"-c"</code><code class="p-Indicator">,</code><code class="w"> </code><code class="s">"sleep</code><code class="nv"> </code><code class="s">1h"</code><code class="p-Indicator">]</code><code class="w"/></pre></div>
+<p>Violations will be rendered in the console upon running a command to create a Pod in the namespace. As you can see in the following, the Pod wasn’t allowed to be created:</p>
+<pre data-type="programlisting"><strong>$ kubectl create -f psa-namespace.yaml</strong>
+namespace/psa created
+<strong>$ kubectl apply -f psa-violating-pod.yaml</strong>
+Error from server (Forbidden): error when creating "psa-pod.yaml": pods \
+"busybox" is forbidden: violates PodSecurity "restricted:latest": \
+allowPrivilegeEscalation != false (container "busybox" must set \
+securityContext.allowPrivilegeEscalation=false), unrestricted \
+capabilities (container "busybox" must set securityContext. \
+capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container \
+"busybox" must set securityContext.runAsNonRoot=true), seccompProfile \
+(pod or container "busybox" must set securityContext.seccompProfile. \
+type to "RuntimeDefault" or "Localhost")
+<strong>$ kubectl get pod -n psa</strong>
+No resources found in psa namespace.</pre>
+<p>You need to configure the Pod’s security context settings to follow the very restrictive standards. <a data-type="xref" href="#psa-non-violating-pod">Example 5-8</a> shows an exemplary Pod definition that does not violate the Pod Security Standard.</p>
+<div data-type="example" id="psa-non-violating-pod">
+<h5><span class="label">Example 5-8. </span>A Pod following the PSS</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Pod</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">busybox</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">psa</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">containers</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">busybox:1.35.0</code><code class="w"/>
+<code class="w">    </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">busybox</code><code class="w"/>
+<code class="w">    </code><code class="nt">command</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">[</code><code class="s">"sh"</code><code class="p-Indicator">,</code><code class="w"> </code><code class="s">"-c"</code><code class="p-Indicator">,</code><code class="w"> </code><code class="s">"sleep</code><code class="nv"> </code><code class="s">1h"</code><code class="p-Indicator">]</code><code class="w"/>
+<code class="w">    </code><code class="nt">securityContext</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">allowPrivilegeEscalation</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">false</code><code class="w"/>
+<code class="w">      </code><code class="nt">capabilities</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="nt">drop</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">[</code><code class="s">"ALL"</code><code class="p-Indicator">]</code><code class="w"/>
+<code class="w">      </code><code class="nt">runAsNonRoot</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">true</code><code class="w"/>
+<code class="w">      </code><code class="nt">runAsUser</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">2000</code><code class="w"/>
+<code class="w">      </code><code class="nt">runAsGroup</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">3000</code><code class="w"/>
+<code class="w">      </code><code class="nt">seccompProfile</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="nt">type</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">RuntimeDefault</code><code class="w"/></pre></div>
+<p>Creating the Pod object now works as expected:</p>
+<pre data-type="programlisting"><strong>$ kubectl apply -f psa-non-violating-pod.yaml</strong>
+pod/busybox created
+<strong>$ kubectl get pod busybox -n psa</strong>
+NAME      READY   STATUS    RESTARTS   AGE
+busybox   1/1     Running   0          10s</pre>
+<p>PSA is a built-in, enabled-by-default feature in Kubernetes version 1.23 or higher. It’s easy to adopt, allows for picking and choosing a suitable policy standard, and can be configured to enforce or just log violations.</p>
+<p>Unfortunately, PSA only applies to Pods with a predescribed set of policies. You cannot write your own custom rules, change the messaging, or mutate the Pod object should it not adhere to a PSS. In the next section, we are going to have a look at tooling that goes beyond the functionality of PSA.</p>
+</div></section>
+<section data-pdf-bookmark="Understanding Open Policy Agent (OPA) and Gatekeeper" data-type="sect2"><div class="sect2" id="opa-gatekeeper">
+<h2>Understanding Open Policy Agent (OPA) and Gatekeeper</h2>
+<p><a data-primary="OPA (Open Policy Agent)" data-type="indexterm" id="idm46394752533568"/><a data-primary="OPA (Open Policy Agent) Gatekeeper" data-secondary="about" data-type="indexterm" id="idm46394752532864"/><a data-primary="Rego" data-type="indexterm" id="idm46394752531952"/><a href="https://oreil.ly/oK9pI">Open Policy Agent (OPA)</a> is an open source, general-purpose policy engine for enforcing rules. OPA is not specific to Kubernetes and can be used across other technology stacks. One of its benefits is the ability to define a policy in a very flexible fashion. You can write your own rules with the help of the query language named <a href="https://oreil.ly/0_mA8">Rego</a>. The validation logic written in Rego determines if the object is accepted or denied.</p>
+<p><a href="https://oreil.ly/AyVjP">Gatekeeper</a> is an extension to Kubernetes that uses OPA. Gatekeeper allows for defining and enforcing custom policies for any kind of Kubernetes API primitive. Therefore, it is far more versatile than PSA but requires more intricate knowledge on how to craft those rules. Gatekeeper gets involved in the <em>admission control</em> stage discussed in <a data-type="xref" href="ch03.xhtml#processing-api-request">“Processing a Request”</a>. The following list of policies tries to give you an impression on what’s possible with Gatekeeper:</p>
+<ul>
+<li>
+<p>Ensuring that all Service objects need to define a label with the key <code>team</code></p>
+</li>
+<li>
+<p>Ensuring that all container images defined by Pods need to be pulled from a company-internal registry</p>
+</li>
+<li>
+<p>Ensuring that Deployments need to control at least three replicas</p>
+</li>
+</ul>
+<p>At the time of writing, Gatekeeper allows for enforcing policies by rejecting object creation if requirements haven’t been met. Future versions of Gatekeeper might also provide a mechanism for mutating an object upon creation. For example, you may want to add specific label key-value pairs for any object created. The mutation would take care of adding those labels automatically.</p>
+</div></section>
+<section data-pdf-bookmark="Installing Gatekeeper" data-type="sect2"><div class="sect2" id="idm46394752523616">
+<h2>Installing Gatekeeper</h2>
+<p><a data-primary="kubectl command" data-type="indexterm" id="idm46394752495344"/><a data-primary="commands" data-secondary="kubectl" data-type="indexterm" id="idm46394752494848"/><a data-primary="OPA (Open Policy Agent) Gatekeeper" data-secondary="installing" data-type="indexterm" id="idm46394752494000"/><a data-primary="installing" data-secondary="Gatekeeper" data-type="indexterm" id="idm46394752493152"/>Installing Gatekeeper is relatively easy. All you need to do is to create a bunch of Kubernetes objects from a YAML manifest provided by the Gatekeeper project. You need to have cluster admin permissions to properly install Gatekeeper. The following command shows the <code>kubectl</code> command used to apply the latest release. For more information, see the <a href="https://oreil.ly/CyZ1c">installation manual</a>:</p>
+<pre data-type="programlisting"><strong>$ kubectl apply -f https://raw.githubusercontent.com/open-policy-agent/</strong>\
+<strong>gatekeeper/master/deploy/gatekeeper.yaml</strong></pre>
+<p>Gatekeeper objects have been installed in the namespace <code>gatekeeper-system</code>. Make sure that all Pods in the namespace transition into the “Running” status before trying to use Gatekeeper:</p>
+<pre data-type="programlisting"><strong>$ kubectl get namespaces</strong>
+NAME                STATUS   AGE
+default             Active   29h
+gatekeeper-system   Active   4s
+...</pre>
+</div></section>
+<section data-pdf-bookmark="Implementing an OPA Policy" data-type="sect2"><div class="sect2" id="idm46394752487600">
+<h2>Implementing an OPA Policy</h2>
+<p>We’ll use a specific use case as an example to demonstrate the moving parts required to define a custom OPA policy. <a data-type="xref" href="ch02.xhtml#network-policies">“Using Network Policies to Restrict Pod-to-Pod Communication”</a> explained how to assign a label to a namespace so that it can be selected from a network policy. At its core, our custom OPA policy will determine that namespaces need to define at least one label with the key <code>app</code> to signify the application hosted by the namespace.</p>
+<p><a data-primary="constraint template" data-type="indexterm" id="idm46394752484368"/><a data-primary="policies (OPA)" data-type="indexterm" id="idm46394752483664"/>Gatekeeper requires us to implement two components for custom policy, the <em>constraint template</em> and the <em>constraint</em>. In a nutshell, the constraint template defines the rules with Rego and describes the schema for the constraint. <a data-type="xref" href="#opa-constraint-template">Example 5-9</a> shows a constraint template definition for enforcing a label assignment.</p>
+<div data-type="example" id="opa-constraint-template">
+<h5><span class="label">Example 5-9. </span>An OPA constraint template requiring the definition of at least a single label</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">templates.gatekeeper.sh/v1</code><code class="w">
+</code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">ConstraintTemplate</code><code class="w">
+</code><code class="nt">metadata</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">k8srequiredlabels</code><code class="w">
+</code><code class="nt">spec</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="nt">crd</code><code class="p">:</code><code class="w">
+</code><code class="w">    </code><code class="nt">spec</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="nt">names</code><code class="p">:</code><code class="w">
+</code><code class="w">        </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">K8sRequiredLabels</code><code class="w"> </code><a class="co" href="#callout_minimizing_microservice_vulnerabilities_CO1-1" id="co_minimizing_microservice_vulnerabilities_CO1-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code class="w">
+</code><code class="w">      </code><code class="nt">validation</code><code class="p">:</code><code class="w">
+</code><code class="w">        </code><code class="nt">openAPIV3Schema</code><code class="p">:</code><code class="w"> </code><a class="co" href="#callout_minimizing_microservice_vulnerabilities_CO1-2" id="co_minimizing_microservice_vulnerabilities_CO1-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a><code class="w">
+</code><code class="w">          </code><code class="nt">type</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">object</code><code class="w">
+</code><code class="w">          </code><code class="nt">properties</code><code class="p">:</code><code class="w">
+</code><code class="w">            </code><code class="nt">labels</code><code class="p">:</code><code class="w">
+</code><code class="w">              </code><code class="nt">type</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">array</code><code class="w">
+</code><code class="w">              </code><code class="nt">items</code><code class="p">:</code><code class="w">
+</code><code class="w">                </code><code class="nt">type</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">string</code><code class="w">
+</code><code class="w">  </code><code class="nt">targets</code><code class="p">:</code><code class="w">
+</code><code class="w">    </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">target</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">admission.k8s.gatekeeper.sh</code><code class="w">
+</code><code class="w">      </code><code class="nt">rego</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">|</code><code class="w"> </code><a class="co" href="#callout_minimizing_microservice_vulnerabilities_CO1-3" id="co_minimizing_microservice_vulnerabilities_CO1-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a><code class="w">
+</code><code class="w">        </code><code class="no">package k8srequiredlabels</code><code class="w">
+</code><code class="w">
+</code><code class="w">        </code><code class="no">violation[{"msg": msg, "details": {"missing_labels": missing}}] {</code><code class="w">
+</code><code class="w">          </code><code class="no">provided := {label | input.review.object.metadata.labels[label]}</code><code class="w">
+</code><code class="w">          </code><code class="no">required := {label | label := input.parameters.labels[_]}</code><code class="w">
+</code><code class="w">          </code><code class="no">missing := required - provided</code><code class="w">
+</code><code class="w">          </code><code class="no">count(missing) &gt; 0</code><code class="w">
+</code><code class="w">          </code><code class="no">msg := sprintf("you must provide labels: %v", [missing])</code><code class="w">
+</code><code class="w">        </code><code class="no">}</code></pre></div>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_minimizing_microservice_vulnerabilities_CO1-1" id="callout_minimizing_microservice_vulnerabilities_CO1-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>Declares the kind to be used by the constraint.</p></dd>
+<dt><a class="co" href="#co_minimizing_microservice_vulnerabilities_CO1-2" id="callout_minimizing_microservice_vulnerabilities_CO1-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a></dt>
+<dd><p>Specifies the validation schema of the constraint. In this case, we allow to pass in a property named <code>labels</code> that captures the required label keys.</p></dd>
+<dt><a class="co" href="#co_minimizing_microservice_vulnerabilities_CO1-3" id="callout_minimizing_microservice_vulnerabilities_CO1-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a></dt>
+<dd><p>Uses Rego to check for the existence of labels and compares them to the list of required keys.</p></dd>
+</dl>
+<p>The constraint is essentially an implementation of the constraint template. It uses the kind defined by the constraint template and populates the data provided by the end user. In <a data-type="xref" href="#opa-constraint">Example 5-10</a>, the kind is <code>K8sRequiredLabels</code>, which we defined in the constraint template. We are matching on namespaces and expect them to define 
+<span class="keep-together">the label</span> with the key <code>app</code>.</p>
+<div data-type="example" id="opa-constraint">
+<h5><span class="label">Example 5-10. </span>An OPA constraint that defines the “data” for the policy</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">constraints.gatekeeper.sh/v1beta1</code><code class="w">
+</code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">K8sRequiredLabels</code><code class="w"> </code><a class="co" href="#callout_minimizing_microservice_vulnerabilities_CO2-1" id="co_minimizing_microservice_vulnerabilities_CO2-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code class="w">
+</code><code class="nt">metadata</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">ns-must-have-app-label-key</code><code class="w">
+</code><code class="nt">spec</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="nt">match</code><code class="p">:</code><code class="w"> </code><a class="co" href="#callout_minimizing_microservice_vulnerabilities_CO2-2" id="co_minimizing_microservice_vulnerabilities_CO2-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a><code class="w">
+</code><code class="w">    </code><code class="nt">kinds</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">apiGroups</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">[</code><code class="s">"</code><code class="s">"</code><code class="p-Indicator">]</code><code class="w">
+</code><code class="w">        </code><code class="nt">kinds</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">[</code><code class="s">"</code><code class="s">Namespace</code><code class="s">"</code><code class="p-Indicator">]</code><code class="w">
+</code><code class="w">  </code><code class="nt">parameters</code><code class="p">:</code><code class="w"> </code><a class="co" href="#callout_minimizing_microservice_vulnerabilities_CO2-3" id="co_minimizing_microservice_vulnerabilities_CO2-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a><code class="w">
+</code><code class="w">    </code><code class="nt">labels</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">[</code><code class="s">"</code><code class="s">app</code><code class="s">"</code><code class="p-Indicator">]</code></pre></div>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_minimizing_microservice_vulnerabilities_CO2-1" id="callout_minimizing_microservice_vulnerabilities_CO2-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>Uses the kind defined by the constraint template.</p></dd>
+<dt><a class="co" href="#co_minimizing_microservice_vulnerabilities_CO2-2" id="callout_minimizing_microservice_vulnerabilities_CO2-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a></dt>
+<dd><p>Defines the API resources the constraint template should apply to.</p></dd>
+<dt><a class="co" href="#co_minimizing_microservice_vulnerabilities_CO2-3" id="callout_minimizing_microservice_vulnerabilities_CO2-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a></dt>
+<dd><p>Declares that the <code>labels</code> property expects the key <code>app</code> to exist.</p></dd>
+</dl>
+<p>With the relevant YAML manifests in place, let’s create the objects for the constraint template and the constraint. Assume that the constraint template was written to the file <code>constraint-template-labels.yaml</code> and the constraint to the file <code>constraint-ns-labels.yaml</code>:</p>
+<pre data-type="programlisting"><strong>$ kubectl apply -f constraint-template-labels.yaml</strong>
+constrainttemplate.templates.gatekeeper.sh/k8srequiredlabels created
+<strong>$ kubectl apply -f constraint-ns-labels.yaml</strong>
+k8srequiredlabels.constraints.gatekeeper.sh/ns-must-have-app-label-key created</pre>
+<p>You can verify the validation behavior with a quick-to-run imperative command. The following command tries to create a new namespace without a label assignment. Gatekeeper will render an error message and prevent the creation of the object:</p>
+<pre data-type="programlisting"><strong>$ kubectl create ns governed-ns</strong>
+Error from server (Forbidden): admission webhook "validation.gatekeeper.sh" \
+denied the request: [ns-must-have-app-label-key] you must provide labels: {"app"}</pre>
+<p>Let’s make sure that we can actually create a namespace with the expected label assignment. <a data-type="xref" href="#namespace-app-label">Example 5-11</a> shows the YAML manifest of such a namespace.</p>
+<div data-type="example" id="namespace-app-label">
+<h5><span class="label">Example 5-11. </span>YAML manifest for namespace with a label assignment</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Namespace</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">app</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">orion</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">governed-ns</code><code class="w"/></pre></div>
+<p>The following command creates the object from the YAML manifest file named <code>namespace-app-label.yaml</code>:</p>
+<pre data-type="programlisting"><strong>$ kubectl apply -f namespace-app-label.yaml</strong>
+namespace/governed-ns created</pre>
+<p><a data-primary="Kyverno" data-type="indexterm" id="idm46394752159504"/><a data-primary="OPA (Open Policy Agent) Gatekeeper" data-secondary="Library" data-type="indexterm" id="idm46394752155776"/><a data-primary="" data-startref="mv_set" data-type="indexterm" id="idm46394752154864"/><a data-primary="" data-startref="sec_set" data-type="indexterm" id="idm46394752153920"/>This simple example demonstrated the usage of OPA Gatekeeper. You can find a lot of other examples in the <a href="https://oreil.ly/1VV5e">OPA Gatekeeper Library</a>. Despite it not being spelled out explicitly in the CKS curriculum, you may also want to check out the project <a href="https://kyverno.io">Kyverno</a>, which recently gained a lot of traction with the Kubernetes community.</p>
+</div></section>
+</div></section>
+<section data-pdf-bookmark="Managing Secrets" data-type="sect1"><div class="sect1" id="idm46394753441024">
+<h1>Managing Secrets</h1>
+<p><a data-primary="microservice vulnerabilities" data-secondary="managing Secrets" data-type="indexterm" id="mv_ms"/><a data-primary="Secrets" data-secondary="managing" data-type="indexterm" id="sec_man"/><a data-primary="Certified Kubernetes Administrator (CKA) Study Guide (Muschko)" data-type="indexterm" id="idm46394752147424"/><a data-primary="Muschko, Benjamin" data-secondary="Certified Kubernetes Administrator (CKA) Study Guide" data-type="indexterm" id="idm46394752146784"/><a data-primary="documentation" data-secondary="Kubernetes" data-type="indexterm" id="idm46394752145872"/>No discussion on security features in Kubernetes would be complete without bringing up the topic of Secrets. I would assume that you are already well familiar with the API primitive Secret to define sensitive data and the different options for consuming it in a Pod. Given that this topic is already part of the CKA exam, I will not reiterate it here. For more information, see the relevant section in the <a class="orm:hideurl" href="https://oreil.ly/cka-study-guide"><em>Certified Kubernetes Administrator (CKA) Study Guide</em></a> or the <a href="https://oreil.ly/1afoc">Kubernetes documentation</a>. I talk about security aspects when consuming ConfigMaps and Secrets in a container in <a data-type="xref" href="ch07.xhtml#configuring-container-configmap-secret">“Configuring a Container with a ConfigMap or Secret”</a>.</p>
+<p>The CKS exam puts a stronger emphasis on more specialized aspects of Secret management. One of those scenarios, which we already touched on, was the handling of a Secret you can assign to a service account. Revisit <a data-type="xref" href="ch03.xhtml#creating-secret-serviceaccount">“Creating a Secret for a service account”</a> to refresh your memory on the topic. As we are not going to discuss all built-in Secret types here, you may want to read up on their purpose and creation in the relevant section of the <a href="https://oreil.ly/YU7Yy">Kubernetes documentation</a>.</p>
+<p>The central location for storing Secrets key-value pairs is etcd. Let’s have a look at potential issues that may arise if an attacker gains access to Kubernetes backing store for cluster data.</p>
+<section data-pdf-bookmark="Scenario: An Attacker Gains Access to the Node Running etcd" data-type="sect2"><div class="sect2" id="idm46394752139920">
+<h2>Scenario: An Attacker Gains Access to the Node Running etcd</h2>
+<p><a data-primary="scenarios" data-secondary="attacker gains access to node running etcd" data-type="indexterm" id="idm46394752138752"/>Where etcd runs is dependent on the <a href="https://oreil.ly/bf5Gt">topology of your Kubernetes cluster</a>. For the purpose of this scenario, we’ll assume that etcd runs on the control plane node. Any data stored in etcd exists in unencrypted form, so access to the control plane node allows for reading Secrets in plain text. <a data-type="xref" href="#etcd-attacker">Figure 5-3</a> shows an attacker gaining access to the control plane node and therefore the unencrypted Secrets in etcd.</p>
+<figure><div class="figure" id="etcd-attacker">
+<img alt="ckss 0503" height="529" src="assets/ckss_0503.png" width="966"/>
+<h6><span class="label">Figure 5-3. </span>An attacker gains access to etcd to read Secrets</h6>
+</div></figure>
+<p><a data-primary="etcdctl command" data-type="indexterm" id="idm46394752105584"/><a data-primary="commands" data-secondary="etcdctl" data-type="indexterm" id="idm46394752104880"/>One way to mitigate the situation is by encrypting the data stored in etcd. Access to etcd, either using <code>etcdctl</code> or by reading the etcd data from the filesystem, would not expose human-readable, sensitive information anymore.</p>
+</div></section>
+<section data-pdf-bookmark="Accessing etcd Data" data-type="sect2"><div class="sect2" id="idm46394752102912">
+<h2>Accessing etcd Data</h2>
+<p><a data-primary="etcd data" data-secondary="accessing" data-type="indexterm" id="idm46394752101536"/>We’ll start by showing how an attacker could read etcd data after being able to log into the control plane node. First, we need to create a Secret object to store in etcd. Use the following imperative command to create an entry:</p>
+<pre data-type="programlisting"><strong>$ kubectl create secret generic app-config --from-literal=password=passwd123</strong>
+secret/app-config created</pre>
+<p>We created a Secret with the key-value pair <code>password=passwd123</code>. Shell into the control plane node using SSH. You can easily use the etcd client tool <code>etcdctl</code> to read an entry from etcd.</p>
+<div data-type="note" epub:type="note"><h1>Using the etcd client tool etcdctl</h1>
+<p>It’s very likely that you do not have <code>etcdctl</code> installed on the control plane node yet. Follow the <a href="https://oreil.ly/wpCkO">installation manual</a> to make the tool available. On Debian Linux, it can be installed with <code>sudo apt install etcd-client</code>. To authenticate against etcd, you will need to provide the mandatory command line options <code>--cacert</code>, <code>--cert</code>, and <code>--key</code>. You can find the corresponding values in the configuration file for the API server usually available at <code>/etc/kubernetes/manifests/kube-apiserver.yaml</code>. The parameters need to start with the prefix <code>--etcd</code>.</p>
+</div>
+<p>The following command uses the mandatory CLI options to read the contents from the Secret object named <code>app-config</code>. The following output displays the file contents in hexadecimal format. While not 100% obvious, you can still identify the key-value pair in plain text from the output:</p>
+<pre data-type="programlisting"><strong>$ sudo ETCDCTL_API=3 etcdctl --cacert=/etc/kubernetes/pki/etcd/ca.crt</strong> \
+<strong>--cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/</strong>\
+<strong>etcd/server.key get /registry/secrets/default/app-config | hexdump -C</strong>
+00000000  2f 72 65 67 69 73 74 72  79 2f 73 65 63 72 65 74  |/registry/secret|
+00000010  73 2f 64 65 66 61 75 6c  74 2f 61 70 70 2d 63 6f  |s/default/app-co|
+00000020  6e 66 69 67 0a 6b 38 73  00 0a 0c 0a 02 76 31 12  |nfig.k8s.....v1.|
+00000030  06 53 65 63 72 65 74 12  d9 01 0a b7 01 0a 0a 61  |.Secret........a|
+00000040  70 70 2d 63 6f 6e 66 69  67 12 00 1a 07 64 65 66  |pp-config....def|
+00000050  61 75 6c 74 22 00 2a 24  36 38 64 65 65 34 34 38  |ault".*$68dee448|
+00000060  2d 34 39 62 37 2d 34 34  32 66 2d 39 62 32 66 2d  |-49b7-442f-9b2f-|
+00000070  33 66 39 62 39 62 32 61  66 66 36 64 32 00 38 00  |3f9b9b2aff6d2.8.|
+00000080  42 08 08 97 f8 a4 9b 06  10 00 7a 00 8a 01 65 0a  |B.........z...e.|
+00000090  0e 6b 75 62 65 63 74 6c  2d 63 72 65 61 74 65 12  |.kubectl-create.|
+000000a0  06 55 70 64 61 74 65 1a  02 76 31 22 08 08 97 f8  |.Update..v1"....|
+000000b0  a4 9b 06 10 00 32 08 46  69 65 6c 64 73 56 31 3a  |.....2.FieldsV1:|
+000000c0  31 0a 2f 7b 22 66 3a 64  61 74 61 22 3a 7b 22 2e  |1./{"f:data":{".|
+000000d0  22 3a 7b 7d 2c 22 66 3a  70 61 73 73 77 6f 72 64  |":{},"f:password|
+000000e0  22 3a 7b 7d 7d 2c 22 66  3a 74 79 70 65 22 3a 7b  |":{}},"f:type":{|
+000000f0  7d 7d 42 00 12 15 0a 08  70 61 73 73 77 6f 72 64  |}}B.....password|
+00000100  12 09 70 61 73 73 77 64  31 32 33 1a 06 4f 70 61  |..passwd123..Opa|
+00000110  71 75 65 1a 00 22 00 0a                           |que.."..|</pre>
+<p>In the next step, we’ll encrypt the Secret stored in etcd and then verify the existing entries with the same command.</p>
+</div></section>
+<section data-pdf-bookmark="Encrypting etcd Data" data-type="sect2"><div class="sect2" id="encrypting-etcd-data">
+<h2>Encrypting etcd Data</h2>
+<p><a data-primary="encrypting" data-secondary="etcd data" data-type="indexterm" id="idm46394752086224"/><a data-primary="etcd data" data-secondary="encrypting" data-type="indexterm" id="idm46394752085248"/>You can control how API data is encrypted in etcd with the help of the command line option <code>--encryption-provider-config</code> provided to the API server process. The value assigned to the parameter needs to point to a configuration file that defines an <code>EncryptionConfiguration</code> object. We’ll first create the configuration file and then configure the API server process to consume it.</p>
+<p>Generate a 32-byte random key and base64-encode it. The value is needed to configure a so-called provider in the encryption configuration:</p>
+<pre data-type="programlisting"><strong>$ head -c 32 /dev/urandom | base64</strong>
+W68xlPT/VXcOSEZJvWeIvkGJnGfQNFpvZYfT9e+ZYuY=</pre>
+<p>Next up, we’ll use the base64-encoded key and assign it to a provider in the encryption configuration, as shown in <a data-type="xref" href="#encryption-configuration">Example 5-12</a>. Save the contents in the file <code>/etc/kubernetes/enc/enc.yaml</code>.</p>
+<div data-type="example" id="encryption-configuration">
+<h5><span class="label">Example 5-12. </span>YAML manifest for encryption configuration</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">apiserver.config.k8s.io/v1</code><code class="w">
+</code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">EncryptionConfiguration</code><code class="w">
+</code><code class="nt">resources</code><code class="p">:</code><code class="w">
+</code><code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">resources</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">secrets</code><code class="w"> </code><a class="co" href="#callout_minimizing_microservice_vulnerabilities_CO3-1" id="co_minimizing_microservice_vulnerabilities_CO3-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a><code class="w">
+</code><code class="w">    </code><code class="nt">providers</code><code class="p">:</code><code class="w">
+</code><code class="w">      </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">aescbc</code><code class="p">:</code><code class="w">
+</code><code class="w">          </code><code class="nt">keys</code><code class="p">:</code><code class="w">
+</code><code class="w">            </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">key1</code><code class="w">
+</code><code class="w">              </code><code class="nt">secret</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">W68xlPT/VXcOSEZJvWeIvkGJnGfQNFpvZYfT9e+ZYuY=</code><code class="w"> </code><a class="co" href="#callout_minimizing_microservice_vulnerabilities_CO3-2" id="co_minimizing_microservice_vulnerabilities_CO3-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a><code class="w">
+</code><code class="w">      </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">identity</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">{</code><code class="p-Indicator">}</code></pre></div>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_minimizing_microservice_vulnerabilities_CO3-1" id="callout_minimizing_microservice_vulnerabilities_CO3-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>Defines the API resource to be encrypted in etcd. We are only encrypting Secrets data here.</p></dd>
+<dt><a class="co" href="#co_minimizing_microservice_vulnerabilities_CO3-2" id="callout_minimizing_microservice_vulnerabilities_CO3-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a></dt>
+<dd><p>The base64-encoded key assigned to an AES-CBC encryption provider.</p></dd>
+</dl>
+<p>Edit the manifest at <code>/etc/kubernetes/manifests/kube-apiserver.yaml</code>, the YAML manifest that defines how to run an API server in a Pod. Add the parameter <code>--encryption-provider-config</code>, and define the Volume and its mountpath for the configuration file as the following shows:</p>
+<pre data-type="programlisting"><strong>$ sudo vim /etc/kubernetes/manifests/kube-apiserver.yaml</strong>
+apiVersion: v1
+kind: Pod
+metadata:
+  annotations:
+    kubeadm.kubernetes.io/kube-apiserver.advertise-address.endpoint: \
+    192.168.56.10:6443
+  creationTimestamp: null
+  labels:
+    component: kube-apiserver
+    tier: control-plane
+  name: kube-apiserver
+  namespace: kube-system
+spec:
+  containers:
+  - command:
+    - kube-apiserver
+    - --encryption-provider-config=/etc/kubernetes/enc/enc.yaml
+    volumeMounts:
+    ...
+    - name: enc
+      mountPath: /etc/kubernetes/enc
+      readonly: true
+  volumes:
+  ...
+  - name: enc
+    hostPath:
+      path: /etc/kubernetes/enc
+      type: DirectoryOrCreate
+...</pre>
+<p>The Pod running the API server should automatically restart. This process may take a couple of minutes. Once fully restarted, you should be able to query for it:</p>
+<pre data-type="programlisting"><strong>$ kubectl get pods -n kube-system</strong>
+NAME                           READY   STATUS    RESTARTS   AGE
+...
+kube-apiserver-control-plane   1/1     Running   0          69s</pre>
+<p>New Secrets will be encrypted automatically. Existing Secrets need to be updated. You can run the following command to perform an update on Secrets across all namespaces. This includes the Secret named <code>app-config</code> in the <code>default</code> namespace:</p>
+<pre data-type="programlisting"><strong>$ kubectl get secrets --all-namespaces -o json | kubectl replace -f -</strong>
+...
+secret/app-config replaced</pre>
+<p><a data-primary="etcdctl command" data-type="indexterm" id="idm46394751973392"/><a data-primary="commands" data-secondary="etcdctl" data-type="indexterm" id="idm46394751972688"/>Running the <code>etcdctl</code> command we used before will reveal that the <code>aescbc</code> provider has been used to encrypt the data. The password value cannot be read in plain text anymore:</p>
+<pre data-type="programlisting"><strong>$ sudo ETCDCTL_API=3 etcdctl --cacert=/etc/kubernetes/pki/etcd/ca.crt</strong> \
+<strong>--cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/</strong>\
+<strong>etcd/server.key get /registry/secrets/default/app-config | hexdump -C</strong>
+00000000  2f 72 65 67 69 73 74 72  79 2f 73 65 63 72 65 74  |/registry/secret|
+00000010  73 2f 64 65 66 61 75 6c  74 2f 61 70 70 2d 63 6f  |s/default/app-co|
+00000020  6e 66 69 67 0a 6b 38 73  3a 65 6e 63 3a 61 65 73  |nfig.k8s:enc:aes|
+00000030  63 62 63 3a 76 31 3a 6b  65 79 31 3a ae 26 e9 c2  |cbc:v1:key1:.&amp;..|
+00000040  7b fd a2 74 30 24 85 61  3c 18 1e 56 00 a1 24 65  |{..t0$.a&lt;..V..$e|
+00000050  52 3c 3f f1 24 43 9f 6d  de 5f b0 84 32 18 84 47  |R&lt;?.$C.m._..2..G|
+00000060  d5 30 e9 64 84 22 f5 d0  0b 6f 02 af db 1d 51 34  |.0.d."...o....Q4|
+00000070  db 57 c8 17 93 ed 9e 00  ea 9a 7b ec 0e 75 0c 49  |.W........{..u.I|
+00000080  6a e9 97 cd 54 d4 ae 6b  b6 cb 65 8a 5d 4c 3c 9c  |j...T..k..e.]L&lt;.|
+00000090  db 9b ed bc ce bf 3c ef  f6 2e cb 6d a2 53 25 49  |......&lt;....m.S%I|
+000000a0  d4 26 c5 4c 18 f3 65 bb  a8 4c 0f 8d 6e be 7b d3  |.&amp;.L..e..L..n.{.|
+000000b0  24 9b a8 09 9c bb a3 f9  53 49 78 86 f5 24 e7 10  |$.......SIx..$..|
+000000c0  ad 05 45 b8 cb 31 bd 38  b6 5c 00 02 b2 a4 62 13  |..E..1.8.\....b.|
+000000d0  d5 82 6b 73 79 97 7e fa  2f 5d 3b 91 a0 21 50 9d  |..ksy.~./];..!P.|
+000000e0  77 1a 32 44 e1 93 9b 9c  be bf 49 d2 f9 dc 56 23  |w.2D......I...V#|
+000000f0  07 a8 ca a5 e3 e7 d1 ae  9c 22 1f 98 b1 63 b8 73  |........."...c.s|
+00000100  66 3f 9f a5 6a 45 60 a7  81 eb 32 e5 42 4d 2b fd  |f?..jE`...2.BM+.|
+00000110  65 6c c2 c7 74 9f 1d 6a  1c 24 32 0e 7a 94 a2 60  |el..t..j.$2.z..`|
+00000120  22 77 58 c9 69 c3 55 72  e8 fb 0b 63 9d 7f 04 31  |"wX.i.Ur...c...1|
+00000130  00 a2 07 76 af 95 4e 03  0a 92 10 b8 bb 1e 89 94  |...v..N.........|
+00000140  45 60 01 45 bf d7 95 df  ff 2e 9e 31 0a           |E`.E.......1.|
+0000014d</pre>
+<p><a data-primary="documentation" data-secondary="Kubernetes" data-type="indexterm" id="idm46394751966864"/><a data-primary="" data-startref="mv_ms" data-type="indexterm" id="idm46394751965888"/><a data-primary="" data-startref="sec_man" data-type="indexterm" id="idm46394751964864"/>For more details on encrypting etcd data, refer to the <a href="https://oreil.ly/uIylK">Kubernetes documentation</a>. There, you will find additional information on other encryption providers, how to rotate the decryption key, and the process to consider for a high-availability (HA) cluster setup.</p>
+</div></section>
+</div></section>
+<section data-pdf-bookmark="Understanding Container Runtime Sandboxes" data-type="sect1"><div class="sect1" id="idm46394751962896">
+<h1>Understanding Container Runtime Sandboxes</h1>
+<p><a data-primary="container runtime sandboxes" data-type="indexterm" id="crs_ab"/><a data-primary="microservice vulnerabilities" data-secondary="container runtime sandboxes" data-type="indexterm" id="mv_crs"/><a data-primary="sandboxes, container runtime" data-type="indexterm" id="sa_cr"/>Containers run in a container runtime isolated from the host environment. The process or application running in the container can interact with the kernel by making syscalls. Now, we can have multiple containers (as controlled by Pods) running on a single Kubernetes cluster node and therefore the same kernel. Under certain conditions, vulnerabilities can lead to a situation where a process running a container can “break out” of its isolated environment and access another container running on the same host machine. A <em>container runtime sandbox</em> runs side-by-side with the regular container runtime but adds an additional layer of security by tightening process isolation.</p>
+<p class="pagebreak-before">There are a couple of use cases where using a container runtime sandbox may make sense. For example, your Kubernetes cluster handles the workload of different customers with the same infrastructure, a so-called multi-tenant environment. Another reason for wanting to rely on stronger container isolation is that you may not trust the process or application running in a container image, as should be the case if you pulled the container image from a public registry and you can’t verify the creator or its runtime behavior.</p>
+<section data-pdf-bookmark="Scenario: An Attacker Gains Access to Another Container" data-type="sect2"><div class="sect2" id="idm46394751957056">
+<h2>Scenario: An Attacker Gains Access to Another Container</h2>
+<p><a data-primary="scenarios" data-secondary="attacker gains access to another container" data-type="indexterm" id="idm46394751955824"/>In this scenario, we are confronted with a developer that pulls a container image from a public registry, as referenced by a Pod. The container has not been scanned for security vulnerabilities. An attacker can push a new tag of the container image executing malicious code. After instantiating a container from the image, the malicious code running in the kernel group of container 1 can access the process running in container 2. As you can see in <a data-type="xref" href="#container-runtime-attacker">Figure 5-4</a>, both containers use the same kernel of the host system.</p>
+<figure><div class="figure" id="container-runtime-attacker">
+<img alt="ckss 0504" height="892" src="assets/ckss_0504.png" width="1232"/>
+<h6><span class="label">Figure 5-4. </span>An attacker gains access to another container</h6>
+</div></figure>
+<p>Generally speaking, it’s not a good idea to blindly trust public container images. One way to ensure that such a container image runs with more isolation is the container runtime sandbox. The next section will introduce you to two implementations, both of which are explicitly mentioned by the curriculum.</p>
+</div></section>
+<section data-pdf-bookmark="Available Container Runtime Sandbox Implementations" data-type="sect2"><div class="sect2" id="idm46394751951056">
+<h2>Available Container Runtime Sandbox Implementations</h2>
+<p><a data-primary="Kata Containers" data-type="indexterm" id="idm46394751949824"/><a data-primary="gVisor" data-secondary="about" data-type="indexterm" id="idm46394751949120"/>In this book, we’ll only want to talk about two container runtime sandbox implementations, <a href="https://katacontainers.io">Kata Containers</a> and <a href="https://gvisor.dev">gVisor</a>. Kata containers achieves container isolation by running them in a lightweight virtual machine. gVisor takes a different approach. It effectively implements a Linux kernel that runs on the host system. Therefore, syscalls are not shared anymore across all containers on the host system.</p>
+<p>A deeper discussion on the feature sets or specific use cases for those container runtime sandbox implementations goes beyond the scope of this book. We’ll simply learn how to use one solution as an example, gVisor, and how to tie it into Kubernetes. Have a look at the talk <a href="https://oreil.ly/PBfEn">“Kata Containers and gVisor: a Quantitative Comparison”</a> for an in-depth comparison.</p>
+</div></section>
+<section data-pdf-bookmark="Installing and Configuring gVisor" data-type="sect2"><div class="sect2" id="idm46394751944880">
+<h2>Installing and Configuring gVisor</h2>
+<p><a data-primary="configuring" data-secondary="gVisor" data-type="indexterm" id="idm46394751943280"/><a data-primary="gVisor" data-secondary="configuring" data-type="indexterm" id="idm46394751942304"/><a data-primary="gVisor" data-secondary="installing" data-type="indexterm" id="idm46394751941360"/><a data-primary="installing" data-secondary="gVisor" data-type="indexterm" id="idm46394751940416"/>The following <a href="https://oreil.ly/MlSET">instructions</a> describe the steps required to install gVisor on Linux using the <code>apt</code> package manager. You will want to repeat those steps on all host machines declared as worker nodes. For the exam, you will not be expected to install gVisor or Kata Containers. You can assume that the container runtime sandbox has already been installed and configured.</p>
+<p>Start by installing the dependencies for gVisor with the following command:</p>
+<pre data-type="programlisting"><strong>$ sudo apt-get update &amp;&amp;</strong> \
+  <strong>sudo apt-get install -y</strong> \
+    <strong>apt-transport-https</strong> \
+    <strong>ca-certificates</strong> \
+    <strong>curl</strong> \
+    <strong>gnupg</strong></pre>
+<p>Next, configure the key used to sign archives and the repository. As you can see in the following commands, gVisor is hosted on Google storage:</p>
+<pre data-type="programlisting"><strong>$ curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor -o /usr/share/</strong>\
+<strong>keyrings/gvisor-archive-keyring.gpg</strong>
+<strong>$ echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/</strong>\
+<strong>gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases</strong> \
+<strong>release main" | sudo tee /etc/apt/sources.list.d/gvisor.list &gt; /dev/null</strong></pre>
+<p><a data-primary="OCI (Open Container Initiative) runtime" data-type="indexterm" id="idm46394751931216"/><a data-primary="runsc" data-type="indexterm" id="idm46394751930448"/>gVisor includes an Open Container Initiative (OCI) runtime called runsc. The runsc runtime integrates with tools like Docker and Kubernetes to run container runtime sandboxes. The following command installs the executable from the repository:</p>
+<pre data-type="programlisting"><strong>$ sudo apt-get update &amp;&amp; sudo apt-get install -y runsc</strong></pre>
+<p class="pagebreak-before">Let’s assume we are using containerd as the container runtime. You need to add some configuration to containerd to make it aware of runsc. You can find similar instructions for other container runtimes in the gVisor documentation:</p>
+<pre data-type="programlisting"><strong>$ cat &lt;&lt;EOF | sudo tee /etc/containerd/config.toml</strong>
+version = 2
+[plugins."io.containerd.runtime.v1.linux"]
+  shim_debug = true
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+  runtime_type = "io.containerd.runc.v2"
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
+  runtime_type = "io.containerd.runsc.v1"
+EOF</pre>
+<p>Finally, restart containerd to let the changes take effect:</p>
+<pre data-type="programlisting"><strong>$ sudo systemctl restart containerd</strong></pre>
+<p>We successfully installed gVisor and can now configure Pods to use it.</p>
+</div></section>
+<section data-pdf-bookmark="Creating and Using a Runtime Class" data-type="sect2"><div class="sect2" id="idm46394751944208">
+<h2>Creating and Using a Runtime Class</h2>
+<p><a data-primary="runtime class, creating" data-type="indexterm" id="idm46394751923568"/>It’s a two-step approach to use a container runtime sandbox in a Pod. First, you need to create a runtime class. A RuntimeClass is a Kubernetes API resource that defines the configuration of the container runtime. <a data-type="xref" href="#gvisor-runtimeclass">Example 5-13</a> shows a YAML manifest of a container runtime that points to runsc as the handler we set in the containerd configuration file earlier.</p>
+<div data-type="example" id="gvisor-runtimeclass">
+<h5><span class="label">Example 5-13. </span>YAML manifest for defining a runtime class using runsc handler</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">node.k8s.io/v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">RuntimeClass</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">gvisor</code><code class="w"/>
+<code class="nt">handler</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">runsc</code><code class="w"/></pre></div>
+<p>We can now reference the runtime class name, <code>gvisor</code>, in the configuration of a Pod. <a data-type="xref" href="#nginx-pod-gvisor">Example 5-14</a> shows a Pod definition that assigns the runtime class using the attribute <code>spec.runtimeClassName</code>.</p>
+<div data-type="example" id="nginx-pod-gvisor">
+<h5><span class="label">Example 5-14. </span>YAML manifest for a Pod using a runtime class</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Pod</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">nginx</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">runtimeClassName</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">gvisor</code><code class="w"/>
+<code class="w">  </code><code class="nt">containers</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">nginx</code><code class="w"/>
+<code class="w">    </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">nginx:1.23.2</code><code class="w"/></pre></div>
+<p>Create the runtime class and Pod object using the <code>apply</code> command:</p>
+<pre data-type="programlisting"><strong>$ kubectl apply -f runtimeclass.yaml</strong>
+runtimeclass.node.k8s.io/gvisor created
+<strong>$ kubectl apply -f pod.yaml</strong>
+pod/nginx created</pre>
+<p><a data-primary="" data-startref="crs_ab" data-type="indexterm" id="idm46394751835760"/><a data-primary="" data-startref="mv_crs" data-type="indexterm" id="idm46394751834784"/><a data-primary="" data-startref="sa_cr" data-type="indexterm" id="idm46394751833840"/>You can verify that the container is running with the container runtime sandbox. Simply execute the <code>dmesg</code> command to examine the kernel ring buffer. The output from the command should mention gVisor, as shown in the following:</p>
+<pre data-type="programlisting"><strong>$ kubectl exec nginx -- dmesg</strong>
+[    0.000000] Starting gVisor...
+[    0.123202] Preparing for the zombie uprising...
+[    0.415862] Rewriting operating system in Javascript...
+[    0.593368] Reading process obituaries...
+[    0.741642] Segmenting fault lines...
+[    0.797360] Daemonizing children...
+[    0.831010] Creating bureaucratic processes...
+[    1.313731] Searching for needles in stacks...
+[    1.455084] Constructing home...
+[    1.834278] Gathering forks...
+[    1.928142] Mounting deweydecimalfs...
+[    2.109973] Setting up VFS...
+[    2.157224] Ready!</pre>
+</div></section>
+</div></section>
+<section data-pdf-bookmark="Understanding Pod-to-Pod Encryption with mTLS" data-type="sect1"><div class="sect1" id="idm46394751831168">
+<h1>Understanding Pod-to-Pod Encryption with mTLS</h1>
+<p><a data-primary="encrypting" data-secondary="Pod-to-Pod" data-type="indexterm" id="idm46394751829792"/><a data-primary="microservice vulnerabilities" data-secondary="Pod-to-Pod encryption with mTLS" data-type="indexterm" id="idm46394751828816"/><a data-primary="mTLS Pod-to-Pod encryption" data-type="indexterm" id="idm46394751827936"/><a data-primary="Pod-to-Pod encryption, with mTLS" data-type="indexterm" id="idm46394751827296"/>In <a data-type="xref" href="ch02.xhtml#network-policies">“Using Network Policies to Restrict Pod-to-Pod Communication”</a>, we talked about Pod-to-Pod communication. One of the big takeaways was that every Pod can talk to any other Pod by targeting its virtual IP address unless you put a more restrictive network policy in place. The communication between two Pods is unencrypted by default.</p>
+<p>TLS provides encryption for network communication, often in conjunction with the HTTP protocol. That’s when we talk about using the HTTPS protocol for calls to web pages from the browser. As part of the authentication process, the client offers its client certificate to the server for proving its identity. The server does not authenticate the client, though.</p>
+<p>When loading a web page, the identity of the client, in this case the browser, usually doesn’t matter. The important part is that the web page proves its identity. Mutual TLS (mTLS) is like TLS, but both sides have to authenticate. This approach has the following benefits. First, you achieve secure communication through encryption. Second, you can verify the client identity. An attacker cannot easily impersonate another Pod.</p>
+<section data-pdf-bookmark="Scenario: An Attacker Listens to the Communication Between &#10;Two Pods" data-type="sect2"><div class="sect2" id="idm46394751776208">
+<h2>Scenario: An Attacker Listens to the Communication Between 
+<span class="keep-together">Two Pods</span></h2>
+<p><a data-primary="scenarios" data-secondary="attacker listens to communication between two pods" data-type="indexterm" id="idm46394751774704"/>An attacker can use the default, unencrypted Pod-to-Pod network communication behavior to their advantage. As you can see in <a data-type="xref" href="#pod-communication-attacker">Figure 5-5</a>, an attacker doesn’t even need to break into a Pod. They can simply listen to the Pod-to-Pod communication by impersonating the sending or the receiving side, extract sensitive information, and then use it for more advanced attack vectors.</p>
+<figure><div class="figure" id="pod-communication-attacker">
+<img alt="ckss 0505" height="299" src="assets/ckss_0505.png" width="1175"/>
+<h6><span class="label">Figure 5-5. </span>An attacker listens to Pod-to-Pod communication</h6>
+</div></figure>
+<p>You can mitigate the situation by setting up mTLS. The next section will briefly touch on the options for making that happen.</p>
+</div></section>
+<section data-pdf-bookmark="Adopting mTLS in Kubernetes" data-type="sect2"><div class="sect2" id="idm46394751770416">
+<h2>Adopting mTLS in Kubernetes</h2>
+<p><a data-primary="Kubernetes" data-secondary="using mTLS in" data-type="indexterm" id="idm46394751769072"/><a data-primary="CA (certificate authority)" data-type="indexterm" id="idm46394751768096"/><a data-primary="CSR (certificate signing request)" data-type="indexterm" id="idm46394751767360"/>The tricky part about implementing mTLS in a Kubernetes cluster is the management of certificates. As you can imagine, we’ll have to deal with a lot of certificates when implementing a microservices architecture. Those certificates are usually generated by an official certificate authority (CA) to ensure that they can be trusted. Requesting a certificate involves sending a certificate signing request (CSR) to the CA. If the CA approves the request, it creates the certificate, then signs and returns it. It’s recommended to assign short lifespans to a certificate before it needs to be re-issued again. That process is called certificate rotation.</p>
+<p><a data-primary="documentation" data-secondary="Kubernetes" data-type="indexterm" id="idm46394751766288"/>It’s somewhat unclear to what degree of detail the CKS exam requires you to understand mTLS. The general process of requesting and approving a certificate is described in the <a href="https://oreil.ly/QvtEQ">Kubernetes documentation</a>.</p>
+<p>In most cases, Kubernetes administrators rely on a Kubernetes service mesh to implement mTLS instead of implementing it manually. A Kubernetes service mesh, such as Linkerd or Istio, is a tool for adding cross-cutting functionality to your cluster, like observability and security.</p>
+<p><a data-primary="Calico" data-type="indexterm" id="idm46394751763520"/><a data-primary="Cilium" data-type="indexterm" id="idm46394751762592"/><a data-primary="WireGuard" data-type="indexterm" id="idm46394751761920"/><a data-primary="VPN (Virtual Private Network)" data-type="indexterm" id="idm46394751761248"/>Another option is to use transparent encryption to ensure that traffic doesn’t go on the wire unencrypted. Some of the popular CNI plugins, such as <a href="https://oreil.ly/XZSpx">Calico</a> and <a href="https://oreil.ly/Qsqq_">Cilium</a>, have added support for <a href="https://www.wireguard.com">WireGuard</a>. WireGuard is an open source, lightweight, and secure Virtual Private Network (VPN) solution that doesn’t require the configuration or management of encryption keys or certificates. Many teams prefer WireGuard over a service mesh as it is easier to manage.</p>
+<p>Services meshes and WireGuard are out of scope for the exam.</p>
+</div></section>
+</div></section>
+<section data-pdf-bookmark="Summary" data-type="sect1"><div class="sect1" id="idm46394751757920">
+<h1>Summary</h1>
+<p>It’s important to enforce security best practices for Pods. In this chapter, we reviewed different options. We looked at security contexts and how they can be defined on the Pod and container level. For example, we can configure a security context for a container to run with a non-root user and prevent the use of privileged mode. It’s usually the responsibility of a developer to define those settings. The Pod Security Admission is a Kubernetes feature that takes Pod security settings one step further. You can centrally configure a Pod such that it needs to adhere to certain security standards. The configured security standard can either be enforced, audited, or just logged to standard output. Gatekeeper is an open source project that implements the functionality of the Open Policy Agent for Kubernetes. Not only can you govern the configuration for Pod objects, you can also apply policies to other kinds of objects during creation time.</p>
+<p>Key-value pairs defined by Secrets are stored in etcd in plain text. You should configure encryption for etcd to ensure that attackers cannot read sensitive data from it. To enable encryption, create a YAML manifest for an EncryptionConfiguration, which you would then pass to the API server process with the command line option <code>--encryption-provider-config</code>.</p>
+<p>Container runtime sandboxes help with isolating processes and applications to a stronger degree than the regular container runtime. The projects Kata Containers and gVisor are implementations of such a container runtime sandbox and can be installed and configured to work with Kubernetes. We tried gVisor. After installing and configuring gVisor, you will need to create a RuntimeClass object that points to runsc. In the Pod configuration, point to the RuntimeClass object by name.</p>
+<p>Pod-to-Pod communication is unencrypted and unauthenticated by default. Mutual TLS makes the process more secure. Pods communicating with one another need to provide certificates to prove their identity. Implementing mTLS for a cluster with hundreds of microservices is a tedious task. Each Pod running a microservice needs to employ an approved certificate from a Client Authority. Services meshes help with adding mTLS as a feature to a Kubernetes cluster.</p>
+</div></section>
+<section data-pdf-bookmark="Exam Essentials" data-type="sect1"><div class="sect1" id="idm46394751754624">
+<h1>Exam Essentials</h1>
+<dl>
+<dt>Practice the use of core Kubernetes features and external tools to govern security settings.</dt>
+<dd>
+<p>In the course of this chapter, we looked at OS-level security settings and how to govern them with different core features and external tooling. You need to understand the different options, their benefits and limitations, and be able to apply them to implement contextual requirements. Practice the use of security contexts, Pod Security Admission, and Open Policy Agent Gatekeeper. The Kubernetes ecosystem offers more tooling in this space. Feel free to explore those on your own to expand your horizon.</p>
+</dd>
+<dt>Understand how etcd manages Secrets data.</dt>
+<dd>
+<p>The CKA exam already covers the workflow of creating and using Secrets to inject sensitive configuration data into Pods. I am assuming that you already know how to do this. Every Secret key-value pair is stored in etcd. Expand your knowledge of Secret management by learning how to encrypt etcd so that an attacker with access to a host running etcd isn’t able to read information in plain text.</p>
+</dd>
+<dt>Know how to configure the use of a container runtime sandbox.</dt>
+<dd>
+<p>Container runtime sandboxes help with adding stricter isolation to containers. You will not be expected to install a container runtime sandbox, such as Kata Containers or gVisor. You do need to understand the process for configuring a container runtime sandbox with the help of a RuntimeClass object and how to assign the RuntimeClass to a Pod by name.</p>
+</dd>
+<dt>Gain awareness of mTLS.</dt>
+<dd>
+<p><a data-primary="" data-startref="mv_ch" data-type="indexterm" id="idm46394751748096"/>Setting up mTLS for all microservices running in a Pod can be extremely tedious due to certificate management. For the exam, understand the general use case for wanting to set up mTLS for Pod-to-Pod communication. You are likely not expected to actually implement it manually, though. Production Kubernetes clusters use services meshes to provide mTLS as a feature.</p>
+</dd>
+</dl>
+</div></section>
+<section data-pdf-bookmark="Sample Exercises" data-type="sect1"><div class="sect1" id="idm46394751746608">
+<h1>Sample Exercises</h1>
+<p><a data-primary="sample exercises" data-secondary="microservice vulnerabilities" data-type="indexterm" id="idm46394751745408"/><a data-primary="microservice vulnerabilities" data-secondary="sample exercises" data-type="indexterm" id="idm46394751744464"/>Solutions to these exercises are available in the <a data-type="xref" href="app01.xhtml#appendix-a">Appendix</a>.</p>
+<ol>
+<li>
+<p>Create a Pod named <code>busybox-security-context</code> with the container image <code>busybox:1.28</code> that runs the command <code>sh -c sleep 1h</code>. Add a Volume of type <code>emptydir</code> and mount it to the path <code>/data/test</code>. Configure a security context with the following attributes: <code>runAsUser: 1000</code>, <code>runAsGroup: 3000</code>, and <code>fsGroup: 2000</code>. Furthermore, set the attribute <code>allowPrivilegeEscalation</code> to <code>false</code>.</p>
+<p>Shell into the container, navigate to the directory <code>/data/test</code>, and create the file named <code>hello.txt</code>. Check the group assigned to the file. What’s the value? Exit out of the container.</p>
+</li>
+<li>
+<p>Create a Pod Security Admission (PSA) rule. In the namespace called <code>audited</code>, create a Pod Security Standard (PSS) with the level <code>baseline</code> that should be rendered to the console.</p>
+<p>Try to create a Pod in the namespace that violates the PSS and produces a message on the console log. You can provide any name, container image, and security configuration you like. Will the Pod be created? What PSA level needs to be configured to prevent the creation of the Pod?</p>
+</li>
+<li>
+<p>Install Gatekeeper on your cluster. Create a Gatekeeper ConstraintTemplate object that defines the minimum and maximum number of replicas controlled by a ReplicaSet. Instantiate a Constraint object that uses the ConstraintTemplate. Set the minimum number of replicas to 3 and the maximum number to 10.</p>
+<p>Create a Deployment object that sets the number of replicas to 15. Gatekeeper should not allow the Deployment, ReplicaSet, and Pods to be created. An error message should be rendered. Try again to create the Deployment object but with a replica number of 7. Verify that all objects have been created successfully.</p>
+</li>
+<li>
+<p>Configure encryption for etcd using the <code>aescbc</code> provider. Create a new Secret object of type <code>Opaque</code>. Provide the key-value pair <code>api-key=YZvkiWUkycvspyGHk3fQRAkt</code>. Query for the value of the Secret using etcdctl. What’s the encrypted value?</p>
+</li>
+<li>
+<p>Navigate to the directory <em>app-a/ch05/gvisor</em> of the checked-out GitHub repository <a href="https://oreil.ly/sImXZ"><em>bmuschko/cks-study-guide</em></a>. Start up the VMs running the cluster using the command <code>vagrant up</code>. The cluster consists of a single control plane node named <code>kube-control-plane</code> and one worker node named <code>kube-worker-1</code>. Once done, shut down the cluster using <code>vagrant destroy -f</code>.</p>
+<p>gVisor has been installed in the VM <code>kube-worker-1</code>. Shell into the VM and create a RuntimeClass object named <code>container-runtime-sandbox</code> with runsc as the handler. Then create a Pod with the name <code>nginx</code> and the container image <code>nginx:1.23.2</code> and assign the RuntimeClass to it.</p>
+<p><em>Prerequisite:</em> This exercise requires the installation of the tools <a href="https://oreil.ly/FiyeH">Vagrant</a> and <a href="https://oreil.ly/WW8IK">
+<span class="keep-together">VirtualBox</span></a>.</p>
+</li>
+</ol>
+<aside data-type="sidebar" epub:type="sidebar"><div class="sidebar" id="idm46394751720144">
+<h1>Interactive Exam Practice</h1>
+<p>Get more hands-on training and test your CKS exam readiness by working through our interactive CKS labs. Each step of the lab must be completed correctly before you can move to the next step. If you get stuck, you can view the solution and learn how to complete the step.</p>
+<p>The following labs cover material from this chapter:</p>
+<ul>
+<li>
+<p><a href="https://learning.oreilly.com/scenarios/configuring-pod-security/9781098149864/">Configuring Pod Security Context Attributes</a></p>
+</li>
+<li>
+<p><a href="https://learning.oreilly.com/scenarios/creating-a-pod/9781098149871/">Creating a Pod Security Admission (PSA) Rule</a></p>
+</li>
+<li>
+<p><a href="https://learning.oreilly.com/scenarios/governing-object-creation/9781098149888/">Governing Object Creation with OPA Gatekeeper</a></p>
+</li>
+<li>
+<p><a href="https://learning.oreilly.com/scenarios/configuring-encryption-for/9781098149895/">Configuring Encryption for etcd Using the Specific Provider</a></p>
+</li>
+<li>
+<p><a href="https://learning.oreilly.com/scenarios/creating-a-secret/9781098149901/">Creating a Secret and Consuming It from a Pod</a></p>
+</li>
+<li>
+<p><a href="https://learning.oreilly.com/scenarios/creating-a-runtimeclass/9781098149918/">Creating a RuntimeClass for gVisor and Using It in a Pod</a></p>
+</li>
+</ul>
+</div></aside>
+</div></section>
+</div></section></div></body></html>

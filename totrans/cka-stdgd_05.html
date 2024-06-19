@@ -1,0 +1,1383 @@
+<html><head></head><body><div id="sbo-rt-content"><section data-type="chapter" epub:type="chapter" data-pdf-bookmark="Chapter 5. Services and Networking"><div class="chapter" id="services_networking">
+<h1><span class="label">Chapter 5. </span>Services and Networking</h1>
+
+
+<p><a data-type="indexterm" data-primary="networking" id="net_ch"/><a data-type="indexterm" data-primary="services" id="ser_ch"/>Applications running in a Kubernetes cluster rarely work in isolation. In the constellation of a microservices architecture, a set of applications running in their corresponding Pods need to work together. Kubernetes enables intracluster Pod-to-Service communication and communication with select Services from outside of the cluster with the help of various networking concepts. This domain of the CKA focuses on Services and networking aspects. You will need to understand the concept of a Service and an Ingress, as well as the cluster configuration that enables network communication.</p>
+
+<p>At a high level, this chapter covers the following concepts:</p>
+
+<ul>
+<li>
+<p>Kubernetes networking basics</p>
+</li>
+<li>
+<p>Connectivity between Pods</p>
+</li>
+<li>
+<p>Services, service types and their endpoints</p>
+</li>
+<li>
+<p>Ingress controller and Ingress</p>
+</li>
+<li>
+<p>Using and configuring CoreDNS</p>
+</li>
+<li>
+<p>Choosing a container network interface (CNI) plugin</p>
+</li>
+</ul>
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Kubernetes Networking Basics"><div class="sect1" id="idm45322718712112">
+<h1>Kubernetes Networking Basics</h1>
+
+<p><a data-type="indexterm" data-primary="networking" data-secondary="Kubernetes basics" id="idm45322718710944"/>Kubernetes is designed as an operating system for managing the complexities of distributed data and computing. Workloads can be scheduled on a set of nodes to distribute the load. The Kubernetes network model enables networking communication and needs to fulfill the following requirements:<a data-type="indexterm" data-primary="container-to-container communication" id="idm45322718709840"/><a data-type="indexterm" data-primary="pod-to-pod communication" id="idm45322718709200"/><a data-type="indexterm" data-primary="node-to-node communication" id="idm45322718708560"/><a data-type="indexterm" data-primary="pod-to-service communication" id="idm45322718707920"/><a data-type="indexterm" data-primary="NAT (Network Address Translation)" id="idm45322718707280"/><a data-type="indexterm" data-primary="IPC (Inter Process Communication) messages" id="idm45322718706592"/></p>
+<ol>
+<li>
+<p><a href="#connectivity_between_containers">Container-to-container communication</a>: Containers running in a Pod often need to communicate with each other. Containers within the same Pods can send Inter Process Communication (IPC) messages, share files, and most often communicate directly through the loopback interface using the <code>localhost</code> hostname. Because each Pod is assigned a unique virtual IP address, each container in the same Pod is given that context and shares the same port space.</p>
+</li>
+<li>
+<p><a href="#connectivity_between_containers">Pod-to-Pod communication</a>: A Pod needs to be able to reach another Pod running on the same or on a different node without Network Address Translation (NAT). Kubernetes assigns a unique IP address to every Pod upon creation from the Pod CIDR range of its node. The IP address is ephemeral and therefore cannot be considered stable over time. Every restart of a Pod leases a new IP address. It’s recommended to use Pod-to-Service communication over Pod-to-Pod communication.</p>
+</li>
+<li>
+<p><a href="#understanding_services">Pod-to-Service communication</a>: Services expose a single, stable DNS name for a set of Pods with the capability of load balancing the requests across the Pods. Traffic to a Service can be received from within the cluster or from the outside.</p>
+</li>
+<li>
+<p>Node-to-node communication: Nodes registered with a cluster can talk to each other. Every node is assigned a node IP address.</p>
+</li>
+
+</ol>
+
+<p>The specification for the Kubernetes networking model is called <a href="#cni_spec_implementation">Container Network Interface (CNI)</a>. Network plugins that implement the CNI specification are widely available and can be configured in a Kubernetes cluster by the administrator.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Connectivity Between Containers"><div class="sect1" id="connectivity_between_containers">
+<h1>Connectivity Between Containers</h1>
+
+<p><a data-type="indexterm" data-primary="Kubernetes Patterns" id="idm45322718696416"/><a data-type="indexterm" data-primary="connectivity" data-secondary="between containers" id="idm45322718695488"/><a data-type="indexterm" data-primary="containers" data-secondary="connectivity between" id="idm45322718694544"/><a data-type="indexterm" data-primary="networking" data-secondary="connectivity between containers" id="idm45322718693600"/>Containers created by a single Pod share the same IP address and port space. Containers can communicate among each other using <code>localhost</code>. That’s especially useful when creating cloud-native applications that require implementing a multi-container pattern, as shown in <a data-type="xref" href="#container_to_container_communication">Figure 5-1</a>. Refer to the book <a class="orm:hideurl" href="https://oreil.ly/RsTJw"><em>Kubernetes Patterns</em></a> (O’Reilly) for more information on common multi-container design patterns.</p>
+
+<figure><div id="container_to_container_communication" class="figure"><div class="border-box"><img src="Images/ckas_0501.png" alt="ckas 0501" width="1162" height="347"/></div><h6><span class="label">Figure 5-1. </span>Container-to-container communication in a Pod</h6></div></figure>
+
+<p>The YAML manifest in <a data-type="xref" href="#multi_container_pod">Example 5-1</a> creates a sidecar container that calls the main application container via <code>localhost</code> on port 80:</p>
+<div id="multi_container_pod" data-type="example">
+<h5><span class="label">Example 5-1. </span>A multi-container Pod</h5>
+
+<pre data-type="programlisting" data-code-language="yaml"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Pod</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">multi-container</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">containers</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">nginx</code><code class="w"/>
+<code class="w">    </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">app</code><code class="w"/>
+<code class="w">    </code><code class="nt">ports</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">containerPort</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">80</code><code class="w"/>
+<code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">curlimages/curl:7.79.1</code><code class="w"/>
+<code class="w">    </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">sidecar</code><code class="w"/>
+<code class="w">    </code><code class="nt">args</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">/bin/sh</code><code class="w"/>
+<code class="w">    </code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">-c</code><code class="w"/>
+<code class="w">    </code><code class="p-Indicator">-</code><code class="w"> </code><code class="s">'while</code><code class="nv"> </code><code class="s">true;</code><code class="nv"> </code><code class="s">do</code><code class="nv"> </code><code class="s">curl</code><code class="nv"> </code><code class="s">localhost:80;</code><code class="nv"> </code><code class="s">sleep</code><code class="nv"> </code><code class="s">5;</code><code class="nv"> </code><code class="s">done;'</code><code class="w"/></pre></div>
+
+<p>Checking the logs of the sidecar container shows that the communication to the main application container was successful:</p>
+
+<pre data-type="programlisting"><strong>$ kubectl create -f pod.yaml</strong>
+pod/multi-container created
+<strong>$ kubectl logs multi-container -c sidecar</strong>
+...
+&lt;!DOCTYPE html&gt;
+&lt;html&gt;
+&lt;head&gt;
+&lt;title&gt;Welcome to nginx!&lt;/title&gt;
+...</pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Connectivity Between Pods"><div class="sect1" id="connectivity_between_pods">
+<h1>Connectivity Between Pods</h1>
+
+<p><a data-type="indexterm" data-primary="commands" data-secondary="get pods" id="idm45322718571840"/><a data-type="indexterm" data-primary="get pods command" id="idm45322718570640"/><a data-type="indexterm" data-primary="connectivity" data-secondary="between Pods" id="idm45322718569968"/><a data-type="indexterm" data-primary="Pods" data-secondary="connectivity between" id="idm45322718569024"/><a data-type="indexterm" data-primary="networking" data-secondary="connectivity between Pods" id="idm45322718568080"/>Every Pod is assigned an IP address upon creation. You can inspect a Pod’s IP address by using the <code>-o wide</code> command-line option for the <code>get pods</code> command or by describing the Pod. The IP address of the Pod in the following console output is <code>172.17.0.4</code>:</p>
+
+<pre data-type="programlisting"><strong>$ kubectl run nginx --image=nginx --port=80</strong>
+pod/nginx created
+<strong>$ kubectl get pod nginx -o wide</strong>
+NAME    READY   STATUS    RESTARTS   AGE   IP           NODE       \
+NOMINATED NODE   READINESS GATES
+nginx   1/1     Running   0          37s   172.17.0.4   minikube   \
+&lt;none&gt;           &lt;none&gt;
+<strong>$ kubectl get pod nginx -o yaml</strong>
+...
+status:
+  podIP: 172.17.0.4
+...</pre>
+
+<p>The IP address assigned to a Pod is unique across all nodes and namespaces. This is achieved by assigning a dedicated subnet to each node when registering it. When creating a new Pod on a node, the IP address is leased from the assigned subnet. This is handled by the networking lifecycle manager kube-proxy along with the DNS service and the CNI. The following command queries the assigned subnet via the attribute <code>spec.podCIDR</code> from the node named <code>minikube</code>:</p>
+
+<pre data-type="programlisting"><strong>$ kubectl get nodes</strong>
+NAME       STATUS   ROLES                  AGE   VERSION
+minikube   Ready    control-plane,master   42d   v1.21.2
+<strong>$ kubectl get nodes minikube -o json | jq .spec.podCIDR</strong>
+"172.17.0.0/24"</pre>
+
+<p>Pods on a node can communicate with all other Pods running on any other node of the cluster. <a data-type="xref" href="#pod_to_pod_communication">Figure 5-2</a> illustrates the use case.</p>
+
+<figure><div id="pod_to_pod_communication" class="figure"><div class="border-box"><img src="Images/ckas_0502.png" alt="ckas 0502" width="1312" height="547"/></div><h6><span class="label">Figure 5-2. </span>Pod-to-Pod communication</h6></div></figure>
+
+<p>You can easily verify the behavior by creating a temporary Pod that calls the IP address of another Pod using the command-line tool <code>curl</code> or <code>wget</code>:</p>
+<pre data-type="programlisting">
+<strong>$ kubectl run busybox --image=busybox --rm -it --restart=Never</strong> \
+  <strong>-- wget 172.17.0.4:80</strong>
+Connecting to 172.17.0.4:80 (172.17.0.4:80)
+saving to 'index.html'
+index.html           100% |********************************|   615  0:00:00 ETA
+'index.html' saved
+pod "busybox" deleted
+</pre>
+
+<p class="pagebreak-before">It’s important to understand that the IP address is not considered stable over time. A Pod restart leases a new IP address. Building a microservices architecture, where each of the applications runs in its own Pod with the need to communicate between each other with a stable network interface, requires a different concept, the Service.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Understanding Services"><div class="sect1" id="understanding_services">
+<h1>Understanding Services</h1>
+
+<p><a data-type="indexterm" data-primary="services" data-secondary="about" id="idm45322718524208"/>In a nutshell, Services provide discoverable names and load balancing to a set of Pods. The Services and Pods remain agnostic from IP addresses with the help of the Kubernetes DNS control-plane component. Similar to a Deployment, the Service determines the Pods it works on with the help of label selection.</p>
+
+<p><a data-type="xref" href="#service_traffic_routing">Figure 5-3</a> illustrates the functionality. Pod 1 receives traffic as its assigned labels match with the label selection defined in the Service. Pod 2 does not receive traffic as it defines nonmatching labels. Note that it is possible to create a Service without a label selector for less-common scenarios. Refer to the relevant <a href="https://oreil.ly/lCzAa">Kubernetes documentation</a> for more information.</p>
+
+<figure><div id="service_traffic_routing" class="figure"><div class="border-box"><img src="Images/ckas_0503.png" alt="ckas 0503" width="1247" height="691"/></div><h6><span class="label">Figure 5-3. </span>Service traffic routing based on label selection</h6></div></figure>
+
+<p>Services are a complementary concept to Deployments. Services route network traffic to a set of Pods, and Deployments manage a set of Pods, the replicas. While you can use both concepts in isolation, it is recommended to use Deployments and Services together. The primary reason is the ability to scale the number of replicas and at the same time expose an endpoint to control network traffic.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Service Types"><div class="sect1" id="idm45322718518784">
+<h1>Service Types</h1>
+
+<p><a data-type="indexterm" data-primary="services" data-secondary="types of" id="idm45322718517584"/>Every Service needs to define a type. <a data-type="xref" href="#service_types">Table 5-1</a> lists the Service types relevant to the CKA exam.</p>
+<table id="service_types">
+<caption><span class="label">Table 5-1. </span>Service types</caption>
+<thead>
+<tr>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><p><code>ClusterIP</code></p></td>
+<td><p>Exposes the Service on a cluster-internal IP. Only reachable from within the cluster.</p></td>
+</tr>
+<tr>
+<td><p><code>NodePort</code></p></td>
+<td><p>Exposes the Service on each node’s IP address at a static port. Accessible from outside of the cluster.</p></td>
+</tr>
+<tr>
+<td><p><code>LoadBalancer</code></p></td>
+<td><p>Exposes the Service externally using a cloud provider’s load balancer.</p></td>
+</tr>
+</tbody>
+</table>
+
+<p>Other Service types can be defined; however, we’ll not address them in this book as they are out of scope for the exam. For more information, refer to the <a href="https://oreil.ly/3jzod">Kubernetes documentation</a>.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Creating Services"><div class="sect1" id="idm45322718505520">
+<h1>Creating Services</h1>
+
+<p><a data-type="indexterm" data-primary="services" data-secondary="creating" id="idm45322718503648"/>You can create Services in a variety of ways, some of which are more conducive to the CKA exam as they provide a fast turnaround. Let’s discuss the imperative approach first.</p>
+
+<p>A Service needs to select a Pod by a matching label. The Pod created by the following <code>run</code> command is called <code>echoserver</code>, which exposes the application on the container port 8080. Internally, it automatically assigns the label key-value pair <code>run: echoserver</code> to the object:</p>
+
+<pre data-type="programlisting"><strong>$ kubectl run echoserver --image=k8s.gcr.io/echoserver:1.10 --restart=Never</strong> \
+  <strong>--port=8080</strong>
+pod/echoserver created</pre>
+
+<p><a data-type="indexterm" data-primary="create service command" id="idm45322718498944"/><a data-type="indexterm" data-primary="commands" data-secondary="create service" id="idm45322718498240"/>The <code>create service</code> command creates the corresponding Service object. You need to provide the Service type as a mandatory argument. Here we are using the type <code>clusterip</code>. The command-line option <code>--tcp</code> specifies the port mapping, port 80 exposed by the Service for incoming network traffic and port 8080, which targets the container port exposed by the Pod:</p>
+
+<pre data-type="programlisting"><strong>$ kubectl create service clusterip echoserver --tcp=80:8080</strong>
+service/echoserver created</pre>
+
+<p><a data-type="indexterm" data-primary="run command" id="idm45322718494432"/><a data-type="indexterm" data-primary="commands" data-secondary="run" id="idm45322718493728"/>An even faster workflow of creating a Pod and Service together can be achieved with the option <code>--expose</code> for the <code>run</code> command. The following command creates both objects in one swoop while creating the proper label selection. This command-line option is a good choice during the CKA to save time if you were asked to create a Pod and a Service:</p>
+
+<pre data-type="programlisting"><strong>$ kubectl run echoserver --image=k8s.gcr.io/echoserver:1.10 --restart=Never</strong> \
+  <strong>--port=8080 --expose</strong>
+service/echoserver created
+pod/echoserver created</pre>
+
+<p>It’s actually more common to use a Deployment and Service that work together. The following set of commands creates a Deployment with five replicas and then uses the <code>expose deployment</code> command to create the Service. The port mapping can be provided with the options <code>--port</code> and <code>--target-port</code>:</p>
+
+<pre data-type="programlisting"><strong>$ kubectl create deployment echoserver --image=k8s.gcr.io/echoserver:1.10</strong> \
+  <strong>--replicas=5</strong>
+deployment.apps/echoserver created
+<strong>$ kubectl expose deployment echoserver --port=80 --target-port=8080</strong>
+service/echoserver exposed</pre>
+
+<p><a data-type="xref" href="#service_manifest">Example 5-2</a> shows the representation of a Service in the form of a YAML manifest. The Service declares the key-value <code>app: echoserver</code> for label selection and defines the port mapping 80 to 8080.</p>
+<div id="service_manifest" data-type="example">
+<h5><span class="label">Example 5-2. </span>A Service defined by a YAML manifest</h5>
+
+<pre data-type="programlisting" data-code-language="yaml"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Service</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">echoserver</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">type</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">ClusterIP</code><code class="w"/>
+<code class="w">  </code><code class="nt">selector</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">app</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">echoserver</code><code class="w"/>
+<code class="w">  </code><code class="nt">ports</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">port</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">80</code><code class="w"/>
+<code class="w">    </code><code class="nt">targetPort</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">8080</code><code class="w"/></pre></div>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Listing Services"><div class="sect1" id="idm45322718504896">
+<h1>Listing Services</h1>
+
+<p><a data-type="indexterm" data-primary="services" data-secondary="listing" id="idm45322718443872"/>Listing all Services presents a table view that includes the Service type, the cluster IP address, and the incoming port. Here, you can see the output for the <code>echoserver</code> Pod we created earlier:</p>
+
+<pre data-type="programlisting"><strong>$ kubectl get services</strong>
+NAME         TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)   AGE
+echoserver   ClusterIP   10.109.241.68   &lt;none&gt;        80/TCP    6s</pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" class="less_space pagebreak-before" data-pdf-bookmark="Rendering Service Details"><div class="sect1" id="idm45322718441056">
+<h1>Rendering Service Details</h1>
+
+<p><a data-type="indexterm" data-primary="services" data-secondary="rendering details of" id="idm45322718439136"/>You may want to drill into the details of a Service for troubleshooting purposes. That might be the case if the incoming traffic to a Service isn’t routed properly to the set of Pods you expect to handle the workload.</p>
+
+<p><a data-type="indexterm" data-primary="describe command" id="idm45322718437776"/><a data-type="indexterm" data-primary="commands" data-secondary="describe" id="idm45322718437072"/>The <code>describe</code> command renders valuable information about the configuration of a Service. The configuration relevant to troubleshooting a Service is the value of the fields Selector, IP, Port, TargetPort, and Endpoints.</p>
+
+<p>Take a look at the output of the following <code>describe</code> command. It’s the details for a Service created for five Pods controlled by a Deployment. The Endpoints attribute lists a range of endpoints, one for each of the Pods:</p>
+
+<pre data-type="programlisting"><strong>$ kubectl describe service echoserver</strong>
+Name:              echoserver
+Namespace:         default
+Labels:            app=echoserver
+Annotations:       &lt;none&gt;
+Selector:          app=echoserver
+Type:              ClusterIP
+IP Family Policy:  SingleStack
+IP Families:       IPv4
+IP:                10.109.241.68
+IPs:               10.109.241.68
+Port:              &lt;unset&gt;  80/TCP
+TargetPort:        8080/TCP
+Endpoints:         172.17.0.4:8080,172.17.0.5:8080,172.17.0.7:8080 + 2 more...
+Session Affinity:  None
+Events:            &lt;none&gt;</pre>
+
+<p>Kubernetes represents endpoints by a dedicated resource that you can query for. The endpoint object is created at the same time you create the Service object. The following command lists the endpoint for the Service named <code>echoserver</code>:</p>
+
+<pre data-type="programlisting"><strong>$ kubectl get endpoints echoserver</strong>
+NAME         ENDPOINTS                                                     AGE
+echoserver   172.17.0.4:8080,172.17.0.5:8080,172.17.0.7:8080 + 2 more...   8m5s</pre>
+
+<p>The details of the endpoint give away the full list of IP address and port 
+<span class="keep-together">combinations:</span></p>
+
+<pre data-type="programlisting"><strong>$ kubectl describe endpoint echoserver</strong>
+Name:         echoserver
+Namespace:    default
+Labels:       app=echoserver
+Annotations:  endpoints.kubernetes.io/last-change-trigger-time: \
+              2021-11-15T19:09:04Z
+Subsets:
+  Addresses:          172.17.0.4,172.17.0.5,172.17.0.7,172.17.0.8,172.17.0.9
+  NotReadyAddresses:  &lt;none&gt;
+  Ports:
+    Name     Port  Protocol
+    ----     ----  --------
+    &lt;unset&gt;  8080  TCP
+
+Events:  &lt;none&gt;</pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Port Mapping"><div class="sect1" id="idm45322718440592">
+<h1>Port Mapping</h1>
+
+<p><a data-type="indexterm" data-primary="services" data-secondary="port mapping" id="idm45322718379680"/><a data-type="indexterm" data-primary="port mapping" id="idm45322718378832"/>A Service selects the set of Pods to forward traffic to by the assigned labels. Successful routing of network traffic also depends on the proper port mapping. In the previous sections, we created different Services and assigned ports to them. Here, we’ll want to revisit the port mapping by making its moving parts more transparent.</p>
+
+<p><a data-type="xref" href="#service_port_mapping">Figure 5-4</a> shows a Service that accepts incoming traffic on port 80. That’s the port defined by the attribute <code>spec.ports[].port</code> in the manifest. Any incoming traffic is then routed toward the target port, represented by <code>spec.ports[].targetPort</code>. The target port is the same port as defined by the container running inside the label-selected Pod. In this case, that’s port 8080.</p>
+
+<figure><div id="service_port_mapping" class="figure"><div class="border-box"><img src="Images/ckas_0504.png" alt="ckas 0504" width="858" height="665"/></div><h6><span class="label">Figure 5-4. </span>Service port mapping</h6></div></figure>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Accessing a Service with Type ClusterIP"><div class="sect1" id="idm45322718373696">
+<h1>Accessing a Service with Type ClusterIP</h1>
+
+<p><a data-type="indexterm" data-primary="ClusterIP, accessing services with" id="idm45322718372160"/><a data-type="indexterm" data-primary="services" data-secondary="accessing with type ClusterIP" id="idm45322718371488"/><code>ClusterIP</code> is the default type of Service. It exposes the Service on a cluster-internal IP address. That means the Service can be accessed only from a Pod running inside of the cluster but not from outside of the cluster (e.g., if you were to make call to the Service from your local machine). <a data-type="xref" href="#service_clusterip">Figure 5-5</a> illustrates the accessibility of a Service with type <code>ClusterIP</code>.</p>
+
+<figure><div id="service_clusterip" class="figure"><div class="border-box"><img src="Images/ckas_0505.png" alt="ckas 0505" width="762" height="748"/></div><h6><span class="label">Figure 5-5. </span>Accessibility of a Service with the type <code>ClusterIP</code></h6></div></figure>
+
+<p>We will create a Pod and a corresponding Service to demonstrate the runtime behavior of <code>ClusterIP</code>. The Pod named <code>echoserver</code> exposes the container port 8080 and specifies the label <code>app: echoserver</code>. The Service defines port 5005 for incoming traffic, which is forwarded to port 8080 for the Pod selected. The label selection matches the Pod we set up:</p>
+
+<pre data-type="programlisting"><strong>$ kubectl run echoserver --image=k8s.gcr.io/echoserver:1.10 --restart=Never</strong> \
+  <strong>--port=8080 -l app=echoserver</strong>
+pod/echoserver created
+<strong>$ kubectl create service clusterip echoserver --tcp=5005:8080</strong>
+service/echoserver created</pre>
+
+<p>The cluster IP that makes the Service available is <code>10.96.254.0</code>. Listing the Service also renders the port for incoming traffic to the Service:</p>
+
+<pre data-type="programlisting"><strong>$ kubectl get pod,service</strong>
+NAME             READY   STATUS    RESTARTS   AGE
+pod/echoserver   1/1     Running   0          23s
+
+NAME                 TYPE        CLUSTER-IP    EXTERNAL-IP   PORT(S)    AGE
+service/echoserver   ClusterIP   10.96.254.0   &lt;none&gt;        5005/TCP   8s</pre>
+
+<p><a data-type="indexterm" data-primary="commands" data-secondary="wget" id="idm45322718360976"/><a data-type="indexterm" data-primary="wget command" id="idm45322718360000"/>You cannot access the Service using the cluster IP and the port from your local machine, illustrated by the following <code>wget</code> command:</p>
+
+<pre data-type="programlisting"><strong>$ wget 10.96.254.0:5005 --timeout=5 --tries=1</strong>
+--2021-11-15 15:45:36--  http://10.96.254.0:5005/
+Connecting to 10.96.254.0:5005... ]failed: Operation timed out.
+Giving up.</pre>
+
+<p>Accessing the Service from a temporary Pod from within the cluster properly routes the request to the Pod matching the label selection:</p>
+<pre data-type="programlisting">
+<strong>$ kubectl run tmp --image=busybox --restart=Never -it --rm</strong> \
+  <strong>-- wget 10.96.254.0:5005</strong>
+Connecting to 10.96.254.0:5005 (10.96.254.0:5005)
+saving to 'index.html'
+index.html           100% |********************************|   408  0:00:00 ETA
+'index.html' saved
+pod "tmp" deleted
+</pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Accessing a Service with Type NodePort"><div class="sect1" id="idm45322718373040">
+<h1>Accessing a Service with Type NodePort</h1>
+
+<p><a data-type="indexterm" data-primary="NodePort, accessing services with" id="idm45322718353616"/><a data-type="indexterm" data-primary="services" data-secondary="accessing with type NodrPort" id="idm45322718352848"/>Declaring a Service with type <code>NodePort</code> exposes access through the node’s IP 
+<span class="keep-together">address and</span> can be resolved from outside of the Kubernetes cluster. The node’s IP address can be reached in combination with a port number in the range of 30000 and 32767, assigned automatically upon the creation of the Service. This port is opened on every node in the cluster, and its value is global and unique at the cluster-scope level. To avoid port conflicts, it’s best to not define the exact node port and let Kubernetes find an available port. Keep in mind <code>NodePort</code> (capital <em>N</em>) is the Service type, whereas <code>nodePort</code> (lowercase <em>n</em>) is the key for the value. <a data-type="xref" href="#service_nodeport">Figure 5-6</a> illustrates the routing of traffic to Pods via a <code>NodePort</code>-typed Service.</p>
+
+<figure><div id="service_nodeport" class="figure"><div class="border-box"><img src="Images/ckas_0506.png" alt="ckas 0506" width="864" height="741"/></div><h6><span class="label">Figure 5-6. </span>Accessibility of a Service with the type NodePort</h6></div></figure>
+
+<p class="pagebreak-before">The next two commands create a Pod and a Service of type <code>NodePort</code>. The only difference here is to provide <code>nodeport</code> instead of <code>clusterip</code> as a command-line option:</p>
+
+<pre data-type="programlisting"><strong>$ kubectl run echoserver --image=k8s.gcr.io/echoserver:1.10 --restart=Never</strong> \
+  <strong>--port=8080 -l app=echoserver</strong>
+pod/echoserver created
+<strong>$ kubectl create service nodeport echoserver --tcp=5005:8080</strong>
+service/echoserver created</pre>
+
+<p>Once they’re created, you can list the Pods and Services. You will find that the port representation contains the statically assigned port that makes the Service accessible. In our case, that’s port 30158:</p>
+
+<pre data-type="programlisting"><strong>$ kubectl get pod,service</strong>
+NAME             READY   STATUS    RESTARTS   AGE
+pod/echoserver   1/1     Running   0          17s
+
+NAME                 TYPE        CLUSTER-IP       EXTERNAL-IP   PORT(S)        \
+AGE
+service/echoserver   NodePort    10.101.184.152   &lt;none&gt;        5005:30158/TCP \
+5s</pre>
+
+<p>From within the cluster, you can still access the Service using the cluster IP address and port number. This Services exposes exactly the same behavior as if it were of type <code>ClusterIP</code>:</p>
+<pre data-type="programlisting">
+<strong>$ kubectl run tmp --image=busybox --restart=Never -it --rm</strong> \
+  <strong>-- wget 10.101.184.152:5005</strong>
+Connecting to 10.101.184.152:5005 (10.101.184.152:5005)
+saving to 'index.html'
+index.html           100% |********************************|   414  0:00:00 ETA
+'index.html' saved
+pod "tmp" deleted
+</pre>
+
+<p>From outside of the cluster, you need to use the IP address of the node running the Pod and the statically assigned port. One way to determine the node’s IP address is via <code>kubectl cluster-info</code> or by querying the Pod.</p>
+<div data-type="tip"><h1>Determining the Service URL in Minikube</h1>
+<p>Minikube offers a shortcut for determining the Service endpoint via the command <code>minikube service --url &lt;service-name&gt;</code>. For more information, see the <a href="https://oreil.ly/HGYRp">Minikube documentation</a>.</p>
+</div>
+
+<p>The node IP address here is <code>192.168.64.15</code>. It can be used to call the Service from outside of the cluster:</p>
+<pre data-type="programlisting">
+<strong>$ kubectl get nodes -o</strong> \
+  <strong>jsonpath='{ $.items[*].status.addresses[?(@.type=="InternalIP")].address }'</strong>
+192.168.64.15
+<strong>$ wget 192.168.64.15:30158</strong>
+--2021-11-16 14:10:16--  http://192.168.64.15:30158/
+Connecting to 192.168.64.15:30158... connected.
+HTTP request sent, awaiting response... 200 OK
+Length: unspecified [text/plain]
+Saving to: ‘index.html’
+...
+</pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Accessing a Service with Type LoadBalancer"><div class="sect1" id="idm45322718354816">
+<h1>Accessing a Service with Type LoadBalancer</h1>
+
+<p><a data-type="indexterm" data-primary="LoadBalancer, accessing services with" id="idm45322718329120"/><a data-type="indexterm" data-primary="services" data-secondary="accessing with type LoadBalancer" id="idm45322718328352"/>Kubernetes cloud providers offer support for configuration from a preexisting external load balancer to a Service with the help of the type <code>LoadBalancer</code>. This Service type exposes a single IP address that distributes incoming requests to the cluster nodes. The implementation of the load balancing strategy (e.g., round robin) is up to the cloud provider. <a data-type="xref" href="#service_loadbalancer">Figure 5-7</a> shows an architectural overview.</p>
+
+<figure><div id="service_loadbalancer" class="figure"><div class="border-box"><img src="Images/ckas_0507.png" alt="ckas 0507" width="918" height="1173"/></div><h6><span class="label">Figure 5-7. </span>Accessibility of a Service with the type LoadBalancer</h6></div></figure>
+<div data-type="tip"><h1>Setting up a network route in Minikube</h1>
+<p><a data-type="indexterm" data-primary="Minikube" id="idm45322718322480"/><a data-type="indexterm" data-primary="minikube tunnel command" id="idm45322718321776"/><a data-type="indexterm" data-primary="commands" data-secondary="minikube tunnel" id="idm45322718321104"/>Minikube is not a cloud provider implementation of Kubernetes; however, you can configure a network route to the Service to try out load balancer functionality. All you need to do is to run the command <code>minikube tunnel</code> in a separate shell. For more information, see the <a href="https://oreil.ly/O37FF">Minikube documentation</a>.</p>
+</div>
+
+<p><a data-type="indexterm" data-primary="commands" data-secondary="create service loadbalancer" id="idm45322718318128"/><a data-type="indexterm" data-primary="create service loadbalancer command" id="idm45322718317088"/>To create a Service as a load balancer, set the type to <code>LoadBalancer</code> in the manifest or by using the <code>create service loadbalancer</code> command:</p>
+
+<pre data-type="programlisting"><strong>$ kubectl run echoserver --image=k8s.gcr.io/echoserver:1.10 --restart=Never</strong> \
+  <strong>--port=8080 -l app=echoserver</strong>
+pod/echoserver created
+ <strong>$ kubectl create service loadbalancer echoserver --tcp=5005:8080</strong>
+service/echoserver created</pre>
+
+<p>You will find that a Service of type <code>LoadBalancer</code> exposes an external IP address. List the Service to render the external IP address, which is <code>10.109.76.157</code> in the following output:</p>
+
+<pre data-type="programlisting"><strong>$ kubectl get pod,service</strong>
+NAME             READY   STATUS    RESTARTS   AGE
+pod/echoserver   1/1     Running   0          9s
+
+NAME                 TYPE           CLUSTER-IP      EXTERNAL-IP   \
+PORT(S)          AGE
+service/echoserver   LoadBalancer   10.109.76.157   10.109.76.157 \
+5005:30642/TCP   5s</pre>
+
+<p>To call the Service from outside of the cluster, use the external IP address and its incoming port:</p>
+
+<pre data-type="programlisting"><strong>$ wget 10.109.76.157:5005</strong>
+--2021-11-17 11:30:44--  http://10.109.76.157:5005/
+Connecting to 10.109.76.157:5005... connected.
+HTTP request sent, awaiting response... 200 OK
+Length: unspecified [text/plain]
+Saving to: ‘index.html’
+...</pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Understanding Ingress"><div class="sect1" id="idm45322718330000">
+<h1>Understanding Ingress</h1>
+
+<p><a data-type="indexterm" data-primary="Ingresses" data-secondary="about" id="idm45322718308032"/><a data-type="indexterm" data-primary="services" data-secondary="Ingresses" id="idm45322718307056"/>Standard Kubernetes Ingress solutions provide load balancing only at layer 7 (HTTP or HTTPS traffic) and route transactions from outside of the cluster to Services within the cluster, as illustrated in <a data-type="xref" href="#ingress_traffic_routing">Figure 5-8</a>. It’s not a specific Service type, nor should it be confused with the Service type <code>LoadBalancer</code>.</p>
+
+<figure><div id="ingress_traffic_routing" class="figure"><div class="border-box"><img src="Images/ckas_0508.png" alt="ckas 0508" width="1268" height="458"/></div><h6><span class="label">Figure 5-8. </span>Managing external access to the Services via HTTP(S)</h6></div></figure>
+
+<p><a data-type="indexterm" data-primary="AKS Application Gateway Ingress Controller" id="idm45322718302032"/><a data-type="indexterm" data-primary="F5 NGINX Ingress Controller" id="idm45322718301232"/>An Ingress cannot work without an Ingress controller. The Ingress controller evaluates the collection of rules defined by an Ingress that determine traffic routing. One example of a production-grade Ingress controller is the <a href="https://oreil.ly/owWZN">F5 NGINX Ingress Controller</a> or <a href="https://oreil.ly/8hupA">AKS Application Gateway Ingress Controller</a>. You can find other options listed in the <a href="https://oreil.ly/wGHWl">Kubernetes documentation</a>.</p>
+
+<p>Ingress functionality has to be enabled explicitly if you are using Minikube. The Ingress controller runs as a Pod in the namespace <code>ingress-nginx</code>:</p>
+
+<pre data-type="programlisting"><strong>$ minikube addons enable ingress</strong>
+<strong>$ kubectl get pods -n ingress-nginx</strong>
+NAME                                        READY   STATUS      RESTARTS   AGE
+ingress-nginx-controller-59b45fb494-xpfzn   0/1     Running     0          14s</pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Ingress Rules"><div class="sect1" id="idm45322718295600">
+<h1>Ingress Rules</h1>
+
+<p><a data-type="indexterm" data-primary="Ingresses" data-secondary="rules for" id="idm45322718294432"/>Rules defined by an Ingress object follow the three criteria listed in <a data-type="xref" href="#ingress_rules">Table 5-2</a>.</p>
+<table id="ingress_rules">
+<caption><span class="label">Table 5-2. </span>Ingress rules</caption>
+<thead>
+<tr>
+<th>Type</th>
+<th>Example</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><p>An optional host</p></td>
+<td><p><code>mycompany.abc.com</code></p></td>
+<td><p>If a host is provided, then the rules apply to that host. If no host is defined, then all inbound HTTP(S) traffic is handled.</p></td>
+</tr>
+<tr>
+<td><p>A list of paths</p></td>
+<td><p><code>/corellian/api</code></p></td>
+<td><p>Incoming traffic must match the host and path to correctly forward the traffic to a Service.</p></td>
+</tr>
+<tr>
+<td><p>The backend</p></td>
+<td><p><code>corellian:8080</code></p></td>
+<td><p>A combination of Service name and port.</p></td>
+</tr>
+</tbody>
+</table>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" class="less_space pagebreak-before" data-pdf-bookmark="Creating Ingresses"><div class="sect1" id="idm45322718280784">
+<h1>Creating Ingresses</h1>
+
+<p><a data-type="indexterm" data-primary="Ingresses" data-secondary="creating" id="idm45322718279104"/><a data-type="indexterm" data-primary="create ingress command" id="idm45322718277904"/><a data-type="indexterm" data-primary="commands" data-secondary="create ingress" id="idm45322718277232"/>You can create an Ingress with the imperative <code>create ingress</code> command. The main command-line option you will need to provide is <code>--rule</code>, which defines the rules in a comma-separated fashion. The notation for each key-value pair is <code>&lt;host&gt;/&lt;path&gt;=&lt;service&gt;:&lt;port&gt;</code>. If you look at the output of the <code>create ingress --help</code> command, more fine-grained rules can be specified:</p>
+
+<pre data-type="programlisting"><strong>$ kubectl create ingress corellian</strong> \
+  <strong>--rule="star-alliance.com/corellian/api=corellian:8080"</strong>
+ingress.networking.k8s.io/corellian created</pre>
+<div data-type="tip"><h6>Tip</h6>
+<p>Port 80 for HTTP traffic is implied as we didn’t specify a reference to a TLS Secret object. If you would have specified <code>tls=mysecret</code> in the rule definition, then the port 443 would be listed here as well. For more information on enabling HTTPS traffic, see the <a href="https://oreil.ly/d2sbY">Kubernetes documentation</a>.</p>
+</div>
+
+<p>The same Ingress defined as a YAML manifest is shown in <a data-type="xref" href="#ingress_manifest">Example 5-3</a>.</p>
+<div id="ingress_manifest" data-type="example">
+<h5><span class="label">Example 5-3. </span>An Ingress defined by a YAML manifest</h5>
+
+<pre data-type="programlisting" data-code-language="yaml"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">networking.k8s.io/v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Ingress</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">corellian</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">rules</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">host</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">star-alliance.com</code><code class="w"/>
+<code class="w">    </code><code class="nt">http</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">paths</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">backend</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="nt">service</code><code class="p">:</code><code class="w"/>
+<code class="w">            </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">corellian</code><code class="w"/>
+<code class="w">            </code><code class="nt">port</code><code class="p">:</code><code class="w"/>
+<code class="w">              </code><code class="nt">number</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">8080</code><code class="w"/>
+<code class="w">        </code><code class="nt">path</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">/corellian/api</code><code class="w"/>
+<code class="w">        </code><code class="nt">pathType</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Exact</code><code class="w"/></pre></div>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Defining Path Types"><div class="sect1" id="idm45322718215744">
+<h1>Defining Path Types</h1>
+
+<p><a data-type="indexterm" data-primary="paths, defining types" id="idm45322718214736"/><a data-type="indexterm" data-primary="services" data-secondary="defining path types" id="idm45322718172128"/><a data-type="indexterm" data-primary="Exact path type" id="idm45322718171184"/><a data-type="indexterm" data-primary="Prefix path type" id="idm45322718170512"/>The previous YAML manifest demonstrates one of the options for specifying a path type via the attribute <code>spec.rules[].host[].http.paths[].pathType</code>. The path type defines how an incoming request is evaluated against the declared path. <a data-type="xref" href="#ingress_path_types">Table 5-3</a> should give you an indication on the evaluation for incoming requests and their paths. See the <a href="https://oreil.ly/4plCE">Kubernetes documentation</a> for a more comprehensive list.</p>
+<table id="ingress_path_types">
+<caption><span class="label">Table 5-3. </span>Ingress path types</caption>
+<thead>
+<tr>
+<th>Path Type</th>
+<th>Rule</th>
+<th>Incoming Request</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><p><code>Exact</code></p></td>
+<td><p><code>/corellian/api</code></p></td>
+<td><p>Matches <code>/corellian/api</code> but does not match 
+<span class="keep-together"><code>/corellian/test</code></span> or 
+<span class="keep-together"><code>/corellian/api/</code></span></p></td>
+</tr>
+<tr>
+<td><p><code>Prefix</code></p></td>
+<td><p><code>/corellian/api</code></p></td>
+<td><p>Matches <code>/corellian/api</code> and <code>/corellian/api/</code> but does not match 
+<span class="keep-together"><code>/corellian/test</code></span></p></td>
+</tr>
+</tbody>
+</table>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Listing Ingresses"><div class="sect1" id="idm45322718133232">
+<h1>Listing Ingresses</h1>
+
+<p><a data-type="indexterm" data-primary="Ingresses" data-secondary="listing" id="idm45322718132096"/><a data-type="indexterm" data-primary="get ingress command" id="idm45322718131120"/><a data-type="indexterm" data-primary="commands" data-secondary="get ingress" id="idm45322718130448"/>Listing Ingresses can be achieved with the <code>get ingress</code> command. You will see some of the information you specified when creating the Ingress (e.g., the hosts):</p>
+
+<pre data-type="programlisting"><strong>$ kubectl get ingress</strong>
+NAME        CLASS    HOSTS               ADDRESS         PORTS   AGE
+corellian   &lt;none&gt;   star-alliance.com   192.168.64.15   80      10m</pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Rendering Ingress Details"><div class="sect1" id="idm45322718127472">
+<h1>Rendering Ingress Details</h1>
+
+<p><a data-type="indexterm" data-primary="Ingresses" data-secondary="rendering details of" id="idm45322718126128"/><a data-type="indexterm" data-primary="describe ingress command" id="idm45322718125152"/><a data-type="indexterm" data-primary="commands" data-secondary="describe ingress" id="idm45322718124512"/><a data-type="indexterm" data-primary="services" data-secondary="Ingresses" id="idm45322718123568"/>The details of an Ingress can be rendered using the <code>describe ingress</code> command. Each of the rules is listed in a table. For troubleshooting purposes, look out for additional messages. In the following output, you can see that the Service named <code>corellian</code> we mapped here does not exist. Furthermore, the event log shows syncing activity of the rules by the Ingress controller:</p>
+
+<pre data-type="programlisting"><strong>$ kubectl describe ingress corellian</strong>
+Name:             corellian
+Namespace:        default
+Address:
+Default backend:  default-http-backend:80 (&lt;error: endpoints \
+                  "default-http-backend" not found&gt;)
+Rules:
+  Host               Path  Backends
+  ----               ----  --------
+  star-alliance.com
+                     /corellian/api   corellian:8080 (&lt;error: \
+                     endpoints "corellian" not found&gt;)
+Annotations:         &lt;none&gt;
+Events:
+  Type    Reason  Age   From                      Message
+  ----    ------  ----  ----                      -------
+  Normal  Sync    13s   nginx-ingress-controller  Scheduled for sync</pre>
+
+<p>With the Service and Pod serving up a request, here are the Ingress details:</p>
+
+<pre data-type="programlisting"><strong>$ kubectl run corellian --image=k8s.gcr.io/echoserver:1.10 --restart=Never</strong> \
+  <strong>--port=8080 -l app=corellian</strong>
+pod/corellian created
+<strong>$ kubectl create service clusterip corellian --tcp=8080:8080</strong>
+service/corellian created
+<strong>$ kubectl describe ingress corellian</strong>
+Name:             corellian
+Namespace:        default
+Address:          192.168.64.15
+Default backend:  default-http-backend:80 (&lt;error: \
+                  endpoints "default-http-backend" not found&gt;)
+Rules:
+  Host               Path  Backends
+  ----               ----  --------
+  star-alliance.com
+                     /corellian/api   corellian:8080 (172.17.0.5:8080)
+Annotations:         &lt;none&gt;
+Events:              &lt;none&gt;</pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Accessing an Ingress"><div class="sect1" id="idm45322718117824">
+<h1>Accessing an Ingress</h1>
+
+<p><a data-type="indexterm" data-primary="Ingresses" data-secondary="accessing" id="idm45322718116512"/>The combination of backend and path routes incoming HTTP(S) traffic through the Ingress, which in turn propagates the call to the configured Service. To test the behavior on a local Kubernetes cluster on your machine, you need to first find out the IP address of the load balancer used by the Ingress. Next, you’ll need to add the IP address to hostname mapping to your <code>/etc/hosts</code> file:</p>
+
+<pre data-type="programlisting"><strong>$ kubectl get ingress corellian</strong> \
+  <strong>--output=jsonpath="{.status.loadBalancer.ingress[0][<em>ip</em>]}"</strong>
+192.168.64.15
+<strong>$ sudo vim /etc/hosts</strong>
+...
+192.168.64.15   star-alliance.com</pre>
+
+<p>You can now send HTTP requests to the backend. The first call matches the <code>Exact</code> path rule. The second call doesn’t go through as the path rule does not match:</p>
+
+<pre data-type="programlisting"><strong>$ wget star-alliance.com/corellian/api --timeout=5 --tries=1</strong>
+--2021-11-30 19:34:57--  http://star-alliance.com/corellian/api
+Resolving star-alliance.com (star-alliance.com)... 192.168.64.15
+Connecting to star-alliance.com (star-alliance.com)|192.168.64.15|:80... \
+connected.
+HTTP request sent, awaiting response... 200 OK
+...
+<strong>$ wget star-alliance.com/corellian/api/ --timeout=5 --tries=1</strong>
+--2021-11-30 15:36:26--  http://star-alliance.com/corellian/api/
+Resolving star-alliance.com (star-alliance.com)... 192.168.64.15
+Connecting to star-alliance.com (star-alliance.com)|192.168.64.15|:80... \
+connected.
+HTTP request sent, awaiting response... 404 Not Found
+2021-11-30 15:36:26 ERROR 404: Not Found.</pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Using and Configuring CoreDNS"><div class="sect1" id="idm45322718110128">
+<h1>Using and Configuring CoreDNS</h1>
+
+<p><a data-type="indexterm" data-primary="services" data-secondary="CoreDNS" id="ser_core"/><a data-type="indexterm" data-primary="CoreDNS" data-secondary="about" id="idm45322718107600"/>Kubernetes is geared toward operating a microservices architecture. Individual microservices offer distinct, self-contained functionality and communicate with one another to complement each other. Earlier in this chapter, we talked about the usage of a Service to provide a stable network interface. Many of the examples used an IP address and port to talk to a Service.</p>
+
+<p><a data-type="indexterm" data-primary="Learning CoreDNS" id="idm45322718106272"/>Kubernetes runs a DNS server implementation called <a href="https://coredns.io">CoreDNS</a> that maps the name of the Service to its IP address. In turn, microservices can easily reference the Service name to communicate with each other. For a deep dive on CoreDNS, check out the excellent book <a class="orm:hideurl" href="https://oreil.ly/06kPW"><em>Learning CoreDNS</em></a> (O’Reilly).</p>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Inspecting the CoreDNS Pod"><div class="sect2" id="idm45322718103248">
+<h2>Inspecting the CoreDNS Pod</h2>
+
+<p><a data-type="indexterm" data-primary="CoreDNS" data-secondary="Pod" id="idm45322718101904"/><a data-type="indexterm" data-primary="Pods" data-secondary="CoreDNS" id="idm45322718100928"/>The CoreDNS server is running in a Pod in the namespace <code>kube-system</code>. The following command renders the CoreDNS Pod for a Minikube cluster installation:</p>
+
+<pre data-type="programlisting"><strong>$ kubectl get pods -n kube-system</strong>
+NAME                               READY   STATUS    RESTARTS   AGE
+coredns-558bd4d5db-s89vn           1/1     Running   2          64d</pre>
+
+<p>CoreDNS uses a so-called <code>Corefile</code> to configure the runtime behavior of the DNS server. The ConfigMap named <code>coredns</code> set up in the same namespace defines the contents of the configuration file. The CoreDNS Pod mounts the ConfigMap, as shown in <a data-type="xref" href="#coredns_pod">Example 5-4</a>.</p>
+<div id="coredns_pod" data-type="example">
+<h5><span class="label">Example 5-4. </span>YAML manifest of CoreDNS Pod</h5>
+
+<pre data-type="programlisting" data-code-language="yaml"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Pod</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">coredns-558bd4d5db-s89vn</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kube-system</code><code class="w"/>
+<code class="p">...</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">containers</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">coredns</code><code class="w"/>
+<code class="w">    </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">k8s.gcr.io/coredns/coredns:v1.8.0</code><code class="w"/>
+<code class="w">    </code><code class="nt">volumeMounts</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">mountPath</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">/etc/coredns</code><code class="w"/>
+<code class="w">      </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">config-volume</code><code class="w"/>
+<code class="w">      </code><code class="nt">readOnly</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">true</code><code class="w"/>
+<code class="w">  </code><code class="nt">volumes</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">configMap</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">defaultMode</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">420</code><code class="w"/>
+<code class="w">      </code><code class="nt">items</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">key</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Corefile</code><code class="w"/>
+<code class="w">        </code><code class="nt">path</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Corefile</code><code class="w"/>
+<code class="w">      </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">coredns</code><code class="w"/>
+<code class="w">    </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">config-volume</code><code class="w"/>
+<code class="p">...</code><code class="w"/></pre></div>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Inspecting the CoreDNS Configuration"><div class="sect2" id="idm45322718054224">
+<h2>Inspecting the CoreDNS Configuration</h2>
+
+<p><a data-type="indexterm" data-primary="CoreDNS" data-secondary="configuration" id="idm45322718053216"/>You can inspect the ConfigMap with the command <code>kubectl get configmaps coredns -n kube-system -o yaml</code>. <a data-type="xref" href="#coredns_default_configmap">Example 5-5</a> shows the content of the <code>Corefile</code>. See the <a href="https://oreil.ly/7AeWG">CoreDNS manual</a> for more information on the syntax and instructions of a <code>Corefile</code>.</p>
+<div id="coredns_default_configmap" data-type="example">
+<h5><span class="label">Example 5-5. </span>Default Corefile defined by a ConfigMap</h5>
+
+<pre data-type="programlisting" data-code-language="yaml"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">ConfigMap</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">coredns</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kube-system</code><code class="w"/>
+<code class="nt">data</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">Corefile</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">|</code><code class="w"/>
+<code class="w">    </code><code class="no">.:53 {</code><code class="w"/>
+<code class="w">        </code><code class="no">errors</code><code class="w"/>
+<code class="w">        </code><code class="no">health {</code><code class="w"/>
+<code class="w">           </code><code class="no">lameduck 5s</code><code class="w"/>
+<code class="w">        </code><code class="no">}</code><code class="w"/>
+<code class="w">        </code><code class="no">ready</code><code class="w"/>
+<code class="w">        </code><code class="no">kubernetes cluster.local in-addr.arpa ip6.arpa {</code><code class="w"/>
+<code class="w">           </code><code class="no">pods insecure</code><code class="w"/>
+<code class="w">           </code><code class="no">fallthrough in-addr.arpa ip6.arpa</code><code class="w"/>
+<code class="w">           </code><code class="no">ttl 30</code><code class="w"/>
+<code class="w">        </code><code class="no">}</code><code class="w"/>
+<code class="w">        </code><code class="no">prometheus :9153</code><code class="w"/>
+<code class="w">        </code><code class="no">hosts {</code><code class="w"/>
+<code class="w">           </code><code class="no">192.168.64.1 host.minikube.internal</code><code class="w"/>
+<code class="w">           </code><code class="no">fallthrough</code><code class="w"/>
+<code class="w">        </code><code class="no">}</code><code class="w"/>
+<code class="w">        </code><code class="no">forward . /etc/resolv.conf {</code><code class="w"/>
+<code class="w">           </code><code class="no">max_concurrent 1000</code><code class="w"/>
+<code class="w">        </code><code class="no">}</code><code class="w"/>
+<code class="w">        </code><code class="no">cache 30</code><code class="w"/>
+<code class="w">        </code><code class="no">loop</code><code class="w"/>
+<code class="w">        </code><code class="no">reload</code><code class="w"/>
+<code class="w">        </code><code class="no">loadbalance</code><code class="w"/>
+<code class="w">    </code><code class="no">}</code><code class="w"/>
+<code class="p">...</code><code class="w"/></pre></div>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" class="less_space pagebreak-before" data-pdf-bookmark="Customizing the CoreDNS Configuration"><div class="sect2" id="idm45322717885696">
+<h2>Customizing the CoreDNS Configuration</h2>
+
+<p><a data-type="indexterm" data-primary="CoreDNS" data-secondary="customizing configuration" id="idm45322717799008"/>The default configuration of a <code>Corefile</code> can be further customized. To do so, create a new ConfigMap in the namespace <code>kube-system</code> in the format shown in <a data-type="xref" href="#coredns_custom_configmap">Example 5-6</a>.</p>
+<div id="coredns_custom_configmap" data-type="example">
+<h5><span class="label">Example 5-6. </span>Custom Corefile defined by a ConfigMap</h5>
+
+<pre data-type="programlisting" data-code-language="yaml"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">ConfigMap</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">coredns-custom</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kube-system</code><code class="w"/>
+<code class="nt">data</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="p">...</code><code class="w"/></pre></div>
+
+<p><a data-type="indexterm" data-primary="" data-startref="ser_core" id="idm45322717757008"/>Create the new ConfigMap specified by the file <code>coredsns-custom.yaml</code> and force a reload of the CoreDNS Pod configuration by deleting it. The CoreDNS will start up again automatically because the CoreDNS Pod was deployed and managed by the state of the Deployment. The Pod’s restart policy defaults to <code>Always</code>;  deleting the Pod is a quick way to force it to restart, and the new Pod instance will be mapped to the updated information in the ConfigMap:</p>
+
+<pre data-type="programlisting"><strong>$ kubectl apply -f coredsns-custom.yaml
+$ kubectl delete pod coredns -n kube-system</strong></pre>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="DNS for Services"><div class="sect1" id="idm45322717753904">
+<h1>DNS for Services</h1>
+
+<p><a data-type="indexterm" data-primary="DNS" data-secondary="for services" id="idm45322717752736"/><a data-type="indexterm" data-primary="services" data-secondary="DNS for" id="idm45322717751760"/>Services tie into the DNS service provided by CoreDNS. In this section, we will talk about various scenarios that illustrate how to talk to a Service from another Pod that lives in the same or a different namespace.</p>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Resolving a Service by Hostname from the Same Namespace"><div class="sect2" id="idm45322717750560">
+<h2>Resolving a Service by Hostname from the Same Namespace</h2>
+
+<p><a data-type="indexterm" data-primary="hostnames" data-secondary="resolving services by" id="idm45322717749184"/>A Pod can resolve the Service by hostname if both objects live in the same namespace. <a data-type="xref" href="#dns_service_same_namespace">Figure 5-9</a> illustrates a Pod implementing UI frontend functionality that makes a call to a backend microservice through a Service.</p>
+
+<figure><div id="dns_service_same_namespace" class="figure"><div class="border-box"><img src="Images/ckas_0509.png" alt="ckas 0509" width="918" height="285"/></div><h6><span class="label">Figure 5-9. </span>Resolving a Service from the same namespace</h6></div></figure>
+
+<p>You can easily verify the behavior with the following commands. Here, we’ll create a Service and a Pod in the namespace <code>dns</code> with the name <code>echoserver</code>:</p>
+
+<pre data-type="programlisting"><strong>$ kubectl create namespace dns</strong>
+namespace/dns created
+<strong>$ kubectl run echoserver --image=k8s.gcr.io/echoserver:1.10 --restart=Never</strong> \
+  <strong>--port=8080 --expose -n dns</strong>
+service/echoserver created
+pod/echoserver created
+<strong>$ kubectl get services,pods -n dns</strong>
+NAME                 TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)    AGE
+service/echoserver   ClusterIP   10.99.124.240   &lt;none&gt;        8080/TCP   17m
+
+NAME             READY   STATUS    RESTARTS   AGE
+pod/echoserver   1/1     Running   0          17m</pre>
+
+<p>You can verify the correct service discovery by running a Pod in the same namespace that makes a call to the Service by using its hostname and incoming port:</p>
+<pre data-type="programlisting">
+<strong>$ kubectl run busybox --image=busybox --rm -it --restart=Never -n dns</strong> \
+  <strong>-- wget echoserver:8080</strong>
+Connecting to echoserver:8080 (10.99.124.240:8080)
+saving to 'index.html'
+index.html           100% |********************************|   406  0:00:00 ETA
+'index.html' saved
+pod "busybox" deleted
+</pre>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Resolving a Service by Hostname from a Different Namespace"><div class="sect2" id="idm45322717701008">
+<h2>Resolving a Service by Hostname from a Different Namespace</h2>
+
+<p>It’s not uncommon to make a call from a Pod to a Service that lives in a different namespace. Referencing just the hostname of the Service does not work across namespaces. You need to append the namespace as well.</p>
+
+<p><a data-type="xref" href="#dns_service_different_namespace">Figure 5-10</a> illustrates a backend Pod in the namespace <code>business</code> that calls a Service in the namespace <code>other</code>. To communicate with the <code>weather-api</code> Service from the namespace <code>business</code>, you will need to reference it via <code>weather-api.other</code>. Services that reside in the <code>default</code> namespace will have to referenced accordingly (e.g., 
+<span class="keep-together"><code>lottery.default</code></span>).</p>
+
+<figure><div id="dns_service_different_namespace" class="figure"><div class="border-box"><img src="Images/ckas_0510.png" alt="ckas 0510" width="920" height="285"/></div><h6><span class="label">Figure 5-10. </span>Resolving a Service from a different namespace</h6></div></figure>
+
+<pre data-type="programlisting"><strong>$ kubectl create namespace other</strong>
+namespace/other created
+<strong>$ kubectl run echoserver --image=k8s.gcr.io/echoserver:1.10 --restart=Never</strong> \
+  <strong>--port=8080 --expose -n other</strong>
+service/echoserver created
+pod/echoserver created
+<strong>$ kubectl get services,pods -n other</strong>
+NAME                 TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)    AGE
+service/echoserver   ClusterIP   10.99.124.240   &lt;none&gt;        8080/TCP   17m
+
+NAME             READY   STATUS    RESTARTS   AGE
+pod/echoserver   1/1     Running   0          17m</pre>
+
+<p>From a different namespace, in this case called <code>business</code>, make a call from a temporary Pod to the Service in the namespace <code>other</code>. Attempting to call the Service without the namespace results in a failure to connect. You can see in the following code that the namespace of the Service needs to be spelled out explicitly: <code>echoserver.other</code>:</p>
+<pre data-type="programlisting">
+<strong>$ kubectl create namespace business</strong>
+namespace/business created
+<strong>$ kubectl run busybox --image=busybox --rm -it --restart=Never -n business</strong> \
+  <strong>-- wget echoserver:8080</strong>
+wget: bad address 'echoserver:8080'
+pod "busybox" deleted
+pod other/busybox terminated (Error)
+<strong>$ kubectl run busybox --image=busybox --rm -it --restart=Never -n business</strong> \
+  <strong>-- wget echoserver.other:8080</strong>
+Connecting to echoserver.other:8080 (10.99.32.59:8080)
+saving to 'index.html'
+index.html           100% |********************************|   418  0:00:00 ETA
+'index.html' saved
+pod "busybox" deleted
+</pre>
+
+<p>The <code>Corefile</code> defines a cluster domain. By default, the value of the cluster domain is <code>cluster.local</code>. You can append the cluster domain to the hostname when referencing a Service. In addition, you’ll need to use the type of object you’re communicating with. The string <code>svc</code> describes the type Service. The full hostname for a Service is <code>echoserver.other.svc.cluster.local</code>. You can see the calls in the following commands:</p>
+<pre data-type="programlisting">
+<strong>$ kubectl run busybox --image=busybox --rm -it --restart=Never -n business</strong> \
+  <strong>-- wget echoserver.other.svc:8080</strong>
+Connecting to echoserver.other.svc:8080 (10.99.32.59:8080)
+saving to 'index.html'
+index.html           100% |********************************|   426  0:00:00 ETA
+'index.html' saved
+pod "busybox" deleted
+<strong>$ kubectl run busybox --image=busybox --rm -it --restart=Never -n business</strong> \
+  <strong>-- wget echoserver.other.svc.cluster.local:8080</strong>
+Connecting to echoserver.other.svc.cluster.local:8080 (10.99.32.59:8080)
+saving to 'index.html'
+index.html           100% |********************************|   454  0:00:00 ETA
+'index.html' saved
+pod "busybox" deleted
+</pre>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="DNS for Pods"><div class="sect1" id="idm45322717679136">
+<h1>DNS for Pods</h1>
+
+<p><a data-type="indexterm" data-primary="services" data-secondary="DNS for Pods" id="idm45322717678000"/><a data-type="indexterm" data-primary="DNS" data-secondary="for Pods" id="idm45322717676800"/><a data-type="indexterm" data-primary="Pods" data-secondary="DNS for" id="idm45322717675856"/>Pods can talk to each by IP address across namespaces. CoreDNS provides the configuration option <code>pods insecure</code> in the <code>Corefile</code> file to create DNS records for Pods. To reference a Pod, use the IP address, but replace the dots with dashes. For example, a Pod with the IP address <code>10.0.0.85</code> has a corresponding DNS record with <code>10-0-0-85</code>. <a data-type="xref" href="#dns_pod">Figure 5-11</a> shows Pods that reference each other by their DNS records.</p>
+
+<figure><div id="dns_pod" class="figure"><div class="border-box"><img src="Images/ckas_0511.png" alt="ckas 0511" width="886" height="509"/></div><h6><span class="label">Figure 5-11. </span>Resolving a Pod via DNS records</h6></div></figure>
+
+
+
+
+
+
+
+
+<section data-type="sect2" data-pdf-bookmark="Resolving a Pod by Hostname"><div class="sect2" id="idm45322717670032">
+<h2>Resolving a Pod by Hostname</h2>
+
+<p><a data-type="indexterm" data-primary="hostnames" data-secondary="resolving Pods by" id="idm45322717668640"/>We’ll create two Pods to demonstrate the runtime behavior of CoreDNS for Pods. Pod 1, named <code>echoserver1</code>, runs in the namespace <code>ns1</code> with the IP address <code>172.17.0.8</code>. Pod 2, named <code>echoserver2</code>, runs in the namespace <code>ns2</code> with the IP address <code>172.17.0.9</code>:</p>
+
+<pre data-type="programlisting"><strong>$ kubectl create namespace ns1</strong>
+namespace/ns1 created
+<strong>$ kubectl create namespace ns2</strong>
+namespace/ns2 created
+<strong>$ kubectl run echoserver1 --image=k8s.gcr.io/echoserver:1.10 --restart=Never</strong> \
+  <strong>--port=8080 -n ns1</strong>
+pod/echoserver1 created
+<strong>$ kubectl run echoserver2 --image=k8s.gcr.io/echoserver:1.10 --restart=Never</strong> \
+  <strong>--port=8080 -n ns2</strong>
+pod/echoserver2 created
+<strong>$ kubectl get pod echoserver1 -n ns1 --template={{.status.podIP}}</strong>
+172.17.0.8
+<strong>$ kubectl get pod echoserver2 -n ns2 --template={{.status.podIP}}</strong>
+172.17.0.9</pre>
+
+<p>For resolving a Pod via DNS, you are required to spell out the namespace and object type as part of the hostname independent of where the Pod lives. The following two commands use a temporary Pod to make a call to another Pod in the same and a different namespace. Adding <code>cluster.local</code> is optional:</p>
+<pre data-type="programlisting">
+<strong>$ kubectl run busybox --image=busybox --rm -it --restart=Never -n ns1</strong> \
+  <strong>-- wget 172-17-0-8.ns1.pod:8080</strong>
+Connecting to 172-17-0-8.ns1.pod:8080 (172.17.0.8:8080)
+saving to 'index.html'
+index.html           100% |********************************|   424  0:00:00 ETA
+'index.html' saved
+pod "busybox" deleted
+<strong>$ kubectl run busybox --image=busybox --rm -it --restart=Never -n ns1</strong> \
+  <strong>-- wget 172-17-0-9.ns2.pod:8080</strong>
+Connecting to 172-17-0-9.ns2.pod:8080 (172.17.0.9:8080)
+saving to 'index.html'
+index.html           100% |********************************|   424  0:00:00 ETA
+'index.html' saved
+pod "busybox" deleted
+</pre>
+
+<p>This option <code>pods insecure</code> exists only for backward compatibility reasons with <code>kube-dns</code>, the original implementation of Kubernetes’ DNS server. You can disable the creation of DNS records for Pods by configuring CoreDNS with <code>pods disabled</code> instead. It is not recommended to rely on the DNS record for a Pod.</p>
+</div></section>
+
+
+
+
+
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Choosing an Appropriate Container Network &#10;Interface Plugin"><div class="sect1" id="idm45322717654272">
+<h1>Choosing an Appropriate Container Network 
+<span class="keep-together">Interface Plugin</span></h1>
+
+<p><a data-type="indexterm" data-primary="CNI (Container Network Interface) plugin" id="idm45322717652304"/><a data-type="indexterm" data-primary="Container Network Interface (CNI) plugin" id="idm45322717651504"/><a data-type="indexterm" data-primary="networking" data-secondary="choosing container network interface plugins" id="idm45322717650800"/>In <a data-type="xref" href="ch02.xhtml#cluster_architecture_installation_configuration">Chapter 2</a>, we talked about the mechanics of installing a Container Network Interface plugin. The CNI, a Cloud Native Computing Foundation project, consists of a specification and libraries for writing plugins to configure network interfaces in Linux containers, along with a number of plugins. CNI concerns itself only with network connectivity of containers and removing allocated resources when the container is deleted. Kubernetes uses CNI as an interface between network providers and Kubernetes Pod networking.</p>
+
+<p>The CNI specification defines the Pod networking interface and capabilities. Plugins implement the specification and allow a Kubernetes administrator to pick and choose a product-specific feature set. <a data-type="xref" href="#cni_spec_implementation">Figure 5-12</a> shows a couple of exemplary plugins you can choose from. For a list of plugins, see the <a href="https://oreil.ly/mgnMT">Kubernetes documentation</a>.</p>
+
+<figure><div id="cni_spec_implementation" class="figure"><div class="border-box"><img src="Images/ckas_0512.png" alt="ckas 0512" width="1125" height="486"/></div><h6><span class="label">Figure 5-12. </span>CNI specification and implementation</h6></div></figure>
+
+<p>Choosing an appropriate CNI plugin depends on your needs. Refer to this <a href="https://oreil.ly/8lCIq">blog post</a> for a decision matrix that can help you make the right choice for your Kubernetes cluster. During the CKA exam, you might be asked to install a CNI plugin. Many of the plugins mentioned in the Kubernetes documentation link to web pages outside of the Kubernetes domain. Remember that you are not allowed to navigate to pages outside of the official Kubernetes documentation during the exam. Take a look at the link in the browser before opening it by hovering over it with the mouse pointer. For example, this <a href="https://oreil.ly/ncYMk">Kubernetes documentation section</a> describes the installation instructions for Weave Net.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Summary"><div class="sect1" id="idm45322717642624">
+<h1>Summary</h1>
+
+<p><a data-type="indexterm" data-primary="networking" data-secondary="about" id="idm45322717641488"/><a data-type="indexterm" data-primary="services" data-secondary="about" id="idm45322717640512"/>Kubernetes assigns a unique IP address for every Pod in the cluster. Pods can communicate with each other using that IP address; however, you cannot rely on the IP address to be stable over time. That’s why Kubernetes provides the Service resource type.</p>
+
+<p>A Service forwards network traffic to a set of Pods based on label selection and port mappings. Every Service needs to assign a type that determines how the Service becomes accessible from within or outside of the cluster. The Service types relevant to the CKA exam are <code>ClusterIP</code>, <code>NodePort</code>, and <code>LoadBalancer</code>. CoreDNS, the DNS server for Kubernetes, allows Pods to access the Service by hostname from the same and other namespaces.</p>
+
+<p>The resource type Ingress defines rules for routing incoming, cluster-external HTTP(S) traffic to a Service. An Ingress controller periodically evaluates those rules and ensures that they apply to the cluster.</p>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Exam Essentials"><div class="sect1" id="idm45322717636320">
+<h1>Exam Essentials</h1>
+<dl>
+<dt><a data-type="indexterm" data-primary="networking" data-secondary="exam essentials" id="idm45322717634608"/><a data-type="indexterm" data-primary="services" data-secondary="exam essentials" id="idm45322717633632"/><a data-type="indexterm" data-primary="exam essentials" data-secondary="networking" id="idm45322717632688"/><a data-type="indexterm" data-primary="exam essentials" data-secondary="services" id="idm45322717631744"/>Understand the purpose of a Service</dt>
+<dd>
+<p>Pod-to-Pod communication via their IP address does’nt guarantee a stable network interface over time. The purpose of a Service is to provide that stable network interface so that you can operate complex microservice architecture that run in a Kubernetes cluster. In most cases, Pods call a Service by hostname. The hostname is provided by CoreDNS.</p>
+</dd>
+<dt>Practice how to access a Service for each type</dt>
+<dd>
+<p>The CKA exam expects you to understand the differences between the Service types <code>ClusterIP</code>, <code>NodePort</code>, and <code>LoadBalancer</code>. Depending on the assigned type, a Service becomes accessible from inside the cluster or from outside the cluster.</p>
+</dd>
+<dt>Understand the difference between a Service and an Ingress</dt>
+<dd>
+<p>An Ingress is not to be confused with a Service. The Ingress is meant for routing cluster-external HTTP(S) traffic to one or many Services based on an optional hostname and mandatory path. A Service routes traffic to a set of Pods.</p>
+</dd>
+</dl>
+</div></section>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<section data-type="sect1" data-pdf-bookmark="Sample Exercises"><div class="sect1" id="idm45322717624928">
+<h1>Sample Exercises</h1>
+
+<p><a data-type="indexterm" data-primary="networking" data-secondary="sample exercises" id="idm45322717623728"/><a data-type="indexterm" data-primary="services" data-secondary="sample exercises" id="idm45322717622752"/><a data-type="indexterm" data-primary="sample exercises" data-secondary="networking" id="idm45322717621808"/><a data-type="indexterm" data-primary="sample exercises" data-secondary="services" id="idm45322717620864"/><a data-type="indexterm" data-primary="" data-startref="net_ch" id="idm45322717619920"/><a data-type="indexterm" data-primary="" data-startref="ser_ch" id="idm45322717618976"/>Solutions to these exercises are available in the  <a data-type="xref" href="app01.xhtml#appendix-a">Appendix</a>.</p>
+<ol>
+<li>
+<p>In the namespace <code>external</code>, create a Deployment named <code>nginx</code> with the image <code>nginx</code> for three replicas. The container should expose the port 80. Within the same namespace, create a Service of type <code>LoadBalancer</code>. The Service should route traffic to the Pods managed by the Deployment.</p>
+</li>
+<li>
+<p>From your local machine (outside the cluster), make a call to the LoadBalancer using <code>wget</code> or <code>curl</code>. Identify which Pods received the traffic by looking at the logs.</p>
+</li>
+<li>
+<p>Change the Service type to <code>ClusterIP</code>. Make a call to the Service using <code>wget</code> or <code>curl</code> so that the Pods receive the traffic.</p>
+</li>
+<li>
+<p>Create an Ingress named <code>incoming</code> in the namespace <code>external</code>. Define the path type <code>Prefix</code> to the path <code>/</code> to the Service from the previous step. The Ingress should be able to handle any incoming HTTP traffic.</p>
+</li>
+<li>
+<p>Make a call to the Ingress using <code>wget</code> or <code>curl</code> from your local machine. Verify that the Pods receive traffic.</p>
+</li>
+<li>
+<p>Create a new Service of type <code>ClusterIP</code> named <code>echoserver</code> in the namespace <code>external</code>. The selected and to-be-created Pod should use the image <code>k8s.gcr.io/echoserver:1.10</code> on port 8080. Add a new rule to the existing Ingress to route traffic to the <code>echoserver</code> Service with the path <code>/echo</code> and type <code>Exact</code>.</p>
+</li>
+<li>
+<p>Make a call to the Service using <code>wget</code> or <code>curl</code> from your local machine so that the <code>echoserver</code> can be reached.</p>
+</li>
+<li>
+<p>Create a <a href="https://oreil.ly/ZVYkK">rewrite rule</a> for the CoreDNS configuration that allows referencing a Service using the cluster domain <code>cka.example.com</code>. Ensure that the custom CoreDNS configuration takes effect.</p>
+</li>
+<li>
+<p>Make a call to the <code>nginx</code> Service using <code>wget</code> or <code>curl</code> from a temporary Pod in a new namespace called <code>hello</code> with the appropriate hostname.</p>
+</li>
+
+</ol>
+<aside data-type="sidebar" epub:type="sidebar"><div class="sidebar" id="idm45322717593440">
+<h5>Interactive Exam Practice</h5>
+<p>Get more hands-on training and test your CKA exam readiness by working through our interactive CKA labs. Each step of the lab must be completed correctly before you can move to the next step. If you get stuck, you can view the solution and learn how to complete the step.</p>
+
+<p>The following labs cover material from this chapter:</p>
+
+<ul>
+<li>
+<p><a href="https://learning.oreilly.com/scenarios/-/9781492099109">Creating a Service of Type ClusterIP</a></p>
+</li>
+<li>
+<p><a href="https://learning.oreilly.com/scenarios/-/9781492099116">Creating a Service of Type NodePort</a></p>
+</li>
+<li>
+<p><a href="https://learning.oreilly.com/scenarios/-/9781492099123">Creating a Service of Type LoadBalancer</a></p>
+</li>
+<li>
+<p><a href="https://learning.oreilly.com/scenarios/-/9781492099130">Creating an Ingress</a></p>
+</li>
+<li>
+<p><a href="https://learning.oreilly.com/scenarios/-/9781492099147">Creating a CoreDNS Rewrite Rule</a></p>
+</li>
+</ul>
+</div></aside>
+</div></section>
+
+
+
+
+
+
+
+</div></section></div></body></html>

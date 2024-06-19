@@ -1,0 +1,612 @@
+<html><head></head><body>
+<div id="sbo-rt-content"><section data-pdf-bookmark="Chapter 3. Cluster Hardening" data-type="chapter" epub:type="chapter"><div class="chapter" id="cluster_hardening">
+<h1><span class="label">Chapter 3. </span>Cluster Hardening</h1>
+<p><a data-primary="cluster hardening" data-secondary="about" data-type="indexterm" id="idm46394764229152"/><a data-primary="cluster hardening" data-type="indexterm" id="ch_ch"/>The domain “cluster hardening” touches on topics important to keep a cluster as secure as possible once it has been set up and configured initially. As part of the discussion of this chapter, you may notice that I will reference concepts and practices that usually fall into the hands of Kubernetes administrators. Where appropriate, I will provide links to the topics that have already been covered by the CKA exam.</p>
+<p>At a high level, this chapter covers the following concepts:</p>
+<ul>
+<li>
+<p>Restricting access to the Kubernetes API</p>
+</li>
+<li>
+<p>Configuring role-based access control (RBAC) to minimize exposure</p>
+</li>
+<li>
+<p>Exercising caution in using service accounts</p>
+</li>
+<li>
+<p>Updating Kubernetes frequently</p>
+</li>
+</ul>
+<section class="less_space" data-pdf-bookmark="Interacting with the Kubernetes API" data-type="sect1"><div class="sect1" id="idm46394764222544">
+<h1>Interacting with the Kubernetes API</h1>
+<p><a data-primary="cluster hardening" data-secondary="interacting with Kubernetes API" data-type="indexterm" id="ch_api"/><a data-primary="Kubernetes API, interacting with" data-type="indexterm" id="api_int"/>The API server is the gateway to the Kubernetes cluster. Any human user, client (e.g., <code>kubectl</code>), cluster component, or service account will access the API server by making a RESTful API call via HTTPS. It is <em>the</em> central point for performing operations like creating a Pod, or deleting a Service.</p>
+<p><a data-primary="Managing Kubernetes (Burns and Tracey)" data-type="indexterm" id="idm46394764217296"/><a data-primary="Burns, Brendan, Managing Kubernetes" data-type="indexterm" id="idm46394764216576"/><a data-primary="Tracey, Craig, Managing Kubernetes" data-type="indexterm" id="idm46394764215888"/>In this section, we’ll only focus on the security-specific aspects relevant to the API server. For a detailed discussion on the inner workings of the API server and the usage of the Kubernetes API, refer to the book <a class="orm:hideurl" href="https://learning.oreilly.com/library/view/managing-kubernetes/9781492033905"><em>Managing Kubernetes</em></a> by Brendan Burns and Craig Tracey (O’Reilly).</p>
+<section data-pdf-bookmark="Processing a Request" data-type="sect2"><div class="sect2" id="processing-api-request">
+<h2>Processing a Request</h2>
+<p><a data-type="xref" href="#api-server-request-processing">Figure 3-1</a> illustrates the stages a request goes through when a call is made to the API server. <a data-primary="documentation" data-secondary="Kubernetes" data-type="indexterm" id="idm46394764211168"/><a data-primary="requests, processing" data-type="indexterm" id="idm46394764210224"/>For reference, you can find more information in the <a href="https://oreil.ly/DuLdf">Kubernetes 
+<span class="keep-together">documentation</span></a>.</p>
+<figure><div class="figure" id="api-server-request-processing">
+<img alt="ckss 0301" height="495" src="assets/ckss_0301.png" width="1438"/>
+<h6><span class="label">Figure 3-1. </span>API server request processing</h6>
+</div></figure>
+<p><a data-primary="authentication, as stage in request processing" data-type="indexterm" id="idm46394764205808"/>The first stage of request processing is <em>authentication</em>. Authentication validates the identity of the caller by inspecting the client certificates or bearer tokens. If the bearer token is associated with a service account, then it will be verified here.</p>
+<p><a data-primary="authorization, as stage in request processing" data-type="indexterm" id="idm46394764204208"/>The second stage determines if the identity provided in the first stage can access the verb and HTTP path request. Therefore, stage two deals with <em>authorization</em> of the request, which is implemented with the standard Kubernetes RBAC model. Here, we’d ensure that the service account is allowed to list Pods or create a new Service object if that’s what has been requested.</p>
+<p><a data-primary="admission control, as stage in request processing" data-type="indexterm" id="idm46394764202448"/>The third stage of request processing deals with <em>admission control</em>. Admission control verifies if the request is well-formed and potentially needs to be modified before the request is processed. An admission control policy could, for example, ensure that the request for creating a Pod includes the definition of a specific label. If it doesn’t define the label, then the request is rejected.</p>
+<p><a data-primary="validating" data-secondary="as stage in request processing" data-type="indexterm" id="idm46394764200912"/>The last stage of the process ensures that the resource included in the request is valid. Request <em>validation</em> can be implemented as part of admission control but doesn’t have to be. For example, this stage ensures that the name of a Service object sticks to the standard Kubernetes naming rules for provided DNS names.</p>
+</div></section>
+<section data-pdf-bookmark="Connecting to the API Server" data-type="sect2"><div class="sect2" id="idm46394764199120">
+<h2>Connecting to the API Server</h2>
+<p><a data-primary="API server" data-secondary="connecting to" data-type="indexterm" id="api_con"/><a data-primary="connecting to API server" data-type="indexterm" id="con_api"/>It’s easy to determine the endpoint for the API server by running the following:</p>
+<pre data-type="programlisting"><strong>$ kubectl cluster-info</strong>
+Kubernetes control plane is running at https://172.28.40.5:6443
+...</pre>
+<p>For the given Kubernetes cluster, the API server has been exposed via the URL <a class="bare" href="https://172.28.40.5:6443"><em class="hyperlink">https://172.28.40.5:6443</em></a>. Alternatively, you can also have a look at the command line options <code>--advertise-address</code> and <code>--secure-port</code> in the configuration file of the API server to determine the endpoint. You can find the API server configuration file at <code>/etc/kubernetes/manifests/kube-apiserver.yaml</code>.</p>
+<div data-type="tip"><h1>Configuring an insecure port for the API server</h1>
+<p><a data-primary="configuring" data-secondary="ports for API server" data-type="indexterm" id="idm46394764189840"/><a data-primary="ports" data-secondary="configuring for API server" data-type="indexterm" id="idm46394764188864"/>The ability to configure the API server to use an insecure port (e.g., 80) has been deprecated in Kubernetes 1.10. With version 1.24, the insecure port flags <code>--port</code> and <code>--insecure-port</code> have been removed completely and therefore cannot be used to configure the API server anymore. See the <a href="https://oreil.ly/OTsmV">release notes</a> for more information.</p>
+</div>
+<section data-pdf-bookmark="Using the kubernetes Service" data-type="sect3"><div class="sect3" id="idm46394764185824">
+<h3>Using the kubernetes Service</h3>
+<p><a data-primary="Kubernetes Service" data-type="indexterm" id="idm46394764184272"/>Kubernetes makes accessing the API server a little bit more convenient for specific use cases. For example, you may want to send a request to the Kubernetes API from a Pod. Instead of using the IP address and port for the API server, you can simply refer to the Service named <code>kubernetes.default.svc</code> instead. This special Service lives in the <code>default</code> namespace and is stood up by the cluster automatically. Deleting the Service will automatically recreate it. You can easily find the Service with the following command:</p>
+<pre data-type="programlisting"><strong>$ kubectl get service kubernetes</strong>
+NAME         TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)   AGE
+kubernetes   ClusterIP   10.96.0.1    &lt;none&gt;        443/TCP   32s</pre>
+<p>Upon inspection of the endpoints of this Service, you will see that it points to the IP address and port of the API server, as demonstrated by executing the following command:</p>
+<pre data-type="programlisting"><strong>$ kubectl get endpoints kubernetes</strong>
+NAME         ENDPOINTS          AGE
+kubernetes   172.28.40.5:6443   4m3s</pre>
+<p>The IP address and port of the Service is also exposed to the Pod via environment variables. You can read the values of the environment variables from a program running inside of a container. The Service’s IP address is reflected by the environment variable <code>KUBERNETES_SERVICE_HOST</code>. The port can be accessed using the environment variable <code>KUBERNETES_SERVICE_PORT</code>. To render the environment, simply access the environment variables using the <code>env</code> command in a temporary Pod:</p>
+<pre data-type="programlisting"><strong>$ kubectl run kubernetes-envs --image=alpine:3.16.2 -it --rm --restart=Never</strong> \
+  <strong>-- env</strong>
+KUBERNETES_SERVICE_HOST=10.96.0.1
+KUBERNETES_SERVICE_PORT=443</pre>
+<p>We will use the <code>kubernetes</code> Service in the section <a data-type="xref" href="#minimizing-permissions-service-account">“Minimizing Permissions for a Service Account”</a>.</p>
+</div></section>
+<section data-pdf-bookmark="Anonymous access" data-type="sect3"><div class="sect3" id="idm46394764174400">
+<h3>Anonymous access</h3>
+<p><a data-primary="curl command" data-type="indexterm" id="idm46394764173200"/><a data-primary="commands" data-secondary="curl" data-type="indexterm" id="idm46394764172496"/><a data-primary="anonymous access" data-type="indexterm" id="idm46394764171552"/>The following command makes an anonymous call to the API using the <code>curl</code> command line tool to list all namespaces. The option <code>-k</code> avoids verifying the server’s TLS certificate:</p>
+<pre data-type="programlisting"><strong>$ curl https://172.28.40.5:6443/api/v1/namespaces -k</strong>
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "namespaces is forbidden: User \"system:anonymous\" cannot list \
+              resource \"namespaces\" in API group \"\" at the cluster scope",
+  "reason": "Forbidden",
+  "details": {
+    "kind": "namespaces"
+  },
+  "code": 403
+}</pre>
+<p>As you can see from the JSON-formatted HTTP response body, anonymous calls are accepted by the API server but do not have the appropriate permissions for the operation. Internally, Kubernetes maps the call to the <a href="https://oreil.ly/_HrbF">username <code>system:anonymous</code></a>, which effectively isn’t authorized to execute the operation.</p>
+</div></section>
+<section data-pdf-bookmark="Access with a client certificate" data-type="sect3"><div class="sect3" id="idm46394764166864">
+<h3>Access with a client certificate</h3>
+<p><a data-primary="client certificates, access with" data-type="indexterm" id="idm46394764165408"/>To make a request as an authorized user, you need to either create a new one or use the existing, default user with administrator permissions named <code>kubernetes-admin</code>. We won’t go through the process of creating a new user right now. For more information on creating a user, refer to <a data-type="xref" href="#restricting-user-permissions">“Restricting User Permissions”</a>.</p>
+<p>The following command lists all available users, including their client certificate and key:</p>
+<pre data-type="programlisting"><strong>$ kubectl config view --raw</strong>
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority-data: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tL... <a class="co" href="#callout_cluster_hardening_CO1-1" id="co_cluster_hardening_CO1-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a>
+    server: https://172.28.132.5:6443
+  name: kubernetes
+contexts:
+- context:
+    cluster: kubernetes
+    user: kubernetes-admin
+  name: kubernetes-admin@kubernetes
+current-context: kubernetes-admin@kubernetes
+kind: Config
+preferences: {}
+users:
+- name: kubernetes-admin <a class="co" href="#callout_cluster_hardening_CO1-2" id="co_cluster_hardening_CO1-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a>
+  user:
+    client-certificate-data: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tL... <a class="co" href="#callout_cluster_hardening_CO1-3" id="co_cluster_hardening_CO1-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a>
+    client-key-data: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktL... <a class="co" href="#callout_cluster_hardening_CO1-4" id="co_cluster_hardening_CO1-4"><img alt="4" height="12" src="assets/4.png" width="12"/></a></pre>
+<dl class="calloutlist">
+<dt><a class="co" href="#co_cluster_hardening_CO1-1" id="callout_cluster_hardening_CO1-1"><img alt="1" height="12" src="assets/1.png" width="12"/></a></dt>
+<dd><p>The base64-encoded value of the certificate authority</p></dd>
+<dt><a class="co" href="#co_cluster_hardening_CO1-2" id="callout_cluster_hardening_CO1-2"><img alt="2" height="12" src="assets/2.png" width="12"/></a></dt>
+<dd><p>The user entry with administrator permissions created by default</p></dd>
+<dt><a class="co" href="#co_cluster_hardening_CO1-3" id="callout_cluster_hardening_CO1-3"><img alt="3" height="12" src="assets/3.png" width="12"/></a></dt>
+<dd><p>The base64-encoded value of the user’s client certificate</p></dd>
+<dt><a class="co" href="#co_cluster_hardening_CO1-4" id="callout_cluster_hardening_CO1-4"><img alt="4" height="12" src="assets/4.png" width="12"/></a></dt>
+<dd><p>The base64-encoded value of the user’s private key</p></dd>
+</dl>
+<p>For making a call using the user <code>kubernetes-admin</code>, we’ll need to extract the base64-encoded values for the CA, client certificate, and private key into files as a base64-decoded value. The following command copies the base64-encoded value and uses the tool <code>base64</code> to decode it before it is written to a file. The CA value will be stored in the file <code>ca</code>, the client certificate value in <code>kubernetes-admin.crt</code>, and the private key in <code>kubernetes-admin.key</code>:</p>
+<pre data-type="programlisting"><strong>$ echo LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tL... | base64 -d &gt; ca</strong>
+<strong>$ echo LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tL... | base64 -d &gt; kubernetes-admin.crt</strong>
+<strong>$ echo LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktL... | base64 -</strong> \
+<strong>&gt; kubernetes-admin.key</strong></pre>
+<p><a data-primary="" data-startref="ch_api" data-type="indexterm" id="idm46394764138288"/><a data-primary="" data-startref="api_int" data-type="indexterm" id="idm46394764137312"/><a data-primary="" data-startref="api_con" data-type="indexterm" id="idm46394764136368"/><a data-primary="" data-startref="con_api" data-type="indexterm" id="idm46394764135424"/>You can now point the <code>curl</code> command to those files with the relevant command line option. The request to the API server should properly authenticate and return all existing namespaces, as the <code>kubernetes-admin</code> has the appropriated permissions:</p>
+<pre data-type="programlisting"><strong>$ curl --cacert ca --cert kubernetes-admin.crt --key kubernetes-admin.key</strong> \
+  <strong>https://172.28.132.5:6443/api/v1/namespaces</strong>
+{
+  "kind": "NamespaceList",
+  "apiVersion": "v1",
+  "metadata": {
+    "resourceVersion": "2387"
+  },
+  "items": [
+    ...
+  ]
+}</pre>
+</div></section>
+</div></section>
+</div></section>
+<section data-pdf-bookmark="Restricting Access to the API Server" data-type="sect1"><div class="sect1" id="idm46394760378960">
+<h1>Restricting Access to the API Server</h1>
+<p><a data-primary="access" data-secondary="restricting to API Server" data-type="indexterm" id="ac_res"/><a data-primary="API server" data-secondary="restricting access to" data-type="indexterm" id="api_res"/><a data-primary="cluster hardening" data-secondary="restricting access to API server" data-type="indexterm" id="ch_res"/><a data-primary="restricting" data-secondary="access to API server" data-type="indexterm" id="res_api"/><a data-primary="documentation" data-secondary="EKS" data-type="indexterm" id="idm46394760372704"/><a data-primary="documentation" data-secondary="GKE" data-type="indexterm" id="idm46394760371760"/>If you’re exposing the API server to the internet, ask yourself if it is necessary. Some cloud providers offer the option of creating a private cluster, which will limit or completely disable public access to the API server. For more information, see the documentation pages for <a href="https://oreil.ly/W4Oma">EKS</a> and 
+<span class="keep-together"><a href="https://oreil.ly/c7G-g">GKE</a>.</span></p>
+<p>If you are operating an on-premises Kubernetes cluster, you will need to instantiate firewall rules that prevent access to the API server. Setting up firewall rules is out of scope for the exam and therefore won’t be discussed in this book.</p>
+<section data-pdf-bookmark="Scenario: An Attacker Can Call the API Server from the Internet" data-type="sect2"><div class="sect2" id="idm46394760368240">
+<h2>Scenario: An Attacker Can Call the API Server from the Internet</h2>
+<p><a data-primary="scenarios" data-secondary="attacker can call API Server from Internet" data-type="indexterm" id="idm46394760366992"/>Cloud providers sometimes expose the API server to the internet to simplify administrative access. An attacker can try to make an anonymous request to the API server endpoint by declining to provide a client certificate or bearer token. If the attacker is lucky enough to capture user credentials, then an authenticated call can be performed. Depending on the permissions assigned to the user, malicious operations can be executed. <a data-type="xref" href="#api-server-attacker">Figure 3-2</a> illustrates an attacker calling the API server from the internet.</p>
+<figure><div class="figure" id="api-server-attacker">
+<img alt="ckss 0302" height="307" src="assets/ckss_0302.png" width="1188"/>
+<h6><span class="label">Figure 3-2. </span>An attacker calls the API server from the internet</h6>
+</div></figure>
+<p>In this chapter, we will have a look at how to restrict access to the API server and how to implement RBAC with limited permissions by example. <a data-type="xref" href="ch05.xhtml#opa-gatekeeper">“Understanding Open Policy Agent (OPA) and Gatekeeper”</a> will review admission control with the help of OPA Gateway.</p>
+</div></section>
+<section data-pdf-bookmark="Restricting User Permissions" data-type="sect2"><div class="sect2" id="restricting-user-permissions">
+<h2>Restricting User Permissions</h2>
+<p><a data-primary="restricting" data-secondary="user permissions" data-type="indexterm" id="re_up"/><a data-primary="user permissions, restricting" data-type="indexterm" id="up_re"/>We’ve seen that we can use the credentials of the <code>kubernetes-admin</code> user to make calls to the Kubernetes API. This user should be used very sparingly, nor should the credentials be shared with a lot of humans. A lot of damage can be done if the credentials fall into the wrong hands. Reserve this user exclusively for humans in charge of cluster administration.</p>
+<p class="pagebreak-before"><a data-primary="documentation" data-secondary="Kubernetes" data-type="indexterm" id="idm46394760356064"/>For other stakeholders of your Kubernetes cluster, you should set up a dedicated user with a limited set of permissions. You may have specific roles in your organization you can map to. For example, you may have a developer role that should be allowed to manage Deployments, Pods, ConfigMaps, Secrets, and Services, but nothing else. To create a new user and assign the relevant RBAC permissions, refer to the <a href="https://oreil.ly/n8EMD">Kubernetes documentation</a>. In a nutshell, there are four steps:</p>
+<ol>
+<li>
+<p>Create a private key.</p>
+</li>
+<li>
+<p>Create and approve a CertificateSigningRequest.</p>
+</li>
+<li>
+<p>Create a Role and a RoleBinding.</p>
+</li>
+<li>
+<p>Add the user to the <a href="https://oreil.ly/OKs9g">kubeconfig file</a>.</p>
+</li>
+</ol>
+<p>We will cover the process in detail, but will come back to the RBAC concept in more detail for a service account in <a data-type="xref" href="#minimizing-permissions-service-account">“Minimizing Permissions for a Service Account”</a>.</p>
+<section data-pdf-bookmark="Creating a private key" data-type="sect3"><div class="sect3" id="idm46394760347824">
+<h3>Creating a private key</h3>
+<p><a data-primary="private keys, creating" data-type="indexterm" id="idm46394760346448"/>Create a private key using the <code>openssl</code> executable. Provide an expressive file name, such as <code>&lt;username&gt;.key</code>:</p>
+<pre data-type="programlisting"><strong>$ openssl genrsa -out johndoe.key 2048</strong>
+Generating RSA private key, 2048 bit long modulus
+...<code>+
+......................................................................</code>+
+e is 65537 (0x10001)</pre>
+<p><a data-primary="CSR (certificate signing request)" data-type="indexterm" id="idm46394760342960"/>Create a certificate signing request (CSR) in a file with the extension <code>.csr</code>. You need to provide the private key from the previous step. The following command uses the username <code>johndoe</code> when asked for entering the “Common Name” value. All other input requests are optional and can be filled in as needed:</p>
+<pre data-type="programlisting"><strong>$ openssl req -new -key johndoe.key -out johndoe.csr</strong>
+You are about to be asked to enter information that will be incorporated
+into your certificate request.
+What you are about to enter is what is called a Distinguished Name or a DN.
+There are quite a few fields but you can leave some blank
+For some fields there will be a default value,
+If you enter '.', the field will be left blank.
+-----
+Country Name (2 letter code) []:
+State or Province Name (full name) []:
+Locality Name (eg, city) []:
+Organization Name (eg, company) []:
+Organizational Unit Name (eg, section) []:
+Common Name (eg, fully qualified host name) []:johndoe
+Email Address []:
+
+Please enter the following 'extra' attributes
+to be sent with your certificate request
+A challenge password []:</pre>
+<p>Retrieve the base64-encoded value of the CSR file content with the following command. You will need it when creating the CertificateSigningRequest object in the next step:</p>
+<pre data-type="programlisting"><strong>$ cat johndoe.csr | base64 | tr -d "\n"</strong>
+LS0tLS1CRUdJTiBDRVJUSUZJQ0FURSBSRVFVRVNULS0tL...</pre>
+</div></section>
+<section data-pdf-bookmark="Creating and approving a CertificateSigningRequest" data-type="sect3"><div class="sect3" id="idm46394760338368">
+<h3>Creating and approving a CertificateSigningRequest</h3>
+<p><a data-primary="CertificateSigningRequest, creating and approving" data-type="indexterm" id="idm46394760336832"/>The following script creates a CertificateSigningRequest object. A <a href="https://oreil.ly/ltFbE">CertificateSigningRequest resource</a> is used to request that a certificate be signed by a denoted signer:</p>
+<pre data-type="programlisting"><strong>$ cat &lt;&lt;EOF | kubectl apply -f -</strong>
+apiVersion: certificates.k8s.io/v1
+kind: CertificateSigningRequest
+metadata:
+  name: johndoe
+spec:
+  request: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURSBSRVFVRVNULS0tL...
+  signerName: kubernetes.io/kube-apiserver-client
+  expirationSeconds: 86400
+  usages:
+  - client auth
+EOF
+certificatesigningrequest.certificates.k8s.io/johndoe created</pre>
+<p>The value for <code>kubernetes.io/kube-apiserver-client</code> for the attribute <code>spec.signerName</code> signs certificates that will be honored as client certificates by the API server. Use the base64-encoded value from the previous step and assign it as a value to the attribute <code>spec.request</code>. Finally, the optional attribute <code>spec.expirationSeconds</code> determines the lifespan of the certificate. The assigned value <code>86400</code> makes the certificate valid for a one day. You will want to increase the expiration time depending on how long you want the certificate to last, or simply refrain from adding the attribute.</p>
+<p>After creating the CertificateSigningRequest object, the condition will be “Pending.” You will need to approve the signing request within 24 hours or the object will be deleted automatically as a means to garbage-collect unnecessary objects in the cluster:</p>
+<pre data-type="programlisting"><strong>$ kubectl get csr johndoe</strong>
+NAME        AGE   SIGNERNAME                            REQUESTOR     \
+  REQUESTEDDURATION   CONDITION
+johndoe     6s    kubernetes.io/kube-apiserver-client   minikube-user \
+  24h                 Pending</pre>
+<p><a data-primary="certificate approve command" data-type="indexterm" id="idm46394760329536"/><a data-primary="commands" data-secondary="certificate approve" data-type="indexterm" id="idm46394760328768"/>Use the <code>certificate approve</code> command to approve the signing request. As a result, the condition changes to “Approved,Issued”:</p>
+<pre data-type="programlisting"><strong>$ kubectl certificate approve johndoe</strong>
+certificatesigningrequest.certificates.k8s.io/johndoe approved
+<strong>$ kubectl get csr johndoe</strong>
+NAME        AGE   SIGNERNAME                            REQUESTOR     \
+  REQUESTEDDURATION   CONDITION
+johndoe     17s   kubernetes.io/kube-apiserver-client   minikube-user \
+  24h                 Approved,Issued</pre>
+<p>Finally, export the issued certificate from the approved CertificateSigningRequest object:</p>
+<pre data-type="programlisting"><strong>$ kubectl get csr johndoe -o jsonpath=<em>{.status.certificate}</em>| base64</strong> \
+  <strong>-d &gt; johndoe.crt</strong></pre>
+</div></section>
+<section data-pdf-bookmark="Creating a Role and a RoleBinding" data-type="sect3"><div class="sect3" id="idm46394760337776">
+<h3>Creating a Role and a RoleBinding</h3>
+<p><a data-primary="commands" data-secondary="create rolebinding" data-type="indexterm" id="idm46394760322000"/><a data-primary="create rolebinding command" data-type="indexterm" id="idm46394760321024"/><a data-primary="RoleBinding, creating" data-type="indexterm" id="idm46394760320288"/><a data-primary="roles" data-secondary="creating" data-type="indexterm" id="idm46394760319616"/>It’s time to assign RBAC permissions. In this step, you will create a Role and a RoleBinding for the user. The Role models an “application developer” role within the organization. A developer should only be allowed to get, list, update, and delete Pods. The following imperative command creates the Role object:</p>
+<pre data-type="programlisting"><strong>$ kubectl create role developer --verb=create --verb=get --verb=list</strong> \
+  <strong>--verb=update --verb=delete --resource=pods</strong>
+role.rbac.authorization.k8s.io/developer created</pre>
+<p>Next, we’ll bind the Role to the user named <code>johndoe</code>. Use the imperative command <code>create rolebinding</code> to achieve that:</p>
+<pre data-type="programlisting"><strong>$ kubectl create rolebinding developer-binding-johndoe --role=developer</strong> \
+  <strong>--user=johndoe</strong>
+rolebinding.rbac.authorization.k8s.io/developer-binding-johndoe created</pre>
+</div></section>
+<section data-pdf-bookmark="Adding the user to the kubeconfig file" data-type="sect3"><div class="sect3" id="idm46394760314128">
+<h3>Adding the user to the kubeconfig file</h3>
+<p><a data-primary="users" data-secondary="adding to kubeconfig file" data-type="indexterm" id="idm46394760312960"/><a data-primary="kubeconfig file" data-type="indexterm" id="idm46394760311920"/>In this last step, you will need to add the user to the kubeconfig file and create the context for a user. Be aware that the cluster name is <code>minikube</code> in the following command, as we are trying this out in a minikube installation:</p>
+<pre data-type="programlisting"><strong>$ kubectl config set-credentials johndoe --client-key=johndoe.key</strong> \
+  <strong>--client-certificate=johndoe.crt --embed-certs=true</strong>
+User "johndoe" set.
+<strong>$ kubectl config set-context johndoe --cluster=minikube --user=johndoe</strong>
+Context "johndoe" created.</pre>
+</div></section>
+<section data-pdf-bookmark="Verifying the permissions" data-type="sect3"><div class="sect3" id="idm46394760308176">
+<h3>Verifying the permissions</h3>
+<p><a data-primary="permissions" data-secondary="verifying" data-type="indexterm" id="idm46394760306736"/><a data-primary="verifying" data-secondary="permissions" data-type="indexterm" id="idm46394760305760"/>It’s time to switch to the user context named <code>johndoe</code>:</p>
+<pre data-type="programlisting"><strong>$ kubectl config use-context johndoe</strong>
+Switched to context "johndoe".</pre>
+<p><a data-primary="kubectl tool" data-type="indexterm" id="idm46394760302880"/>Using <code>kubectl</code> as the client that makes calls to the API server, we’ll verify that the operation should be allowed. The API call for listing all Pods in the <code>default</code> namespace was authenticated and authorized:</p>
+<pre data-type="programlisting"><strong>$ kubectl get pods</strong>
+No resources found in default namespace.</pre>
+<p><a data-primary="default namespace" data-type="indexterm" id="idm46394760299664"/>The output of the command indicates that the <code>default</code> namespace doesn’t contain any Pod object at this time but the call was successful. Let’s also test the negative case. Listing namespaces is a non-permitted operation for the user. Executing the relevant <code>kubectl</code> command will return with an error message:</p>
+<pre data-type="programlisting"><strong>$ kubectl get namespaces</strong>
+Error from server (Forbidden): namespaces is forbidden: User "johndoe" cannot \
+list resource "namespaces" in API group "" at the cluster scope</pre>
+<p>Once you are done with verifying permissions, you may want to switch back to the context with admin permissions:</p>
+<pre data-type="programlisting"><strong>$ kubectl config use-context minikube</strong>
+Switched to context "minikube".</pre>
+</div></section>
+</div></section>
+<section data-pdf-bookmark="Scenario: An Attacker Can Call the API Server from a Service Account" data-type="sect2"><div class="sect2" id="idm46394760294656">
+<h2>Scenario: An Attacker Can Call the API Server from a Service Account</h2>
+<p><a data-primary="Helm package manager" data-type="indexterm" id="idm46394760293472"/><a data-primary="scenarios" data-secondary="attacker can call API Server from Service Account" data-type="indexterm" id="idm46394760292768"/>A user represents a real person who commonly interacts with the Kubernetes cluster using the <code>kubectl</code> executable or the UI dashboard. Under rare conditions, applications running inside of a Pod’s container need to interact with the Kubernetes API. A typical example for such a requirement is the package manager <a href="https://helm.sh">Helm</a>. Helm manages Kubernetes resources based on the YAML manifests bundled in a Helm chart. Kubernetes uses a service account to authenticate the Helm service process with the API server through an authentication token. This service account can be assigned to a Pod and mapped to RBAC rules.</p>
+<p><a data-primary="" data-startref="re_up" data-type="indexterm" id="idm46394760289904"/><a data-primary="" data-startref="up_re" data-type="indexterm" id="idm46394760288928"/>An attacker who gains access to the Pod will likely also be able to misuse the service account to make calls to the Kubernetes API, as shown in <a data-type="xref" href="#service-account-attacker">Figure 3-3</a>.</p>
+<figure><div class="figure" id="service-account-attacker">
+<img alt="ckss 0303" height="299" src="assets/ckss_0303.png" width="1384"/>
+<h6><span class="label">Figure 3-3. </span>An attacker uses a service account to call the API server</h6>
+</div></figure>
+</div></section>
+<section data-pdf-bookmark="Minimizing Permissions for a Service Account" data-type="sect2"><div class="sect2" id="minimizing-permissions-service-account">
+<h2>Minimizing Permissions for a Service Account</h2>
+<p><a data-primary="permissions" data-secondary="minimizing for Service Account" data-type="indexterm" id="per_sa"/><a data-primary="service account" data-secondary="minimizing permissions for" data-type="indexterm" id="sa_per"/>It’s important to limit the permissions to only those service accounts that are really necessary for the application to function. The next sections will explain how to achieve this to minimize the potential attack surface.</p>
+<p>For this scenario to work, you’ll need to create a ServiceAccount object and assign it to the Pod. Service accounts can be tied in with RBAC and assigned a Role and RoleBinding to define what operations they should be allowed to perform.</p>
+<section data-pdf-bookmark="Binding the service account to a Pod" data-type="sect3"><div class="sect3" id="idm46394760279568">
+<h3>Binding the service account to a Pod</h3>
+<p><a data-primary="Pods" data-secondary="binding service account to" data-type="indexterm" id="idm46394760278224"/><a data-primary="service account" data-secondary="binding to Pods" data-type="indexterm" id="idm46394760277184"/>As a starting point, we are going to a set up a Pod that lists all Pods and Deployments in the namespace <code>k97</code> by calling the Kubernetes API. The call is made as part of an infinite loop every ten seconds. The response from the API call will be written to standard output accessible via the Pod’s logs.</p>
+<p>To authenticate against the API server, we’ll send a bearer token associated with the service account used by the Pod. The default behavior of a service account is to auto-mount API credentials on the path <code>/var/run/secrets/kubernetes.io/serviceaccount/token</code>. We’ll simply get the contents of the file using the <code>cat</code> command line tool and send them along as a header for the HTTP request. <a data-type="xref" href="#service-account-pod-setup">Example 3-1</a> defines the namespace, the service account, and the Pod in a single YAML manifest file <code>setup.yaml</code>.</p>
+<div data-type="example" id="service-account-pod-setup">
+<h5><span class="label">Example 3-1. </span>YAML manifest for assigning a service account to a Pod</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Namespace</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">k97</code><code class="w"/>
+<code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">ServiceAccount</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">sa-api</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">k97</code><code class="w"/>
+<code class="nn">---</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Pod</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">list-objects</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">k97</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">serviceAccountName</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">sa-api</code><code class="w"/>
+<code class="w">  </code><code class="nt">containers</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">pods</code><code class="w"/>
+<code class="w">    </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">alpine/curl:3.14</code><code class="w"/>
+<code class="w">    </code><code class="nt">command</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">[</code><code class="s">'sh'</code><code class="p-Indicator">,</code><code class="w"> </code><code class="s">'-c'</code><code class="p-Indicator">,</code><code class="w"> </code><code class="s">'while</code><code class="nv"> </code><code class="s">true;</code><code class="nv"> </code><code class="s">do</code><code class="nv"> </code><code class="s">curl</code><code class="nv"> </code><code class="s">-s</code><code class="nv"> </code><code class="s">-k</code><code class="nv"> </code><code class="s">-m</code><code class="nv"> </code><code class="s">5</code><code class="nv"> </code><code class="s">-H</code><code class="nv"> </code><code class="s">\</code><code class="w"/>
+<code class="w">              </code><code class="s">"Authorization:</code><code class="nv"> </code><code class="s">Bearer</code><code class="nv"> </code><code class="s">$(cat</code><code class="nv"> </code><code class="s">/var/run/secrets/kubernetes.io/</code><code class="nv"> </code><code class="s">\</code><code class="w"/>
+<code class="w">              </code><code class="s">serviceaccount/token)"</code><code class="nv"> </code><code class="s">https://kubernetes.default.svc.cluster.</code><code class="nv"> </code><code class="s">\</code><code class="w"/>
+<code class="w">              </code><code class="s">local/api/v1/namespaces/k97/pods;</code><code class="nv"> </code><code class="s">sleep</code><code class="nv"> </code><code class="s">10;</code><code class="nv"> </code><code class="s">done'</code><code class="p-Indicator">]</code><code class="w"/>
+<code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">deployments</code><code class="w"/>
+<code class="w">    </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">alpine/curl:3.14</code><code class="w"/>
+<code class="w">    </code><code class="nt">command</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">[</code><code class="s">'sh'</code><code class="p-Indicator">,</code><code class="w"> </code><code class="s">'-c'</code><code class="p-Indicator">,</code><code class="w"> </code><code class="s">'while</code><code class="nv"> </code><code class="s">true;</code><code class="nv"> </code><code class="s">do</code><code class="nv"> </code><code class="s">curl</code><code class="nv"> </code><code class="s">-s</code><code class="nv"> </code><code class="s">-k</code><code class="nv"> </code><code class="s">-m</code><code class="nv"> </code><code class="s">5</code><code class="nv"> </code><code class="s">-H</code><code class="nv"> </code><code class="s">\</code><code class="w"/>
+<code class="w">              </code><code class="s">"Authorization:</code><code class="nv"> </code><code class="s">Bearer</code><code class="nv"> </code><code class="s">$(cat</code><code class="nv"> </code><code class="s">/var/run/secrets/kubernetes.io/</code><code class="nv"> </code><code class="s">\</code><code class="w"/>
+<code class="w">              </code><code class="s">serviceaccount/token)"</code><code class="nv"> </code><code class="s">https://kubernetes.default.svc.cluster.</code><code class="nv"> </code><code class="s">\</code><code class="w"/>
+<code class="w">              </code><code class="s">local/apis/apps/v1/namespaces/k97/deployments;</code><code class="nv"> </code><code class="s">sleep</code><code class="nv"> </code><code class="s">10;</code><code class="nv"> </code><code class="s">done'</code><code class="p-Indicator">]</code><code class="w"/></pre></div>
+<p>Create the objects from the YAML file with the following command:</p>
+<pre data-type="programlisting"><strong>$ kubectl apply -f setup.yaml</strong>
+namespace/k97 created
+serviceaccount/sa-api created
+pod/list-objects created</pre>
+</div></section>
+<section data-pdf-bookmark="Verifying the default permissions" data-type="sect3"><div class="sect3" id="idm46394759997440">
+<h3>Verifying the default permissions</h3>
+<p><a data-primary="default permissions, verifying" data-type="indexterm" id="idm46394760097776"/><a data-primary="verifying" data-secondary="default permissions" data-type="indexterm" id="idm46394760097072"/>The Pod named <code>list-objects</code> makes a call to the API server to retrieve the list of Pods and Deployments in dedicated containers. The container <code>pods</code> performs the call to list Pods. The container <code>deployments</code> sends a request to the API server to list Deployments.</p>
+<p><a data-primary="documentation" data-secondary="Kubernetes" data-type="indexterm" id="idm46394760094336"/>As explained in the <a href="https://oreil.ly/gBp30">Kubernetes documentation</a>, the default RBAC policies do not grant any permissions to service accounts outside of the <code>kube-system</code> namespace. The logs of the containers <code>pods</code> and <code>deployments</code> return an error message indicating that the service account <code>sa-api</code> is not authorized to list the resources:</p>
+<pre data-type="programlisting"><strong>$ kubectl logs list-objects -c pods -n k97</strong>
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "pods is forbidden: User \"system:serviceaccount:k97:sa-api\" \
+              cannot list resource \"pods\" in API group \"\" in the \
+              namespace \"k97\"",
+  "reason": "Forbidden",
+  "details": {
+    "kind": "pods"
+  },
+  "code": 403
+}
+<strong>$ kubectl logs list-objects -c deployments -n k97</strong>
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "deployments.apps is forbidden: User \
+              \"system:serviceaccount:k97:sa-api\" cannot list resource \
+              \"deployments\" in API group \"apps\" in the namespace \
+              \"k97\"",
+  "reason": "Forbidden",
+  "details": {
+    "group": "apps",
+    "kind": "deployments"
+  },
+  "code": 403
+}</pre>
+<p>Next up, we’ll stand up a ClusterRole and RoleBinding object with the required API permissions to perform the necessary calls.</p>
+</div></section>
+<section data-pdf-bookmark="Creating the ClusterRole" data-type="sect3"><div class="sect3" id="idm46394760088864">
+<h3>Creating the ClusterRole</h3>
+<p><a data-primary="ClusterRole" data-type="indexterm" id="idm46394760087456"/>Start by defining the ClusterRole named <code>list-pods-clusterrole</code> shown in <a data-type="xref" href="#list-pods-clusterrole">Example 3-2</a> in the file <code>clusterrole.yaml</code>. The set of the rules only adds the Pod resource and the verb <code>list</code>.</p>
+<div data-type="example" id="list-pods-clusterrole">
+<h5><span class="label">Example 3-2. </span>YAML manifest for a ClusterRole that allows listing Pods</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">rbac.authorization.k8s.io/v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">ClusterRole</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">list-pods-clusterrole</code><code class="w"/>
+<code class="nt">rules</code><code class="p">:</code><code class="w"/>
+<code class="p-Indicator">-</code><code class="w"> </code><code class="nt">apiGroups</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">[</code><code class="s">""</code><code class="p-Indicator">]</code><code class="w"/>
+<code class="w">  </code><code class="nt">resources</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">[</code><code class="s">"pods"</code><code class="p-Indicator">]</code><code class="w"/>
+<code class="w">  </code><code class="nt">verbs</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">[</code><code class="s">"list"</code><code class="p-Indicator">]</code><code class="w"/></pre></div>
+<p>Create the object by pointing to its corresponding YAML manifest file:</p>
+<pre data-type="programlisting"><strong>$ kubectl apply -f clusterrole.yaml</strong>
+clusterrole.rbac.authorization.k8s.io/list-pods-clusterrole created</pre>
+</div></section>
+<section data-pdf-bookmark="Creating the RoleBinding" data-type="sect3"><div class="sect3" id="idm46394759866800">
+<h3>Creating the RoleBinding</h3>
+<p><a data-type="xref" href="#rolebinding-service-account">Example 3-3</a> defines the YAML manifest for the RoleBinding in the file <code>rolebinding.yaml</code>. <a data-primary="RoleBinding, creating" data-type="indexterm" id="idm46394759926432"/>The RoleBinding maps the ClusterRole <code>list-pods-clusterrole</code> to the service account named <code>sa-pod-api</code> and only applies to the namespace <code>k97</code>.</p>
+<div data-type="example" id="rolebinding-service-account">
+<h5><span class="label">Example 3-3. </span>YAML manifest for a RoleBinding attached to a service account</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">rbac.authorization.k8s.io/v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">RoleBinding</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">serviceaccount-pod-rolebinding</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">k97</code><code class="w"/>
+<code class="nt">subjects</code><code class="p">:</code><code class="w"/>
+<code class="p-Indicator">-</code><code class="w"> </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">ServiceAccount</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">sa-api</code><code class="w"/>
+<code class="nt">roleRef</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">ClusterRole</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">list-pods-clusterrole</code><code class="w"/>
+<code class="w">  </code><code class="nt">apiGroup</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">rbac.authorization.k8s.io</code><code class="w"/></pre></div>
+<p><a data-primary="apply command" data-type="indexterm" id="idm46394759862304"/><a data-primary="commands" data-secondary="apply" data-type="indexterm" id="idm46394759857376"/>Create both the RoleBinding object using the <code>apply</code> command:</p>
+<pre data-type="programlisting"><strong>$ kubectl apply -f rolebinding.yaml</strong>
+rolebinding.rbac.authorization.k8s.io/serviceaccount-pod-rolebinding created</pre>
+</div></section>
+<section data-pdf-bookmark="Verifying the granted permissions" data-type="sect3"><div class="sect3" id="idm46394759854880">
+<h3>Verifying the granted permissions</h3>
+<p><a data-primary="granted permissions, verifying" data-type="indexterm" id="idm46394759853504"/><a data-primary="verifying" data-secondary="granted permissions" data-type="indexterm" id="idm46394759852640"/><a data-primary="curl command" data-type="indexterm" id="idm46394759851664"/><a data-primary="commands" data-secondary="curl" data-type="indexterm" id="idm46394759850992"/>With the granted <code>list</code> permissions, the service account can now properly retrieve all the Pods in the <code>k97</code> namespace. The <code>curl</code> command in the <code>pods</code> container succeeds, as shown in the following output:</p>
+<pre data-type="programlisting"><strong>$ kubectl logs list-objects -c pods -n k97</strong>
+{
+  "kind": "PodList",
+  "apiVersion": "v1",
+  "metadata": {
+    "resourceVersion": "628"
+  },
+  "items": [
+      {
+        "metadata": {
+          "name": "list-objects",
+          "namespace": "k97",
+          ...
+      }
+  ]
+}</pre>
+<p>We did not grant any permissions to the service account for other resources. Listing the Deployments in the <code>k97</code> namespace still fails. The following output shows the response from the <code>curl</code> command in the <code>deployments</code> namespace:</p>
+<pre data-type="programlisting"><strong>$ kubectl logs list-objects -c deployments -n k97</strong>
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "deployments.apps is forbidden: User \
+              \"system:serviceaccount:k97:sa-api\" cannot list resource \
+              \"deployments\" in API group \"apps\" in the namespace \
+              \"k97\"",
+  "reason": "Forbidden",
+  "details": {
+    "group": "apps",
+    "kind": "deployments"
+  },
+  "code": 403
+}</pre>
+<p>Feel free to modify the ClusterRole object to allow listing Deployment objects as well.</p>
+</div></section>
+<section data-pdf-bookmark="Disabling automounting of a service account token" data-type="sect3"><div class="sect3" id="idm46394759759792">
+<h3>Disabling automounting of a service account token</h3>
+<p><a data-primary="automounting, disabling for service account tokens" data-type="indexterm" id="idm46394759758544"/><a data-primary="disabling" data-secondary="automounting for service account tokens" data-type="indexterm" id="idm46394759757808"/><a data-primary="service account" data-secondary="disabling automounting for tokens" data-type="indexterm" id="idm46394759756928"/><a data-primary="tokens, service account" data-type="indexterm" id="idm46394759756016"/>The Pod described in the previous section used the service account’s token as a means to authenticate against the API server. Mounting the token file at <code>/var/run/secrets/kubernetes.io/serviceaccount/token</code> is the standard behavior of every service account. You will really only need the contents of the file if the Pod actually interacts with the Kubernetes API. In all other cases, this behavior poses a potential security risk as access to the Pod will directly lead an attacker to the token.</p>
+<p>You can disable the automount behavior for a service account object by assigning the value <code>false</code> to the attribute <code>automountServiceAccountToken</code>, as shown in 
+<span class="keep-together"><a data-type="xref" href="#service-account-disable-automount">Example 3-4</a>.</span></p>
+<div data-type="example" id="service-account-disable-automount">
+<h5><span class="label">Example 3-4. </span>Opting out of a service account’s token automount behavior</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">ServiceAccount</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">sa-api</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">k97</code><code class="w"/>
+<code class="nt">automountServiceAccountToken</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">false</code><code class="w"/></pre></div>
+<p>If you want to disable the automount behavior for individual Pods, use the attribute <code>spec.automountServiceAccountToken</code> in the Pod definition. <a data-type="xref" href="#pod-serviceaccount-disable-automount">Example 3-5</a> shows a YAML manifest for a Pod.</p>
+<div data-type="example" id="pod-serviceaccount-disable-automount">
+<h5><span class="label">Example 3-5. </span>Disabling token automounting for a service account in a Pod</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Pod</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">list-objects</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">k97</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">serviceAccountName</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">sa-api</code><code class="w"/>
+<code class="w">  </code><code class="nt">automountServiceAccountToken</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">false</code><code class="w"/>
+<code class="w">  </code><code class="p">...</code><code class="w"/></pre></div>
+</div></section>
+<section data-pdf-bookmark="Generating a service account token" data-type="sect3"><div class="sect3" id="generating-serviceaccount-token">
+<h3>Generating a service account token</h3>
+<p><a data-primary="service account" data-secondary="generating tokens" data-type="indexterm" id="idm46394759629664"/>There are a variety of use cases that speak for wanting to create a service account that <em>disables</em> token automounting. For example, you may need access to the Kubernetes API from an external tool or a continuous delivery pipeline to query for information about existing objects. Authenticating against the API server in those scenarios still requires a token. The scenarios listed do not necessarily run a Pod with an assigned service account, but simply perform a RESTful API call from a tool like <code>curl</code>.</p>
+<p><a data-primary="commands" data-secondary="create token" data-type="indexterm" id="idm46394759627392"/><a data-primary="create token command" data-type="indexterm" id="idm46394759626416"/>To create a token manually, execute the <code>create token</code> command and provide the name of the service account as an argument. The output of the command renders the token:</p>
+<pre data-type="programlisting"><strong>$ kubectl create token sa-api</strong>
+eyJhbGciOiJSUzI1NiIsImtpZCI6IjBtQkJzVWlsQjl...</pre>
+<p>You’ll need to store the token in a safe place, e.g., a password manager. You cannot retrieve the token again if you lose it. You can only recreate it with the same command, which will automatically invalidate the previous token. All references that use the token will have to be changed.</p>
+<p>For automated processes, it might be helpful to generate a token with a limited lifespan. The <code>--duration</code> will automatically invalidate the token after the “time-to-life” runs out:</p>
+<pre data-type="programlisting"><strong>$ kubectl create token sa-api --duration 10m</strong>
+eyJhbGciOiJSUzI1NiIsImtpZCI6IjBtQkJzVWlsQjl...</pre>
+</div></section>
+<section data-pdf-bookmark="Creating a Secret for a service account" data-type="sect3"><div class="sect3" id="creating-secret-serviceaccount">
+<h3>Creating a Secret for a service account</h3>
+<p><a data-primary="Secrets" data-secondary="creating for service accounts" data-type="indexterm" id="idm46394759611760"/><a data-primary="service account" data-secondary="creating Secrets for" data-type="indexterm" id="idm46394759610912"/>With Kubernetes 1.24, a ServiceAccount object does not automatically create a corresponding Secret object containing the token anymore. See the <a href="https://oreil.ly/MSPuX">release notes</a> for more information. Listing the ServiceAccount object renders 0 for the number of Secrets. The object also doesn’t contain the <code>secrets</code> attribute anymore in the YAML representation:</p>
+<pre data-type="programlisting"><strong>$ kubectl get serviceaccount sa-api -n k97</strong>
+NAME     SECRETS   AGE
+sa-api   0         42m</pre>
+<p>You can either generate the token using the <code>create token</code> command, as described in <a data-type="xref" href="#generating-serviceaccount-token">“Generating a service account token”</a>, or manually create a corresponding Secret. <a data-type="xref" href="#serviceaccount-secret">Example 3-6</a> shows a YAML manifest for such a Secret.</p>
+<div data-type="example" id="serviceaccount-secret">
+<h5><span class="label">Example 3-6. </span>Creating a Secret for a service account manually</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Secret</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">sa-api-secret</code><code class="w"/>
+<code class="w">  </code><code class="nt">namespace</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">k97</code><code class="w"/>
+<code class="w">  </code><code class="nt">annotations</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">kubernetes.io/service-account.name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">sa-api</code><code class="w"/>
+<code class="nt">type</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kubernetes.io/service-account-token</code><code class="w"/></pre></div>
+<p>To assign the service account to the Secret, add the annotation with the key <code>kubernetes.io/service-account.name</code>. The following command creates the Secret object:</p>
+<pre data-type="programlisting"><strong>$ kubectl create -f secret.yaml</strong>
+secret/sa-api-secret created</pre>
+<p><a data-primary="" data-startref="ac_res" data-type="indexterm" id="idm46394759563216"/><a data-primary="" data-startref="api_res" data-type="indexterm" id="idm46394759562336"/><a data-primary="" data-startref="ch_res" data-type="indexterm" id="idm46394759561392"/><a data-primary="" data-startref="res_api" data-type="indexterm" id="idm46394759560448"/><a data-primary="" data-startref="per_sa" data-type="indexterm" id="idm46394759559504"/><a data-primary="" data-startref="sa_per" data-type="indexterm" id="idm46394759558560"/>You can find the token in the “Data” section when describing the Secret object:</p>
+<pre data-type="programlisting"><strong>$ kubectl describe secret sa-api-secret -n k97</strong>
+...
+Data
+====
+ca.crt:     1111 bytes
+namespace:  3 bytes
+token:      eyJhbGciOiJSUzI1NiIsImtpZCI6IjBtQkJzVWlsQjl...</pre>
+</div></section>
+</div></section>
+</div></section>
+<section data-pdf-bookmark="Updating Kubernetes Frequently" data-type="sect1"><div class="sect1" id="idm46394760284016">
+<h1>Updating Kubernetes Frequently</h1>
+<p><a data-primary="cluster hardening" data-secondary="updating Kubernetes" data-type="indexterm" id="ch_up"/><a data-primary="updating Kubernetes" data-type="indexterm" id="up_kub"/><a data-primary="Kubernetes" data-secondary="updating" data-type="indexterm" id="kub_up"/><a data-primary="LTS (Long-Term Support)" data-type="indexterm" id="idm46394759522112"/>Installing a Kubernetes cluster with a specific version is not a one-time fire-and-forget operation. Even if you used the latest Long-Term Support (LTS) Release at the time of installation, it does not guarantee that your cluster is without security vulnerabilities.</p>
+<p><a data-primary="CVE (Common Vulnerabilities and Exposures) database" data-type="indexterm" id="idm46394759521120"/>As time goes by, security-related bugs and weaknesses will be discovered. This statement includes the underlying operating system and the dependencies the cluster nodes run on. An attacker can easily look up security vulnerabilities in the publicly disclosed <a href="https://oreil.ly/FHhXD">Common Vulnerabilities and Exposures (CVE) database</a> and exploit them.</p>
+<section data-pdf-bookmark="Versioning Scheme" data-type="sect2"><div class="sect2" id="idm46394759519632">
+<h2>Versioning Scheme</h2>
+<p><a data-primary="versioning scheme" data-type="indexterm" id="idm46394759518496"/><a data-primary="semantic versioning scheme" data-type="indexterm" id="idm46394759517792"/>It’s up to the cluster administrator to update the Kubernetes version across all nodes on a regular basis. Kubernetes follows the <a href="https://semver.org">semantic versioning scheme</a>. A Semantic Version consists of a major version, minor version, and patch version. For example, for the Kubernetes version 1.24.3, the major version is 1, the minor version is 24, and the patch version is 3.</p>
+<p>Each portion of the version carries a specific meaning. A change to the major version portion indicates a breaking change. Incrementing the minor version portion means that new functionality has been added in a backward-compatible manner. The patch version portion simply fixes a bug.</p>
+<div data-type="warning" epub:type="warning"><h1>Breaking changes in Kubernetes with minor version updates</h1>
+<p><a data-primary="PSP (PodSecurityPolicy) admission controller" data-type="indexterm" id="idm46394759514800"/><a data-primary="deprecation policy (Kubernetes)" data-type="indexterm" id="idm46394759514000"/>It’s important to mention that Kubernetes doesn’t always stick to the strict interpretation of semantic versioning. For example, the PodSecurityPolicy (PSP) admission controller has been replaced by the Pod Security Admission concept in <a href="https://oreil.ly/JE-i8">version 1.25.0</a>. Conventionally, those changes should only happen with a major version update. Reference the <a href="https://oreil.ly/on9lu">Kubernetes deprecation policy</a> for a better understanding on how an API, a flag, or a feature is phased out.</p>
+</div>
+</div></section>
+<section data-pdf-bookmark="Release Cadence" data-type="sect2"><div class="sect2" id="idm46394759511296">
+<h2>Release Cadence</h2>
+<p><a data-primary="release cadence" data-type="indexterm" id="idm46394759510128"/>You can expect <a href="https://oreil.ly/LGIn5">a new minor version release</a> of Kubernetes every three months. The release may include new features and additional bug fixes. Security fixes may be implemented as needed for the latest release of Kubernetes and will be backported to the two minor releases before that. Always staying on top of updating to the latest releases for your own cluster(s) takes quite a bit of people-power. You will need to reserve time for those activities accordingly.</p>
+</div></section>
+<section data-pdf-bookmark="Performing the Upgrade Process" data-type="sect2"><div class="sect2" id="idm46394759508304">
+<h2>Performing the Upgrade Process</h2>
+<p>It is recommended to upgrade from a minor version to the next higher one (e.g., from 1.23 to 1.24), or from a patch version to a more recent one (e.g., from 1.24.1 to 1.24.3). Abstain from jumping up multiple minor versions to avoid unexpected side effects.</p>
+<p>You can find a full description of the <a href="https://oreil.ly/RxC9j">upgrade steps</a> in the official Kubernetes documentation. <a data-type="xref" href="#cluster_version_upgrade_process">Figure 3-4</a> illustrates the upgrade process on a high level.</p>
+<p><a data-primary="Certified Kubernetes Administrator (CKA) Study Guide (Muschko)" data-type="indexterm" id="idm46394759504448"/><a data-primary="Muschko, Benjamin" data-secondary="Certified Kubernetes Administrator (CKA) Study Guide" data-type="indexterm" id="idm46394759503776"/>The cluster version upgrade process is already part of the CKA exam. Given that you have to pass the CKA as a prerequisite, I would assume that you already know how to perform the process. For a detailed description, refer to <a class="orm:hideurl" href="https://oreil.ly/cka-study-guide"><em>Certified Kubernetes Administrator (CKA) Study Guide</em></a>.</p>
+<figure><div class="figure" id="cluster_version_upgrade_process">
+<img alt="ckss 0304" height="1673" src="assets/ckss_0304.png" width="1441"/>
+<h6><span class="label">Figure 3-4. </span>Process for a cluster version upgrade</h6>
+</div></figure>
+</div></section>
+</div></section>
+<section class="less_space pagebreak-before" data-pdf-bookmark="Summary" data-type="sect1"><div class="sect1" id="idm46394759499632">
+<h1>Summary</h1>
+<p><a data-primary="" data-startref="ch_up" data-type="indexterm" id="idm46394759498080"/><a data-primary="" data-startref="up_kub" data-type="indexterm" id="idm46394759497104"/><a data-primary="" data-startref="kub_up" data-type="indexterm" id="idm46394759496160"/>Users, clients applications (such as <code>kubectl</code> or <code>curl</code>), Pods using service accounts, and cluster components all communicate with the API server to manage objects. It’s paramount to secure the API server to prevent access with malicious intent.</p>
+<p>To minimize the attack surface area, avoid exposing the API server to the internet using firewall rules. For every user or service account, restrict the permissions to execute operations against the Kubernetes API to the bare minimum using RBAC rules. With minimized permissions, attackers can cause far less damage in case they can gain access to credentials.</p>
+<p>Make sure to upgrade the version of your Kubernetes cluster. Incorporating bug and security fixes will decrease the risk of exposing unnecessary vulnerabilities attackers can use to their advantage.</p>
+</div></section>
+<section data-pdf-bookmark="Exam Essentials" data-type="sect1"><div class="sect1" id="idm46394759493296">
+<h1>Exam Essentials</h1>
+<dl>
+<dt>Practice interacting with the Kubernetes API.</dt>
+<dd>
+<p>This chapter demonstrated the different ways to communicate with the Kubernetes API. We performed API requests by switching to a user context, and with the help of a RESTful API call using <code>curl</code>. You will need to understand how to determine the endpoint of the API server and how to use different authentication methods, e.g., client credentials and bearer tokens. Explore the Kubernetes API and its endpoints on your own for broader exposure.</p>
+</dd>
+<dt>Understand the implications of defining RBAC rules for users and service accounts.</dt>
+<dd>
+<p>Anonymous user requests to the Kubernetes API will not allow any substantial operations. For requests coming from a user or a service account, you will need to carefully analyze permissions granted to the subject. Learn the ins and outs of defining RBAC rules by creating the relevant objects to control permissions. Service accounts automount a token when used in a Pod. Only expose the token as a Volume if you are intending to make API calls from the Pod.</p>
+</dd>
+<dt>Be aware of Kubernetes release cadence and the need for upgrading the cluster.</dt>
+<dd>
+<p>A Kubernetes cluster needs to be cared for over time for security reasons. Attackers may try to take advantage of known vulnerabilities in outdated Kubernetes versions. The version upgrade process is part of every administrator’s job and shouldn’t be ignored.</p>
+</dd>
+</dl>
+</div></section>
+<section class="less_space pagebreak-before" data-pdf-bookmark="Sample Exercises" data-type="sect1"><div class="sect1" id="idm46394759487072">
+<h1>Sample Exercises</h1>
+<p><a data-primary="cluster hardening" data-secondary="sample exercises" data-type="indexterm" id="idm46394759485456"/><a data-primary="sample exercises" data-secondary="cluster hardening" data-type="indexterm" id="idm46394759484480"/><a data-primary="" data-startref="ch_ch" data-type="indexterm" id="idm46394759483536"/>Solutions to these exercises are available in the <a data-type="xref" href="app01.xhtml#appendix-a">Appendix</a>.</p>
+<ol>
+<li>
+<p>Create a client certificate and key for the user named <code>jill</code> in the group <code>observer</code>. With the admin context, create the context for the user <code>jill</code>.</p>
+</li>
+<li>
+<p>For the group (not the user!), define a Role and RoleBinding in the <code>default</code> namespace that allow the verbs <code>get</code>, <code>list</code>, and <code>watch</code> for the resources Pods, ConfigMaps, and Secrets. Create the objects.</p>
+</li>
+<li>
+<p>Switch to the user context and execute a <code>kubectl</code> command that allows one of the granted operations, and one <code>kubectl</code> command that should not be permitted. Switch back to the <code>admin</code> context.</p>
+</li>
+<li>
+<p>Create a Pod named <code>service-list</code> in the namespace <code>t23</code>. The container uses the image <code>alpine/curl:3.14</code> and makes a <code>curl</code> call to the Kubernetes API that lists Service objects in the <code>default</code> namespace in an infinite loop. Create and attach the service account <code>api-call</code>. Inspect the container logs after the Pod has been started. What response do you expect to see from the <code>curl</code> command?</p>
+</li>
+<li>
+<p>Assign a ClusterRole and RoleBinding to the service account that only allows the operation needed by the Pod. Have a look at the response from the <code>curl</code> command.</p>
+</li>
+<li>
+<p>Configure the Pod so that automounting of the service account token is disabled. Retrieve the token value and use it directly with the <code>curl</code> command. Make sure that the <code>curl</code> command can still authorize the operation.</p>
+</li>
+<li>
+<p>Navigate to the directory <em>app-a/ch03/upgrade-version</em> of the checked-out GitHub repository <a href="https://oreil.ly/sImXZ"><em>bmuschko/cks-study-guide</em></a>. Start up the VMs running the cluster using the command <code>vagrant up</code>. Upgrade all nodes of the cluster from Kubernetes 1.25.6 to 1.26.1. The cluster consists of a single control plane node named <code>kube-control-plane</code>, and one worker node named <code>kube-worker-1</code>. Once done, shut down the cluster using <code>vagrant destroy -f</code>.</p>
+<p><em>Prerequisite:</em> This exercise requires the installation of the tools <a href="https://oreil.ly/FiyeH">Vagrant</a> and <a href="https://oreil.ly/WW8IK">
+<span class="keep-together">VirtualBox</span></a>.</p>
+</li>
+</ol>
+<aside data-type="sidebar" epub:type="sidebar"><div class="sidebar" id="idm46394759459392">
+<h1>Interactive Exam Practice</h1>
+<p>Get more hands-on training and test your CKS exam readiness by working through our interactive CKS labs. Each step of the lab must be completed correctly before you can move to the next step. If you get stuck, you can view the solution and learn how to complete the step.</p>
+<p>The following labs cover material from this chapter:</p>
+<ul>
+<li>
+<p><a href="https://learning.oreilly.com/scenarios/assigning-rbac-permissions/9781098149703/">Assigning RBAC Permissions Using a ServiceAccount</a></p>
+</li>
+<li>
+<p><a href="https://learning.oreilly.com/scenarios/modifying-rbac-permissions/9781098149710/">Modifying RBAC Permissions for a ServiceAccount</a></p>
+</li>
+<li>
+<p><a href="https://learning.oreilly.com/scenarios/disabling-serviceaccount-automounting/9781098149765/">Disabling ServiceAccount Automounting When Consumed by a Pod</a></p>
+</li>
+<li>
+<p><a href="https://learning.oreilly.com/scenarios/configuring-the-api/9781098149772/">Configuring the API Server with Specific TLS Parameters</a></p>
+</li>
+</ul>
+</div></aside>
+</div></section>
+</div></section></div></body></html>
