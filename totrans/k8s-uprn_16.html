@@ -1,0 +1,652 @@
+<html><head></head><body>
+<div id="sbo-rt-content"><section data-pdf-bookmark="Chapter 16. Integrating Storage Solutions and Kubernetes" data-type="chapter" epub:type="chapter"><div class="chapter" id="storage_k8s">
+<h1><span class="label">Chapter 16. </span>Integrating Storage Solutions <span class="keep-together">and Kubernetes</span></h1>
+<p>In many cases, decoupling state from applications and building your microservices to be as stateless as possible results in maximally reliable, manageable systems.<a data-primary="storage solutions, integrating with Kubernetes" data-type="indexterm" id="ix_store"/><a data-primary="state" data-type="indexterm" id="idm45664074025936"/></p>
+<p>However, nearly every system that has any complexity has state in the system somewhere, from the records in a database to the index shards that serve results for a web search engine. At some point, you have to have data stored somewhere.</p>
+<p>Integrating this data with containers and container orchestration solutions is often the most complicated aspect of building a distributed system. This complexity largely stems from the fact that the move to containerized architectures is also a move toward decoupled, immutable, and declarative application development. These patterns are relatively easy to apply to stateless web applications, but even “cloud native” storage solutions like Cassandra or MongoDB involve some sort of manual or imperative steps to set up a reliable, replicated solution.<a data-primary="cloud native development" data-secondary="storage solutions" data-type="indexterm" id="idm45664074024208"/></p>
+<p>As an example of this, consider setting up a ReplicaSet in MongoDB, which involves deploying the Mongo daemon and then running an imperative command to identify the leader, as well as the participants, in the Mongo cluster.<a data-primary="MongoDB" data-secondary="setting up a ReplicaSet in" data-type="indexterm" id="idm45664074022544"/><a data-primary="ReplicaSets" data-secondary="setting up in MongoDB" data-type="indexterm" id="idm45664074021552"/> Of course, these steps can be scripted, but in a containerized world, it is difficult to see how to integrate such commands into a deployment. Likewise, even getting DNS-resolvable names for individual containers in a replicated set of containers is challenging.</p>
+<p>Additional complexity comes from the fact that there is data gravity. Most containerized systems aren’t built in a vacuum; they are usually adapted from existing systems deployed onto VMs, and these systems likely include data that has to be imported or migrated.</p>
+<p>Finally, evolution to the cloud often means that storage is an externalized cloud service, and, in that context, it can never really exist inside of the Kubernetes cluster.</p>
+<p>This chapter covers a variety of approaches for integrating storage into containerized microservices in Kubernetes. First, we cover how to import existing external storage solutions (either cloud services or running on VMs) into Kubernetes. Next, we explore how to run reliable singletons inside of Kubernetes that enable you to have an environment that largely matches the VMs where you previously deployed storage solutions. Finally, we cover StatefulSets, which are the Kubernetes resource most people use for stateful workloads in Kubernetes.</p>
+<section data-pdf-bookmark="Importing External Services" data-type="sect1"><div class="sect1" id="idm45664074018384">
+<h1>Importing External Services</h1>
+<p>In many cases, you have an existing machine running in your network that has some sort of database running on it.<a data-primary="services" data-secondary="importing external storage services" data-type="indexterm" id="ix_serimpstor"/><a data-primary="storage solutions, integrating with Kubernetes" data-secondary="importing external services" data-type="indexterm" id="ix_storeimpext"/> In this situation, you may not want to immediately move that database into containers and Kubernetes. Perhaps it is run by a different team, or you are doing a gradual move, or the task of migrating the data is simply more trouble than it’s worth.</p>
+<p>Regardless of the reasons for staying put, this legacy server and service are not going to move into Kubernetes⁠—but it’s still worthwhile to represent this server in Kubernetes. When you do this, you get to take advantage of all the built-in naming and service-discovery primitives provided by Kubernetes. Additionally, this enables you to configure all your applications so that it looks like the database that is running on a machine somewhere is actually a Kubernetes service. This means that it is trivial to replace it with a database that is a Kubernetes service. For example, in production, you may rely on your legacy database that is running on a machine, but for continuous testing, you may deploy a test database as a transient container. Since it is created and destroyed for each test run, data persistence isn’t important in the continuous testing case. Representing both databases as Kubernetes services enables you to maintain identical configurations in both testing and production. High fidelity between test and production ensures that passing tests will lead to successful deployment in production.</p>
+<p>To see concretely how you maintain high fidelity between development and production, remember that all Kubernetes objects are deployed into <em>namespaces</em>. Imagine that we have <code>test</code> and <code>production</code> namespaces defined. The test service is imported using an object like this:</p>
+<pre data-type="programlisting">kind: Service
+metadata:
+  name: my-database
+  # note 'test' namespace here
+  namespace: test
+...</pre>
+<p>The production service looks the same, except it uses a different namespace:</p>
+<pre data-type="programlisting">kind: Service
+metadata:
+  name: my-database
+  # note 'prod' namespace here
+  namespace: prod
+...</pre>
+<p>When you deploy a Pod into the <code>test</code> namespace and it looks up the service named <code>my-database</code>, it will receive a pointer to <code>my-database.test.svc.cluster.internal</code>, which in turn points to the test database. In contrast, when a Pod deployed in the <code>prod</code> namespace looks up the same name (<code>my-database</code>), it will receive a pointer to <code>my-database.prod.svc.cluster.internal</code>, which is the production database. Thus, the same service name, in two different namespaces, resolves to two different services.  For more details on how this works, see <a data-type="xref" href="ch07.xhtml#service_discovery">Chapter 7</a>.</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>The following techniques all use database or other storage services, but these approaches can be used equally well with other services that aren’t running inside your Kubernetes cluster.</p>
+</div>
+<section data-pdf-bookmark="Services Without Selectors" data-type="sect2"><div class="sect2" id="idm45664074002224">
+<h2>Services Without Selectors</h2>
+<p>When we first introduced services, we talked at length about label
+queries and how they were used to identify the dynamic set of Pods
+that were the backends for a particular service.<a data-primary="storage solutions, integrating with Kubernetes" data-secondary="importing external services" data-tertiary="services without selectors" data-type="indexterm" id="idm45664074000176"/><a data-primary="labels" data-secondary="label selectors" data-tertiary="external services without selectors" data-type="indexterm" id="idm45664073998800"/> With external
+services, however, there is no such label query. Instead,
+you generally have a DNS name that points to the specific server
+running the database. For our example, let’s assume that this server
+is named <code>database.company.com</code>. To import this external<a data-primary="databases" data-secondary="importing external database service into Kubernetes" data-type="indexterm" id="idm45664073996816"/><a data-primary="DNS" data-secondary="names for external services" data-type="indexterm" id="idm45664073995808"/> database
+service into Kubernetes, we start by creating a service without
+a Pod selector that references the DNS name of the database server (<a data-type="xref" href="#example1301">Example 16-1</a>).</p>
+<div data-type="example" id="example1301">
+<h5><span class="label">Example 16-1. </span>dns-service.yaml</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Service</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">external-database</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">type</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">ExternalName</code><code class="w"/>
+<code class="w">  </code><code class="nt">externalName</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">database.company.com</code><code class="w"/></pre></div>
+<p>When a typical Kubernetes service is created, an IP address is also
+created, and the Kubernetes DNS service is populated with an
+A record that points to that IP address.<a data-primary="A records (DNS)" data-type="indexterm" id="idm45664073972912"/><a data-primary="CNAME records (DNS)" data-type="indexterm" id="idm45664073972304"/><a data-primary="DNS" data-secondary="Kubernetes DNS service, CNAME record for external service" data-type="indexterm" id="idm45664073971696"/> When you create a service
+of type <code>ExternalName</code>, the Kubernetes DNS service is instead populated with a CNAME record that points to the external name you specified (<code>database.company.com</code> in this case). When an application in the cluster does a DNS lookup for the hostname <code>external-database.svc.default.cluster</code>, the DNS protocol aliases that name to <code>database.company.com</code>. This then resolves to the IP address of your external database server. In this way, all containers in Kubernetes believe that they are talking to a service that is backed with other containers, when in fact they are being redirected to an external database.</p>
+<p>Note that this is not restricted to databases you are running on your own infrastructure.<a data-primary="cloud" data-secondary="DNS name for cloud databases and services" data-type="indexterm" id="idm45664073968288"/> Many cloud databases and other services provide you with a DNS name to use when accessing the database (e.g., <code>my-database.databases.cloudprovider.com</code>). You can use this DNS name as the <code>externalName</code>. This imports the cloud-provided database into the namespace of your Kubernetes cluster.</p>
+<p>Sometimes, however, you don’t have a DNS address for an external
+database service, just an IP address.<a data-primary="IP addresses" data-secondary="IP address for external database service" data-type="indexterm" id="idm45664073965664"/> In such cases, it is
+still possible to import this service as a Kubernetes service, but the
+operation is a little different. First, you create a Service without a label selector, but also without the <code>ExternalName</code> type we used before (<a data-type="xref" href="#example1302">Example 16-2</a>).</p>
+<div data-type="example" id="example1302">
+<h5><span class="label">Example 16-2. </span>external-ip-service.yaml</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Service</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">external-ip-database</code><code class="w"/></pre></div>
+<p>Kubernetes will allocate a virtual IP address for this
+service and populate an A record for it. However, because
+there is no selector for the service, there will be no endpoints
+populated for the load balancer to redirect traffic to.<a data-primary="endpoints" data-secondary="for external services" data-secondary-sortas="external" data-type="indexterm" id="idm45664073897440"/></p>
+<p>Given that this is an external service, the user is responsible for
+populating the endpoints manually with an Endpoints resource (<a data-type="xref" href="#example1303">Example 16-3</a>).</p>
+<div data-type="example" id="example1303">
+<h5><span class="label">Example 16-3. </span>external-ip-endpoints.yaml</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Endpoints</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">external-ip-database</code><code class="w"/>
+<code class="nt">subsets</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">addresses</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">ip</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">192.168.0.1</code><code class="w"/>
+<code class="w">    </code><code class="nt">ports</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">port</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">3306</code><code class="w"/></pre></div>
+<p>If you have more than one IP address for redundancy, you can repeat
+them in the <code>addresses</code> array. Once the endpoints are populated, the
+load balancer will start redirecting traffic from your Kubernetes
+service to the IP address endpoint(s).</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>Because the user has assumed responsibility for keeping the IP address of the server up-to-date, you need to either ensure that it never changes or make sure that some automated process updates the <code>Endpoints</code> record.</p>
+</div>
+</div></section>
+<section data-pdf-bookmark="Limitations of External Services: Health Checking" data-type="sect2"><div class="sect2" id="idm45664074001600">
+<h2>Limitations of External Services: Health Checking</h2>
+<p>External services in Kubernetes have one significant restriction: they
+do not perform any health checking.<a data-primary="storage solutions, integrating with Kubernetes" data-secondary="importing external services" data-tertiary="limitation of external services, no health checking" data-type="indexterm" id="idm45664073832608"/><a data-primary="health checks" data-secondary="no health checking for external services" data-type="indexterm" id="idm45664073831456"/> The user is
+responsible for ensuring that the endpoint or DNS name supplied to
+Kubernetes is as reliable as necessary for the application.<a data-primary="services" data-secondary="importing external storage services" data-startref="ix_serimpstor" data-type="indexterm" id="idm45664073830352"/><a data-primary="storage solutions, integrating with Kubernetes" data-secondary="importing external services" data-startref="ix_storeimpext" data-type="indexterm" id="idm45664073829168"/></p>
+</div></section>
+</div></section>
+<section data-pdf-bookmark="Running Reliable Singletons" data-type="sect1"><div class="sect1" id="idm45664074017760">
+<h1>Running Reliable Singletons</h1>
+<p>The challenge of running storage solutions in Kubernetes is often
+that primitives like ReplicaSet expect that every container is
+identical and replaceable, but for most storage solutions, this isn’t
+the case.<a data-primary="storage solutions, integrating with Kubernetes" data-secondary="running reliable singletons" data-type="indexterm" id="ix_storerunsgl"/><a data-primary="singletons" data-secondary="running reliable singletons" data-type="indexterm" id="ix_snglrun"/> One option to address this is to use Kubernetes primitives,
+but not attempt to replicate the storage. Instead, simply run a single
+Pod that runs the database or other storage solution. In this way, the
+challenges of running replicated storage in Kubernetes
+don’t occur because there is no replication.</p>
+<p>At first blush, this might seem to run counter to the principles of
+building reliable distributed systems, but in general, it is no
+less reliable than running your database or storage infrastructure
+on a single virtual or physical machine, which is how many systems are
+currently built. Indeed, in reality, if you
+structure the system properly, the only thing you are sacrificing
+is potential downtime for upgrades or in case of machine failure.
+While for large-scale or mission-critical systems this may not be
+acceptable, for many smaller-scale applications, this kind of limited
+downtime is a reasonable trade-off for the reduced complexity. If
+this is not true for you, feel free to skip this section and either
+import existing services as described in the previous section, or move on to <a data-type="xref" href="#kub-nat-stor-w-statefulsets">“Kubernetes-Native Storage with StatefulSets”</a>. For everyone else, we’ll review how to build reliable singletons for data <span class="keep-together">storage</span>.</p>
+<section data-pdf-bookmark="Running a MySQL Singleton" data-type="sect2"><div class="sect2" id="idm45664073782112">
+<h2>Running a MySQL Singleton</h2>
+<p>In this section, we’ll describe how to run a reliable singleton instance
+of the MySQL database as a Pod in Kubernetes and how to expose that
+singleton to other applications in the cluster.<a data-primary="singletons" data-secondary="running reliable singletons" data-tertiary="running MySQL singleton" data-type="indexterm" id="ix_snglrunMSQL"/><a data-primary="storage solutions, integrating with Kubernetes" data-secondary="running reliable singletons" data-tertiary="MySQL singleton" data-type="indexterm" id="ix_storerunsglMSQL"/><a data-primary="databases" data-secondary="running MySQL singleton" data-type="indexterm" id="idm45664073777680"/><a data-primary="MySQL database, running singleton for" data-type="indexterm" id="ix_MySQL"/> To do this, we are going to create three basic objects:</p>
+<ul>
+<li>
+<p>A persistent volume to manage the lifespan of the on-disk storage independently from the lifespan of the running MySQL application</p>
+</li>
+<li>
+<p>A MySQL Pod that will run the MySQL application</p>
+</li>
+<li>
+<p>A service that will expose this Pod to other containers in the cluster</p>
+</li>
+</ul>
+<p>In <a data-type="xref" href="ch05.xhtml#pods">Chapter 5</a>, we described persistent volumes: storage locations that
+have a lifetime independent of any Pod or container. Persistent volume is
+useful in the case of persistent storage solutions where the
+on-disk representation of a database should survive even if the
+containers running the database application crash, or move to different
+machines. If the application moves to a different machine, the volume
+should move with it, and data should be preserved. Separating the data
+storage out as a persistent volume makes this possible.</p>
+<p>To begin, we’ll create a persistent volume for our MySQL database to use.<a data-primary="persistent volumes" data-secondary="creating for MySQL database" data-type="indexterm" id="idm45664073770208"/><a data-primary="volumes" data-secondary="creating persistent volume for MySQL database" data-type="indexterm" id="idm45664073769264"/> This example uses NFS for maximum portability, but Kubernetes supports
+many different persistent volume driver types. <a data-primary="NFS (Network File System)" data-secondary="persistent volume" data-type="indexterm" id="idm45664073767968"/><a data-primary="cloud" data-secondary="persistent volume drivers for providers" data-type="indexterm" id="idm45664073767008"/>For example, there are
+persistent volume drivers for all major public cloud providers as well
+as many private cloud providers. To use these solutions, simply replace
+<code>nfs</code> with the appropriate cloud provider volume type (e.g., <code>azure</code>, <code>awsElasticBlockStore</code>, or <code>gcePersistentDisk</code>). In all cases, this change is all you need. Kubernetes knows how to create the appropriate storage disk in the respective cloud provider. This is a great example of how Kubernetes simplifies the development of reliable distributed systems.<a data-primary="PersistentVolume object" data-type="indexterm" id="idm45664073763968"/> <a data-type="xref" href="#example1304">Example 16-4</a> shows the PersistentVolume object.</p>
+<div data-type="example" id="example1304">
+<h5><span class="label">Example 16-4. </span>nfs-volume.yaml</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">PersistentVolume</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">database</code><code class="w"/>
+<code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">volume</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">my-volume</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">accessModes</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">ReadWriteMany</code><code class="w"/>
+<code class="w">  </code><code class="nt">capacity</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">storage</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">1Gi</code><code class="w"/>
+<code class="w">  </code><code class="nt">nfs</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">server</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">192.168.0.1</code><code class="w"/>
+<code class="w">    </code><code class="nt">path</code><code class="p">:</code><code class="w"> </code><code class="s">"/exports"</code><code class="w"/></pre></div>
+<p>This defines an NFS PersistentVolume object with 1 GB of storage space. We can create this persistent volume as usual with:</p>
+<pre data-type="programlisting">$ <strong>kubectl apply -f nfs-volume.yaml</strong></pre>
+<p>Now that we have created a persistent volume, we need to claim that
+persistent volume for our Pod.<a data-primary="PersistentVolumeClaim object" data-type="indexterm" id="idm45664073678976"/><a data-primary="volumes" data-secondary="persistent volume claim" data-type="indexterm" id="idm45664073678368"/> We do this with a PersistentVolumeClaim object (<a data-type="xref" href="#example1305">Example 16-5</a>).</p>
+<div data-type="example" id="example1305">
+<h5><span class="label">Example 16-5. </span>nfs-volume-claim.yaml</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">PersistentVolumeClaim</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">database</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">accessModes</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">ReadWriteMany</code><code class="w"/>
+<code class="w">  </code><code class="nt">resources</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">requests</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">storage</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">1Gi</code><code class="w"/>
+<code class="w">  </code><code class="nt">selector</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">matchLabels</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">volume</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">my-volume</code><code class="w"/></pre></div>
+<p>The <code>selector</code> field uses labels to find the matching volume we
+defined previously.<a data-primary="labels" data-secondary="label selectors" data-tertiary="selector field for PersistentVolumeClaim" data-type="indexterm" id="idm45664073617008"/></p>
+<p>This kind of indirection may seem overly complicated, but it has a purpose—it serves to isolate our Pod definition from our storage
+definition. You can declare volumes directly inside a Pod specification,
+but this locks that Pod specification to a particular volume provider
+(e.g., a specific public or private cloud). By using volume claims,
+you can keep your Pod specifications cloud-agnostic; simply create
+different volumes, specific to the cloud, and use a
+PersistentVolumeClaim to bind them together. Furthermore, in many cases, the persistent
+volume controller will actually automatically create a volume for you. There are more
+details of this process in the following <span class="keep-together">section</span>.</p>
+<p>Now that we’ve claimed our volume, we can use a ReplicaSet to construct
+our singleton Pod.<a data-primary="Pods" data-secondary="using ReplicaSet to construct singleton Pod" data-type="indexterm" id="idm45664073614064"/><a data-primary="ReplicaSets" data-secondary="using to construct singleton Pod" data-type="indexterm" id="idm45664073613120"/> It might seem odd that we are using a ReplicaSet to
+manage a single Pod, but it is necessary for reliability. Remember that
+once scheduled to a machine, a bare Pod is bound to that machine
+forever. <a data-primary="databases" data-secondary="MySQL ReplicaSet" data-type="indexterm" id="idm45664073612080"/><a data-primary="MySQL database, running singleton for" data-secondary="ReplicaSet for MySQL" data-type="indexterm" id="idm45664073611136"/>If the machine fails, then any Pods that are on that machine
+that are not being managed by a higher-level controller like a ReplicaSet vanish along with the machine and are not rescheduled elsewhere.
+Consequently, to ensure that our database Pod is rescheduled in the
+presence of machine failures, we use the higher-level ReplicaSet
+controller, with a replica size of <code>1</code>, to manage our database (<a data-type="xref" href="#example1306">Example 16-6</a>).</p>
+<div data-type="example" id="example1306">
+<h5><span class="label">Example 16-6. </span>mysql-replicaset.yaml</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">extensions/v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">ReplicaSet</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">mysql</code><code class="w"/>
+<code class="w">  </code><code class="c1"># Labels so that we can bind a Service to this Pod</code><code class="w"/>
+<code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">app</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">mysql</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">replicas</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">1</code><code class="w"/>
+<code class="w">  </code><code class="nt">selector</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">matchLabels</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">app</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">mysql</code><code class="w"/>
+<code class="w">  </code><code class="nt">template</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="nt">app</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">mysql</code><code class="w"/>
+<code class="w">    </code><code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">containers</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">database</code><code class="w"/>
+<code class="w">        </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">mysql</code><code class="w"/>
+<code class="w">        </code><code class="nt">resources</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="nt">requests</code><code class="p">:</code><code class="w"/>
+<code class="w">            </code><code class="nt">cpu</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">1</code><code class="w"/>
+<code class="w">            </code><code class="nt">memory</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">2Gi</code><code class="w"/>
+<code class="w">        </code><code class="nt">env</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="c1"># Environment variables are not a best practice for security,</code><code class="w"/>
+<code class="w">        </code><code class="c1"># but we're using them here for brevity in the example.</code><code class="w"/>
+<code class="w">        </code><code class="c1"># See Chapter 11 for better options.</code><code class="w"/>
+<code class="w">        </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">MYSQL_ROOT_PASSWORD</code><code class="w"/>
+<code class="w">          </code><code class="nt">value</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">some-password-here</code><code class="w"/>
+<code class="w">        </code><code class="nt">livenessProbe</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="nt">tcpSocket</code><code class="p">:</code><code class="w"/>
+<code class="w">            </code><code class="nt">port</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">3306</code><code class="w"/>
+<code class="w">        </code><code class="nt">ports</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">containerPort</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">3306</code><code class="w"/>
+<code class="w">        </code><code class="nt">volumeMounts</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">database</code><code class="w"/>
+<code class="w">            </code><code class="c1"># /var/lib/mysql is where MySQL stores its databases</code><code class="w"/>
+<code class="w">            </code><code class="nt">mountPath</code><code class="p">:</code><code class="w"> </code><code class="s">"/var/lib/mysql"</code><code class="w"/>
+<code class="w">      </code><code class="nt">volumes</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">database</code><code class="w"/>
+<code class="w">        </code><code class="nt">persistentVolumeClaim</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="nt">claimName</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">database</code><code class="w"/></pre></div>
+<p>Once we create the ReplicaSet, it will, in turn, create a Pod running
+MySQL using the persistent disk we originally created.<a data-primary="MySQL database, running singleton for" data-secondary="exposing MySQL as Kubernetes service" data-type="indexterm" id="idm45664073328896"/> The final
+step is to expose this as a Kubernetes service (<a data-type="xref" href="#example1307">Example 16-7</a>).</p>
+<div data-type="example" id="example1307">
+<h5><span class="label">Example 16-7. </span>mysql-service.yaml</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Service</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">mysql</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">ports</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">port</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">3306</code><code class="w"/>
+<code class="w">    </code><code class="nt">protocol</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">TCP</code><code class="w"/>
+<code class="w">  </code><code class="nt">selector</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">app</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">mysql</code><code class="w"/></pre></div>
+<p>Now we have a reliable singleton MySQL instance running in our cluster
+and exposed as a service named <code>mysql</code>, which we can access at the full domain name <code>mysql.svc.default.cluster</code>.</p>
+<p>Similar instructions can be used for a variety of data stores, and if
+your needs are simple and you can survive limited downtime in
+the face of a machine failure or when you need to upgrade the database software, a reliable singleton may be the right approach to storage for your
+application.<a data-primary="MySQL database, running singleton for" data-startref="ix_MySQL" data-type="indexterm" id="idm45664073222256"/><a data-primary="storage solutions, integrating with Kubernetes" data-secondary="running reliable singletons" data-startref="ix_storerunsglMSQL" data-tertiary="MySQL singleton" data-type="indexterm" id="idm45664073221408"/><a data-primary="storage solutions, integrating with Kubernetes" data-secondary="running reliable singletons" data-startref="ix_storerunsgl" data-type="indexterm" id="idm45664073220016"/><a data-primary="singletons" data-secondary="running reliable singletons" data-startref="ix_snglrunMSQL" data-tertiary="running MySQL singleton" data-type="indexterm" id="idm45664073241968"/></p>
+</div></section>
+<section data-pdf-bookmark="Dynamic Volume Provisioning" data-type="sect2"><div class="sect2" id="idm45664073781520">
+<h2>Dynamic Volume Provisioning</h2>
+<p>Many clusters also include <em>dynamic volume provisioning</em>.<a data-primary="dynamic volume provisioning" data-type="indexterm" id="idm45664073238208"/><a data-primary="volumes" data-secondary="dynamic volume provisioning" data-type="indexterm" id="idm45664073237536"/><a data-primary="singletons" data-secondary="running reliable singletons" data-tertiary="dynamic volume provisioning" data-type="indexterm" id="idm45664073236576"/><a data-primary="storage solutions, integrating with Kubernetes" data-secondary="running reliable singletons" data-tertiary="dynamic volume provisioning" data-type="indexterm" id="idm45664073235328"/> With dynamic volume provisioning, the cluster operator creates one or more <code>StorageClass</code> objects. <a data-primary="StorageClass objects" data-type="indexterm" id="idm45664073193344"/>In Kubernetes, a <code>StorageClass</code> encapsulates the characteristics of a particular type of storage.<a data-primary="clusters" data-secondary="storage classes" data-type="indexterm" id="idm45664073192224"/> A cluster can have multiple different storage classes installed. For example, you might have a storage class for an NFS server on your network and a storage class for iSCSI block store.<a data-primary="Azure storage class automatically provisioning disk objects" data-type="indexterm" id="idm45664073191248"/><a data-primary="provisioning" data-secondary="automatic provisioning of persistent volume" data-type="indexterm" id="idm45664073190640"/> Storage classes can also encapsulate different levels of reliability or performance. <a data-type="xref" href="#example1308">Example 16-8</a> shows a default storage class that automatically provisions disk objects on the Microsoft Azure platform.</p>
+<div data-type="example" id="example1308">
+<h5><span class="label">Example 16-8. </span>storageclass.yaml</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">storage.k8s.io/v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">StorageClass</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">default</code><code class="w"/>
+<code class="w">  </code><code class="nt">annotations</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">storageclass.beta.kubernetes.io/is-default-class</code><code class="p">:</code><code class="w"> </code><code class="s">"true"</code><code class="w"/>
+<code class="w">  </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">kubernetes.io/cluster-service</code><code class="p">:</code><code class="w"> </code><code class="s">"true"</code><code class="w"/>
+<code class="nt">provisioner</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kubernetes.io/azure-disk</code><code class="w"/></pre></div>
+<p>Once a storage class has been created for a cluster, you can refer to
+this storage class in your persistent volume claim, rather than
+referring to any specific persistent volume. When the dynamic
+provisioner sees this storage claim, it uses the appropriate volume
+driver to create the volume and bind it to your persistent volume claim.<a data-primary="PersistentVolumeClaim object" data-secondary="using default storage class" data-type="indexterm" id="idm45664073179232"/></p>
+<p><a data-type="xref" href="#example1309">Example 16-9</a> shows an example of a PersistentVolumeClaim that uses the <code>default</code> storage class
+we just defined to claim a newly created persistent volume.</p>
+<div data-type="example" id="example1309">
+<h5><span class="label">Example 16-9. </span>dynamic-volume-claim.yaml</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">PersistentVolumeClaim</code><code class="w"/>
+<code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">my-claim</code><code class="w"/>
+<code class="w">  </code><code class="nt">annotations</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">volume.beta.kubernetes.io/storage-class</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">default</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">accessModes</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">ReadWriteOnce</code><code class="w"/>
+<code class="w">  </code><code class="nt">resources</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">requests</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">storage</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">10Gi</code><code class="w"/></pre></div>
+<p>The <code>volume.beta.kubernetes.io/storage-class</code> annotation is what links
+this claim back up to the storage class we created.</p>
+<div data-type="caution"><h6>Caution</h6>
+<p>Automatic provisioning of a persistent volume is a great feature that makes it significantly easier to build and manage stateful applications in Kubernetes.<a data-primary="provisioning" data-secondary="automatic provisioning of persistent volume" data-type="indexterm" id="idm45664073068720"/> However, the lifespan of these persistent <span class="keep-together">volumes</span> is dictated by the reclamation policy of the PersistentVolumeClaim, and the default is to bind that lifespan to the lifespan of the Pod that creates the volume.<a data-primary="PersistentVolumeClaim object" data-secondary="reclamation policy" data-type="indexterm" id="idm45664073067024"/></p>
+<p>This means that if you happen to delete the Pod (e.g., via a scale-down or other event), then the volume is deleted as well. While this may be what you want in certain circumstances, you need to be careful to ensure that you don’t accidentally delete your persistent volumes.</p>
+</div>
+<p>Persistent volumes are great for traditional applications that require
+storage, but if you need to develop high-availability, scalable storage
+in a Kubernetes-native fashion, the newly released StatefulSet object
+can be used instead. We’ll describe how to deploy
+MongoDB using StatefulSets in the next section.<a data-primary="singletons" data-secondary="running reliable singletons" data-startref="ix_snglrun" data-type="indexterm" id="idm45664073065152"/></p>
+</div></section>
+</div></section>
+<section data-pdf-bookmark="Kubernetes-Native Storage with StatefulSets" data-type="sect1"><div class="sect1" id="kub-nat-stor-w-statefulsets">
+<h1>Kubernetes-Native Storage with StatefulSets</h1>
+<p>When Kubernetes was first developed, there was a heavy emphasis on
+homogeneity for all replicas in a replicated set.<a data-primary="StatefulSets" data-type="indexterm" id="ix_StaSet"/><a data-primary="storage solutions, integrating with Kubernetes" data-secondary="Kubernetes-native storage with StatefulSets" data-type="indexterm" id="ix_storeStaSet"/> In this design, no replica had an individual identity or configuration. It was up to the application developer to determine a design that could establish this identity for their application.</p>
+<p>While this approach provides a great deal of isolation for the
+orchestration system, it also makes it quite difficult to develop
+stateful applications. After significant input from the community
+and a great deal of experimentation with various existing stateful
+applications, StatefulSets were introduced in Kubernetes version 1.5.</p>
+<section data-pdf-bookmark="Properties of StatefulSets" data-type="sect2"><div class="sect2" id="idm45664073058560">
+<h2>Properties of StatefulSets</h2>
+<p>StatefulSets are replicated groups of Pods, similar to ReplicaSets. <a data-primary="StatefulSets" data-secondary="properties of" data-type="indexterm" id="idm45664073057264"/><a data-primary="storage solutions, integrating with Kubernetes" data-secondary="Kubernetes-native storage with StatefulSets" data-tertiary="properties of StatefulSets" data-type="indexterm" id="idm45664073013312"/>But unlike a ReplicaSet, they have certain unique properties:</p>
+<ul>
+<li>
+<p>Each replica gets a persistent hostname with a unique index (e.g., <code>database-0</code>, <code>database-1</code>, etc.).<a data-primary="replicas" data-secondary="StatefulSet" data-type="indexterm" id="idm45664073010304"/></p>
+</li>
+<li>
+<p>Each replica is created in order from lowest to highest index, and creation will pause until the Pod at the previous index is healthy and available. This also applies to scaling up.</p>
+</li>
+<li>
+<p>When a StatefulSet is deleted, each of the managed replica Pods is also deleted in order from highest to lowest. This also applies to scaling down the number of replicas.<a data-primary="Pods" data-secondary="managed replica Pods for StatefulSets, deletion of" data-type="indexterm" id="idm45664073007216"/></p>
+</li>
+</ul>
+<p>It turns out that this  simple set of requirements makes it drastically
+easier to deploy storage applications on Kubernetes.<a data-primary="hostnames" data-secondary="stable hostnames for StatefulSet replicas" data-type="indexterm" id="idm45664073005568"/> For example, the
+combination of stable hostnames (e.g., <code>database-0</code>) and the ordering
+constraints mean that all replicas, other than the first one, can
+reliably reference <code>database-0</code> for the purposes of discovery and
+establishing a replication quorum.<a data-primary="MongoDB" data-type="indexterm" id="ix_MonDB"/></p>
+</div></section>
+<section data-pdf-bookmark="Manually Replicated MongoDB with StatefulSets" data-type="sect2"><div class="sect2" id="mongodb_install_xref">
+<h2>Manually Replicated MongoDB with StatefulSets</h2>
+<p>In this section, we’ll deploy a replicated
+MongoDB cluster.<a data-primary="StatefulSets" data-secondary="manually replicated MongoDB with StatefulSets" data-type="indexterm" id="ix_StaSetMDB"/><a data-primary="storage solutions, integrating with Kubernetes" data-secondary="Kubernetes-native storage with StatefulSets" data-tertiary="manually replicated MongoDB with StatefulSets" data-type="indexterm" id="ix_storeStaSetMDB"/><a data-primary="MongoDB" data-secondary="manually replicated with StatefulSets" data-type="indexterm" id="ix_MonDBmanrep"/> For now, the replication setup itself will be done
+manually to give you a feel for how StatefulSets work. Eventually, we
+will automate this setup as well.</p>
+<p>To start, we’ll create a replicated set of three MongoDB Pods using
+a StatefulSet object (<a data-type="xref" href="#example1310">Example 16-10</a>).</p>
+<div data-type="example" id="example1310">
+<h5><span class="label">Example 16-10. </span>mongo-simple.yaml</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">apps/v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">StatefulSet</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">mongo</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">serviceName</code><code class="p">:</code><code class="w"> </code><code class="s">"mongo"</code><code class="w"/>
+<code class="w">  </code><code class="nt">replicas</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">3</code><code class="w"/>
+<code class="w">  </code><code class="nt">selector</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">matchLabels</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">app</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">mongo</code><code class="w"/>
+<code class="w">  </code><code class="nt">template</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="nt">app</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">mongo</code><code class="w"/>
+<code class="w">    </code><code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">containers</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">mongodb</code><code class="w"/>
+<code class="w">        </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">mongo:3.4.24</code><code class="w"/>
+<code class="w">        </code><code class="nt">command</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">mongod</code><code class="w"/>
+<code class="w">        </code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">--replSet</code><code class="w"/>
+<code class="w">        </code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">rs0</code><code class="w"/>
+<code class="w">        </code><code class="nt">ports</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">containerPort</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">27017</code><code class="w"/>
+<code class="w">          </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">peer</code><code class="w"/></pre></div>
+<p>As you can see, the definition is similar to the ReplicaSet
+definitions we’ve seen previously. The only changes are in the <code>apiVersion</code>
+and <code>kind</code> fields.</p>
+<p>Create the StatefulSet:</p>
+<pre data-type="programlisting">$ <strong>kubectl apply -f mongo-simple.yaml</strong></pre>
+<p>Once created, the differences between a ReplicaSet and a StatefulSet
+become apparent. Run <code>kubectl get pods</code> and you will likely see this:</p>
+<pre data-type="programlisting">NAME      READY     STATUS            RESTARTS   AGE
+mongo-0   1/1       Running           0          1m
+mongo-1   0/1       ContainerCreating 0          10s</pre>
+<p>There are two important differences between this and what you would
+see with a ReplicaSet. The first is that each replicated Pod has
+a numeric index (<code>0</code>, <code>1</code>, …), instead of the random suffix that
+is added by the ReplicaSet controller.
+The second is that the Pods are being
+slowly created in order, not all at once as they would be with a <span class="keep-together">ReplicaSet</span>.</p>
+<p>After the StatefulSet is created, we also need to create a “headless”
+service to manage the DNS entries for the StatefulSet.<a data-primary="services" data-secondary="headless service to manage DNS entries for StatefulSet" data-type="indexterm" id="idm45664072847936"/><a data-primary="DNS" data-secondary="headless service to manage DNS entries for StatefulSet" data-type="indexterm" id="idm45664072846992"/> In Kubernetes,
+a service is called “headless” if it doesn’t have a cluster virtual
+IP address. Since with StatefulSets, each Pod has a unique identity,
+it doesn’t really make sense to have a load-balancing IP address for
+the replicated service.<a data-primary="cluster IPs" data-secondary="creating headless service using" data-type="indexterm" id="idm45664072845952"/> You can create a headless service using <code>clusterIP: None</code> in the service specification (<a data-type="xref" href="#example1311">Example 16-11</a>).</p>
+<div data-type="example" id="example1311">
+<h5><span class="label">Example 16-11. </span>mongo-service.yaml</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Service</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">mongo</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">ports</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">port</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">27017</code><code class="w"/>
+<code class="w">    </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">peer</code><code class="w"/>
+<code class="w">  </code><code class="nt">clusterIP</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">None</code><code class="w"/>
+<code class="w">  </code><code class="nt">selector</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">app</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">mongo</code><code class="w"/></pre></div>
+<p>Once you create that service, four DNS entries are  usually populated. As usual, <code>mongo.default.svc.cluster.local</code> is created, but unlike with a standard service, doing a DNS lookup on
+this hostname provides all the addresses in the StatefulSet. In addition, entries are created for <code>mongo-0⁠.mongo⁠.default⁠.svc⁠.cluster​.local</code> as
+well as <code>mongo-1.mongo</code> and <code>mongo-2.mongo</code>. Each of these resolves
+to the specific IP address of the replica index in the StatefulSet.
+Thus, with StatefulSets you get well-defined, persistent names
+for each replica in the set. This is often very useful when you are
+configuring a replicated storage solution. You can see these DNS entries
+in action by running the following command in one of the Mongo replicas:</p>
+<pre data-type="programlisting">$ <strong>kubectl run -it --rm --image busybox busybox ping mongo-1.mongo</strong></pre>
+<p>Next, we’re going to manually set up Mongo replication using these
+per-Pod <span class="keep-together">hostnames</span>. We’ll choose <code>mongo-0.mongo</code> to be our initial primary. Run the
+<code>mongo</code> tool in that Pod:</p>
+<pre data-type="programlisting">$ <strong>kubectl exec -it mongo-0 mongo</strong>
+&gt; <strong>rs.initiate( {
+  _id: "rs0",
+  members:[ { _id: 0, host: "mongo-0.mongo:27017" } ]
+ });
+ OK</strong></pre>
+<p>This command tells <code>mongodb</code> to initiate the ReplicaSet <code>rs0</code> with
+<code>mongo-0.mongo</code> as the primary replica.</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>The <code>rs0</code> name is arbitrary. You can use whatever you’d like, but you’ll need to change it in the <em>mongo-simple.yaml</em> StatefulSet definition as well.</p>
+</div>
+<p>Once you have initiated the Mongo ReplicaSet, you can add the remaining
+replicas by running the following commands in the <code>mongo</code> tool on
+the <code>mongo-0.mongo</code> Pod:</p>
+<pre data-type="programlisting">&gt; <strong>rs.add("mongo-1.mongo:27017");</strong>
+&gt; <strong>rs.add("mongo-2.mongo:27017");</strong></pre>
+<p>As you can see, we are using the replica-specific DNS names to add
+them as replicas in our Mongo cluster. At this point, we’re done.
+Our replicated MongoDB is up and running. But it’s really not as
+automated as we’d like it to be—in the next section, we’ll see how
+to use scripts to automate the setup.<a data-primary="StatefulSets" data-secondary="manually replicated MongoDB with StatefulSets" data-startref="ix_StaSetMDB" data-type="indexterm" id="idm45664072764096"/><a data-primary="storage solutions, integrating with Kubernetes" data-secondary="Kubernetes-native storage with StatefulSets" data-startref="ix_storeStaSetMDB" data-tertiary="manually replicated MongoDB with StatefulSets" data-type="indexterm" id="idm45664072714288"/><a data-primary="MongoDB" data-secondary="manually replicated with StatefulSets" data-startref="ix_MonDBmanrep" data-type="indexterm" id="idm45664072712960"/></p>
+</div></section>
+<section data-pdf-bookmark="Automating MongoDB Cluster Creation" data-type="sect2"><div class="sect2" id="idm45664073001360">
+<h2>Automating MongoDB Cluster Creation</h2>
+<p>To automate the deployment of our StatefulSet-based MongoDB cluster, we’re going to add a container to our Pods to perform the initialization.<a data-primary="storage solutions, integrating with Kubernetes" data-secondary="Kubernetes-native storage with StatefulSets" data-tertiary="automating MongoDB cluster creation" data-type="indexterm" id="ix_storeStaSetcls"/><a data-primary="StatefulSets" data-secondary="automating MongoDB cluster creation" data-type="indexterm" id="ix_StaSetautoMDBcls"/><a data-primary="MongoDB" data-secondary="automating MongoDB cluster creation" data-type="indexterm" id="ix_MonDBcls"/><a data-primary="clusters" data-secondary="MongoDB cluster creation, automating" data-type="indexterm" id="ix_clsMDB"/> To configure this Pod without having to build a new Docker
+image, we’re going to use a ConfigMap to add a script into the existing MongoDB image.</p>
+<p>We are going to run this script using an <em>initialization container</em>. Initialization containers (or “init” containers) are specialized containers
+that run once at the startup of a Pod.<a data-primary="initialization containers" data-type="indexterm" id="idm45664072703600"/><a data-primary="containers" data-secondary="initialization containers" data-type="indexterm" id="idm45664072702864"/> They are generally used for cases like this, where there is a small amount of setup work to do before the main application runs. In the Pod definition, there is a separate
+<code>initContainers</code> list where init containers can be defined. An example
+of this is given here:</p>
+<pre data-type="programlisting">...
+      initContainers:
+      - name: init-mongo
+        image: mongo:3.4.24
+        command:
+        - bash
+        - /config/init.sh
+        volumeMounts:
+        - name: config
+          mountPath: /config
+ ...
+      volumes:
+      - name: config
+        configMap:
+          name: "mongo-init"</pre>
+<p>Note that it is mounting a ConfigMap volume whose name is <code>mongo-init</code>.
+This ConfigMap holds a script that performs our initialization. First,
+the script determines whether it is running on <code>mongo-0</code> or not. If it is on <code>mongo-0</code>, it creates the ReplicaSet using the same command
+we ran imperatively previously. If it is on a different Mongo replica,
+it waits until the ReplicaSet exists, and then it registers itself
+as a member of that ReplicaSet.<a data-primary="ConfigMaps" data-secondary="ConfigMap for MongoDB" data-type="indexterm" id="idm45664072698672"/></p>
+<p><a data-type="xref" href="#example1312">Example 16-12</a> has the complete ConfigMap object.</p>
+<div data-type="example" id="example1312">
+<h5><span class="label">Example 16-12. </span>mongo-configmap.yaml</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">ConfigMap</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">mongo-init</code><code class="w"/>
+<code class="nt">data</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">init.sh</code><code class="p">:</code><code class="w"> </code><code class="p-Indicator">|</code><code class="w"/>
+<code class="w">    </code><code class="no">#!/bin/bash</code><code class="w"/>
+
+<code class="w">    </code><code class="no"># Need to wait for the readiness health check to pass so that the</code><code class="w"/>
+<code class="w">    </code><code class="no"># Mongo names resolve. This is kind of wonky.</code><code class="w"/>
+<code class="w">    </code><code class="no">until ping -c 1 ${HOSTNAME}.mongo; do</code><code class="w"/>
+<code class="w">      </code><code class="no">echo "waiting for DNS (${HOSTNAME}.mongo)..."</code><code class="w"/>
+<code class="w">      </code><code class="no">sleep 2</code><code class="w"/>
+<code class="w">    </code><code class="no">done</code><code class="w"/>
+
+<code class="w">    </code><code class="no">until /usr/bin/mongo --eval 'printjson(db.serverStatus())'; do</code><code class="w"/>
+<code class="w">      </code><code class="no">echo "connecting to local mongo..."</code><code class="w"/>
+<code class="w">      </code><code class="no">sleep 2</code><code class="w"/>
+<code class="w">    </code><code class="no">done</code><code class="w"/>
+<code class="w">    </code><code class="no">echo "connected to local."</code><code class="w"/>
+
+<code class="w">    </code><code class="no">HOST=mongo-0.mongo:27017</code><code class="w"/>
+
+<code class="w">    </code><code class="no">until /usr/bin/mongo --host=${HOST} --eval 'printjson(db.serverStatus())'; do</code><code class="w"/>
+<code class="w">      </code><code class="no">echo "connecting to remote mongo..."</code><code class="w"/>
+<code class="w">      </code><code class="no">sleep 2</code><code class="w"/>
+<code class="w">    </code><code class="no">done</code><code class="w"/>
+<code class="w">    </code><code class="no">echo "connected to remote."</code><code class="w"/>
+
+<code class="w">    </code><code class="no">if [[ "${HOSTNAME}" != 'mongo-0' ]]; then</code><code class="w"/>
+<code class="w">      </code><code class="no">until /usr/bin/mongo --host=${HOST} --eval="printjson(rs.status())" \</code><code class="w"/>
+<code class="w">            </code><code class="no">| grep -v "no replset config has been received"; do</code><code class="w"/>
+<code class="w">        </code><code class="no">echo "waiting for replication set initialization"</code><code class="w"/>
+<code class="w">        </code><code class="no">sleep 2</code><code class="w"/>
+<code class="w">      </code><code class="no">done</code><code class="w"/>
+<code class="w">      </code><code class="no">echo "adding self to mongo-0"</code><code class="w"/>
+<code class="w">      </code><code class="no">/usr/bin/mongo --host=${HOST} \</code><code class="w"/>
+<code class="w">         </code><code class="no">--eval="printjson(rs.add('${HOSTNAME}.mongo'))"</code><code class="w"/>
+<code class="w">    </code><code class="no">fi</code><code class="w"/>
+
+<code class="w">    </code><code class="no">if [[ "${HOSTNAME}" == 'mongo-0' ]]; then</code><code class="w"/>
+<code class="w">      </code><code class="no">echo "initializing replica set"</code><code class="w"/>
+<code class="w">      </code><code class="no">/usr/bin/mongo --eval="printjson(rs.initiate(\</code><code class="w"/>
+<code class="w">          </code><code class="no">{'_id': 'rs0', 'members': [{'_id': 0, \</code><code class="w"/>
+<code class="w">           </code><code class="no">'host': 'mongo-0.mongo:27017'}]}))"</code><code class="w"/>
+<code class="w">    </code><code class="no">fi</code><code class="w"/>
+<code class="w">    </code><code class="no">echo "initialized"</code><code class="w"/></pre></div>
+<p>You’ll notice that this script immediately exits. This is important when
+using <code>init​Con⁠tainers</code>. Each initialization container waits until the previous
+container has finished, before running. The main application container waits
+until all of the initialization containers are done. If this script didn’t
+exit, the main Mongo server would never start up.</p>
+<p>Putting it all together, <a data-type="xref" href="#example1313">Example 16-13</a> is the complete StatefulSet that uses
+the <span class="keep-together">ConfigMap</span>.</p>
+<div data-type="example" id="example1313">
+<h5><span class="label">Example 16-13. </span>mongo.yaml</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">apps/v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">StatefulSet</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">mongo</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">serviceName</code><code class="p">:</code><code class="w"> </code><code class="s">"mongo"</code><code class="w"/>
+<code class="w">  </code><code class="nt">replicas</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">3</code><code class="w"/>
+<code class="w">  </code><code class="nt">selector</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">matchLabels</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">app</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">mongo</code><code class="w"/>
+<code class="w">  </code><code class="nt">template</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">labels</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="nt">app</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">mongo</code><code class="w"/>
+<code class="w">    </code><code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="nt">containers</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">mongodb</code><code class="w"/>
+<code class="w">        </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">mongo:3.4.24</code><code class="w"/>
+<code class="w">        </code><code class="nt">command</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">mongod</code><code class="w"/>
+<code class="w">        </code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">--replSet</code><code class="w"/>
+<code class="w">        </code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">rs0</code><code class="w"/>
+<code class="w">        </code><code class="nt">ports</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">containerPort</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">27017</code><code class="w"/>
+<code class="w">          </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">web</code><code class="w"/>
+<code class="w">      </code><code class="c1"># This container initializes the MongoDB server, then sleeps.</code><code class="w"/>
+<code class="w">      </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">init-mongo</code><code class="w"/>
+<code class="w">        </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">mongo:3.4.24</code><code class="w"/>
+<code class="w">        </code><code class="nt">command</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">bash</code><code class="w"/>
+<code class="w">        </code><code class="p-Indicator">-</code><code class="w"> </code><code class="l-Scalar-Plain">/config/init.sh</code><code class="w"/>
+<code class="w">        </code><code class="nt">volumeMounts</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">config</code><code class="w"/>
+<code class="w">          </code><code class="nt">mountPath</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">/config</code><code class="w"/>
+<code class="w">      </code><code class="nt">volumes</code><code class="p">:</code><code class="w"/>
+<code class="w">      </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">config</code><code class="w"/>
+<code class="w">        </code><code class="nt">configMap</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="s">"mongo-init"</code><code class="w"/></pre></div>
+<p>Given all of these files, you can create a Mongo cluster with:</p>
+<pre data-type="programlisting">$ <strong>kubectl apply -f mongo-config-map.yaml</strong>
+$ <strong>kubectl apply -f mongo-service.yaml</strong>
+$ <strong>kubectl apply -f mongo-simple.yaml</strong></pre>
+<p>Or, if you want, you can combine them all into a single YAML file
+where the individual objects are separated by <code>---</code>. Ensure that
+you keep the same ordering, since the StatefulSet definition relies
+on the ConfigMap definition existing.<a data-primary="storage solutions, integrating with Kubernetes" data-secondary="Kubernetes-native storage with StatefulSets" data-startref="ix_storeStaSetcls" data-tertiary="automating MongoDB cluster creation" data-type="indexterm" id="idm45664072318848"/><a data-primary="StatefulSets" data-secondary="automating MongoDB cluster creation" data-startref="ix_StaSetautoMDBcls" data-type="indexterm" id="idm45664072317360"/><a data-primary="clusters" data-secondary="MongoDB cluster creation, automating" data-startref="ix_clsMDB" data-type="indexterm" id="idm45664072316176"/><a data-primary="MongoDB" data-secondary="automating MongoDB cluster creation" data-startref="ix_MonDBcls" data-type="indexterm" id="idm45664072314992"/></p>
+</div></section>
+<section data-pdf-bookmark="Persistent Volumes and StatefulSets" data-type="sect2"><div class="sect2" id="idm45664072313552">
+<h2>Persistent Volumes and StatefulSets</h2>
+<p>For persistent storage, you need to mount a persistent volume into the <em>/data/db</em> directory.<a data-primary="StatefulSets" data-secondary="persistent volumes and" data-type="indexterm" id="idm45664072311632"/><a data-primary="storage solutions, integrating with Kubernetes" data-secondary="Kubernetes-native storage with StatefulSets" data-tertiary="persistent volumes and StatefulSets" data-type="indexterm" id="idm45664072310624"/><a data-primary="volumes" data-secondary="persistent volumes and StatefulSets" data-type="indexterm" id="idm45664072309344"/><a data-primary="persistent volumes" data-secondary="and StatefulSets" data-secondary-sortas="StatefulSets" data-type="indexterm" id="idm45664072308384"/> In the Pod template, you need to update it to mount a persistent volume claim to that directory:</p>
+<pre data-type="programlisting">...
+        volumeMounts:
+        - name: database
+          mountPath: /data/db</pre>
+<p>While this approach is similar to the one we saw with reliable
+singletons, because the StatefulSet replicates more than
+one Pod, you cannot simply reference a persistent <span class="keep-together">volume</span> claim.
+Instead, you need to add a <em>persistent volume claim template</em>. <a data-primary="persistent volume claim template" data-type="indexterm" id="idm45664072304704"/>You can think of the claim template as identical to the Pod template, but instead of creating Pods, it creates volume claims. You need to add the following to the bottom of your StatefulSet definition:</p>
+<pre data-type="programlisting">  volumeClaimTemplates:
+  - metadata:
+      name: database
+      annotations:
+        volume.alpha.kubernetes.io/storage-class: anything
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 100Gi</pre>
+<p>When you add a volume claim template to a StatefulSet definition,
+each time the StatefulSet controller creates a Pod that is part of the
+StatefulSet, it will create a persistent volume claim based on this
+template as part of that Pod.</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>For these replicated persistent volumes to work correctly,
+you need to either set up autoprovisioning for persistent volumes
+or prepopulate a collection of persistent volume objects
+for the StatefulSet controller to draw from. If there are no claims
+that can be created, the StatefulSet controller will not be able
+to create the corresponding Pods.</p>
+</div>
+</div></section>
+<section data-pdf-bookmark="One Final Thing: Readiness Probes" data-type="sect2"><div class="sect2" id="idm45664072301472">
+<h2>One Final Thing: Readiness Probes</h2>
+<p>The final piece in productionizing our MongoDB cluster is to add liveness checks to our Mongo-serving containers.<a data-primary="readiness probes" data-secondary="adding to Mongo-serving containers" data-type="indexterm" id="idm45664072300048"/><a data-primary="liveness probes" data-type="indexterm" id="idm45664072299056"/><a data-primary="health checks" data-secondary="liveness probes" data-type="indexterm" id="idm45664072298384"/> As we learned in <a data-type="xref" href="ch05.xhtml#health_checks_sec_ref">“Health Checks”</a>, the <span class="keep-together">liveness</span> probe is used to determine if
+a container is operating correctly.</p>
+<p class="pagebreak-before less_space">For the liveness checks,
+we can use the <code>mongo</code> tool itself by adding the following to the Pod template in the StatefulSet object:</p>
+<pre data-type="programlisting">...
+ livenessProbe:
+   exec:
+     command:
+     - /usr/bin/mongo
+     - --eval
+     - db.serverStatus()
+   initialDelaySeconds: 10
+   timeoutSeconds: 10
+ ...</pre>
+</div></section>
+</div></section>
+<section data-pdf-bookmark="Summary" data-type="sect1"><div class="sect1" id="idm45664072230704">
+<h1>Summary</h1>
+<p>Once we have combined
+StatefulSets, persistent volume claims, and liveness probing, we have
+a hardened, scalable cloud native MongoDB installation running on
+Kubernetes.<a data-primary="MongoDB" data-startref="ix_MonDB" data-type="indexterm" id="idm45664072229376"/><a data-primary="storage solutions, integrating with Kubernetes" data-secondary="Kubernetes-native storage with StatefulSets" data-startref="ix_storeStaSet" data-type="indexterm" id="idm45664072228400"/><a data-primary="StatefulSets" data-startref="ix_StaSet" data-type="indexterm" id="idm45664072227056"/> While this example dealt with MongoDB, the steps for
+creating StatefulSets to manage other storage solutions are quite
+similar and similar patterns can be followed.<a data-primary="storage solutions, integrating with Kubernetes" data-startref="ix_store" data-type="indexterm" id="idm45664072225984"/></p>
+</div></section>
+</div></section></div></body></html>

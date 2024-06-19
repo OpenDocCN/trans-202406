@@ -1,0 +1,439 @@
+<html><head></head><body>
+<div id="sbo-rt-content"><section data-pdf-bookmark="Chapter 5. Pods" data-type="chapter" epub:type="chapter"><div class="chapter" id="pods">
+<h1><span class="label">Chapter 5. </span>Pods</h1>
+<p>In earlier chapters, we discussed how you might go about containerizing your application, but in real-world deployments of containerized applications, you will often want to colocate multiple applications into a single atomic unit, scheduled onto a single machine.<a data-primary="Pods" data-type="indexterm" id="ix_Pods"/></p>
+<p>A canonical example of such a deployment is illustrated in <a data-type="xref" href="#pod_example">Figure 5-1</a>, which consists of a container serving web requests and a container synchronizing the filesystem with a remote Git repository.<a data-primary="Pods" data-secondary="example Pod with two containers and shared filesystem" data-type="indexterm" id="idm45664079781760"/></p>
+<figure><div class="figure" id="pod_example">
+<img alt="" height="478" src="assets/kur3_0501.png" width="442"/>
+<h6><span class="label">Figure 5-1. </span>An example Pod with two containers and a shared filesystem</h6>
+</div></figure>
+<p>At first, it might seem tempting to wrap both the web server and the Git synchronizer into a single container.  After closer inspection, however, the reasons for the separation become clear. First, the two containers have significantly different requirements in terms of resource usage. Take, for example, memory: because the web server is serving user requests, we want to ensure that it is always available and responsive. On the other hand, the Git synchronizer isn’t really user-facing and has a “best effort” quality of service.</p>
+<p>Suppose that our Git synchronizer has a memory leak. We need to ensure that the Git synchronizer cannot use up memory that we want to use for our web server, since this can affect performance or even crash the server.</p>
+<p>This sort of resource isolation is exactly the sort of thing that containers are designed to accomplish. By separating the two applications into two separate containers, we can ensure reliable web server operation.</p>
+<p>Of course, the two containers are quite symbiotic; it makes no sense to schedule the web server on one machine and the Git synchronizer on another.<a data-primary="containers" data-secondary="grouping into a Pod" data-type="indexterm" id="idm45664079776416"/> Consequently, Kubernetes groups multiple containers into a single atomic unit called a <em>Pod</em>. (The name goes with the whale theme of Docker containers, since a pod is also a group of whales.)</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>Though the grouping of multiple containers into a single Pod seemed controversial or confusing when it was first introduced in Kubernetes, it has subsequently been adopted by a variety of different applications to deploy their infrastructure. For example, several service mesh implementations use a second <em>sidecar</em> container to inject network management into an application’s Pod.<a data-primary="sidecar containers" data-type="indexterm" id="idm45664079773280"/></p>
+</div>
+<section data-pdf-bookmark="Pods in Kubernetes" data-type="sect1"><div class="sect1" id="idm45664079772240">
+<h1>Pods in Kubernetes</h1>
+<p>A Pod is a collection of application containers and volumes running in the same execution environment.<a data-primary="Pods" data-secondary="in Kubernetes" data-type="indexterm" id="idm45664079770832"/> Pods, not containers, are the smallest deployable artifact in a Kubernetes cluster. This means all of the containers in a Pod always land on the same machine.</p>
+<p>Each container within a Pod runs in its own cgroup, but they share a number of Linux namespaces.<a data-primary="cgroups" data-type="indexterm" id="idm45664079769232"/></p>
+<p>Applications running in the same Pod share the same IP address and port space (network namespace), have the same hostname (UTS namespace), and can communicate using native interprocess communication channels over System V IPC or POSIX message queues (IPC namespace).<a data-primary="applications" data-secondary="running in the same or different Pods" data-type="indexterm" id="idm45664079768144"/><a data-primary="native interprocess communication channels" data-type="indexterm" id="idm45664079767152"/> However, applications in different Pods are isolated from each other; they have different IP addresses, hostnames, and more. Containers in different Pods running on the same node might as well be on different servers.</p>
+</div></section>
+<section data-pdf-bookmark="Thinking with Pods" data-type="sect1"><div class="sect1" id="idm45664079765824">
+<h1>Thinking with Pods</h1>
+<p>One of the most common questions people ask when adopting Kubernetes is “What should I put in a Pod?”</p>
+<p>Sometimes people see Pods and think, “Aha! A WordPress container and a MySQL database container join together to make a WordPress instance.<a data-primary="Pods" data-secondary="designing, questions to ask" data-type="indexterm" id="idm45664079763472"/> They should be in the same Pod.”  However, this kind of Pod is actually an example of an antipattern for Pod construction.  There are two reasons for this.  First, WordPress and its database are not truly symbiotic. If the WordPress container and the database container land on different machines, they still can work together quite effectively, since they communicate over a network connection. Secondly, you don’t necessarily want to scale WordPress and the database as a unit.  WordPress itself is mostly stateless, so you may want to scale your WordPress frontends in response to frontend load by creating more WordPress Pods. Scaling a MySQL database is much trickier, and you would be much more likely to increase the resources dedicated to a single MySQL Pod. If you group the WordPress and MySQL containers together in a single Pod, you are forced to use the same scaling strategy for both containers, which doesn’t fit well.</p>
+<p>In general, the right question to ask yourself when designing Pods is “Will these containers work correctly if they land on different machines?” If the answer is no, a Pod is the correct grouping for the containers.  If the answer is yes, using multiple Pods is probably the correct solution. In the example at the beginning of this chapter, the two containers interact via a local filesystem. It would be impossible for them to operate correctly if the containers were scheduled on different machines.</p>
+<p>In the remaining sections of this chapter, we will describe how to create, introspect, manage, and delete Pods in Kubernetes.</p>
+</div></section>
+<section data-pdf-bookmark="The Pod Manifest" data-type="sect1"><div class="sect1" id="idm45664079761280">
+<h1>The Pod Manifest</h1>
+<p>Pods are described in a Pod <em>manifest</em>, which is just a text-file representation of the Kubernetes API object.<a data-primary="manifests (Pod)" data-type="indexterm" id="idm45664079759360"/><a data-primary="Pods" data-secondary="manifests" data-type="indexterm" id="idm45664079758656"/><a data-primary="declarative configuration" data-type="indexterm" id="idm45664079757712"/> Kubernetes strongly believes in <em>declarative configuration</em>, which means that you write down the desired state of the world in a configuration file and then submit that configuration to a service that takes actions to ensure the desired state becomes the actual state.</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>Declarative configuration is different from <em>imperative configuration</em>, where you simply take a series of actions (for example, <code>apt-get install foo</code>) to modify the state of a system.<a data-primary="imperative versus declarative configuration" data-type="indexterm" id="idm45664079754192"/> Years of production experience have taught us that maintaining a written record of the system’s desired state leads to a more manageable, reliable system. Declarative configuration has numerous advantages, such as enabling code review for configurations and documenting the current state of the system for distributed teams.  Additionally, it is the basis for all of the self-healing behaviors in Kubernetes that keep applications running without user action.</p>
+</div>
+<p>The Kubernetes API server accepts and processes Pod manifests before storing them in persistent storage (<code>etcd</code>).<a data-primary="etcd" data-type="indexterm" id="idm45664079752208"/><a data-primary="scheduler" data-secondary="placing Pods onto nodes" data-type="indexterm" id="idm45664079751472"/><a data-primary="nodes" data-secondary="scheduler placing Pods onto" data-type="indexterm" id="idm45664079750528"/> The scheduler also uses the Kubernetes API to find Pods that haven’t been scheduled to a node. It then places the Pods onto nodes depending on the resources and other constraints expressed in the Pod manifests. The scheduler can place multiple Pods on the same machine as long as there are sufficient resources.  However, scheduling multiple replicas of the same application onto the same machine is worse for reliability, since the machine is a single failure domain. Consequently, the Kubernetes scheduler tries to ensure that Pods from the same application are distributed onto different machines for reliability in the presence of such failures. Once scheduled to a node, Pods don’t move and must be explicitly destroyed and rescheduled.</p>
+<p>Multiple instances of a Pod can be deployed by repeating the workflow described here. However, ReplicaSets (<a data-type="xref" href="ch09.xhtml#replica_set">Chapter 9</a>) are better suited for running multiple instances of a Pod. (It turns out they’re also better at running a single Pod, but we’ll get into that later.)</p>
+<section data-pdf-bookmark="Creating a Pod" data-type="sect2"><div class="sect2" id="idm45664079747920">
+<h2>Creating a Pod</h2>
+<p>The simplest way<a data-primary="Pods" data-secondary="creating via kubectl run command" data-type="indexterm" id="idm45664079746272"/><a data-primary="kubectl tool" data-secondary="commands" data-tertiary="run" data-type="indexterm" id="idm45664079745248"/> to create a Pod is via the imperative <code>kubectl run</code> command.
+For example, to run our same <code>kuard</code> server, use:</p>
+<pre data-type="programlisting">$ <strong>kubectl run kuard --generator=run-pod/v1 \</strong>
+  <strong>--image=gcr.io/kuar-demo/kuard-amd64:blue</strong></pre>
+<p>You can see the status of this Pod by running:</p>
+<pre data-type="programlisting">$ <strong>kubectl get pods</strong></pre>
+<p>You may <a data-primary="kubectl tool" data-secondary="commands" data-tertiary="get pods" data-type="indexterm" id="idm45664079739440"/><a data-primary="Pending state (Pods)" data-type="indexterm" id="idm45664079738192"/><a data-primary="Running state (Pods)" data-type="indexterm" id="idm45664079737488"/>initially see the container as <code>Pending</code>, but eventually you
+will see it transition to <code>Running</code>, which means that the Pod and its
+containers have been successfully <span class="keep-together">created</span>.</p>
+<p>For now, you can <a data-primary="kubectl tool" data-secondary="commands" data-tertiary="delete pods" data-type="indexterm" id="idm45664079734768"/><a data-primary="Pods" data-secondary="deleting" data-type="indexterm" id="idm45664079733488"/>delete this Pod by running:</p>
+<pre data-type="programlisting">$ <strong>kubectl delete pods/kuard</strong></pre>
+<p>We will now move on to writing a complete Pod manifest by hand.</p>
+</div></section>
+<section data-pdf-bookmark="Creating a Pod Manifest" data-type="sect2"><div class="sect2" id="idm45664079730848">
+<h2>Creating a Pod Manifest</h2>
+<p>You can write Pod manifests using <a data-primary="manifests (Pod)" data-secondary="writing" data-type="indexterm" id="idm45664079729264"/><a data-primary="Pods" data-secondary="creating a manifest" data-type="indexterm" id="idm45664079728288"/><a data-primary="YAML" data-secondary="Pod manifests in" data-type="indexterm" id="idm45664079727344"/>YAML or JSON, but YAML is generally preferred because it is slightly more human-editable and supports comments.<a data-primary="JSON" data-secondary="Pod manifests in" data-type="indexterm" id="idm45664079726144"/> Pod manifests (and other Kubernetes API objects) should
+really be treated in the same way as source code, and things like comments help explain the Pod to new team members.</p>
+<p>Pod manifests include a couple of key fields and attributes: namely, a <code>metadata</code> section for describing the Pod and its labels, a <code>spec</code> section for describing volumes, and a list of containers that will run in the Pod.<a data-primary="metadata" data-secondary="in Pod manifests" data-secondary-sortas="Pod" data-type="indexterm" id="idm45664079723520"/><a data-primary="spec section (Pod manifests)" data-type="indexterm" id="idm45664079722272"/><a data-primary="docker run -d --name --publish command" data-type="indexterm" id="idm45664079721536"/></p>
+<p>In <a data-type="xref" href="ch02.xhtml#Containers">Chapter 2</a>, we deployed <code>kuard</code> using the following Docker command:</p>
+<pre data-type="programlisting">$ <strong>docker run -d --name kuard \
+  --publish 8080:8080 \
+  gcr.io/kuar-demo/kuard-amd64:blue</strong></pre>
+<p>You can achieve a similar result by instead writing <a data-type="xref" href="#EXPOD">Example 5-1</a> to a file named <em>kuard-pod.yaml</em> and then using <code>kubectl</code> commands to load that manifest to <span class="keep-together">Kubernetes</span>.</p>
+<div data-type="example" id="EXPOD">
+<h5><span class="label">Example 5-1. </span>kuard-pod.yaml</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Pod</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kuard</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">containers</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">gcr.io/kuar-demo/kuard-amd64:blue</code><code class="w"/>
+<code class="w">      </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kuard</code><code class="w"/>
+<code class="w">      </code><code class="nt">ports</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">containerPort</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">8080</code><code class="w"/>
+<code class="w">          </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">http</code><code class="w"/>
+<code class="w">          </code><code class="nt">protocol</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">TCP</code><code class="w"/></pre></div>
+<p>Though it may initially seem more cumbersome to manage your application in
+this manner, this written record of desired state is the best practice in
+the long run, especially for large teams with many applications.</p>
+</div></section>
+</div></section>
+<section data-pdf-bookmark="Running Pods" data-type="sect1"><div class="sect1" id="idm45664079618960">
+<h1>Running Pods</h1>
+<p>In the previous section, we created a Pod manifest that can be used to start a
+Pod running <code>kuard</code>. <a data-primary="Pods" data-secondary="running" data-type="indexterm" id="idm45664079667552"/><a data-primary="kubectl tool" data-secondary="commands" data-tertiary="apply -f" data-type="indexterm" id="idm45664079666544"/>Use the <code>kubectl apply</code> command to launch a single instance
+of <code>kuard</code>:</p>
+<pre data-type="programlisting">$ <strong>kubectl apply -f kuard-pod.yaml</strong></pre>
+<p>The Pod manifest will be submitted to the Kubernetes API server. The Kubernetes system will then schedule that Pod to run on a healthy node in the cluster, where the <code>kubelet</code> daemon will monitor it. Don’t worry if you don’t understand all the moving parts of Kubernetes right now; we’ll get into more details throughout the book.</p>
+<section data-pdf-bookmark="Listing Pods" data-type="sect2"><div class="sect2" id="idm45664079662400">
+<h2>Listing Pods</h2>
+<p>Now that we have a Pod running, let’s go find out some more about it.<a data-primary="Pods" data-secondary="running" data-tertiary="listing Pods" data-type="indexterm" id="idm45664079660720"/><a data-primary="kubectl tool" data-secondary="commands" data-tertiary="get pods" data-type="indexterm" id="idm45664079659472"/> Using the
+<code>kubectl</code> command-line tool, we can list all Pods running in the cluster.<a data-primary="clusters" data-secondary="listing all Pods running in" data-type="indexterm" id="idm45664079657712"/>  For
+now, this should only be the single Pod that we created in the previous step:</p>
+<pre data-type="programlisting">$ <strong>kubectl get pods</strong>
+NAME       READY     STATUS    RESTARTS   AGE
+kuard      1/1       Running   0          44s</pre>
+<p>You can see the name of the Pod (<code>kuard</code>) that we gave it in the previous YAML file. In addition to the number of ready containers (<code>1/1</code>), the output also shows the status, the number of times the Pod was restarted, and the age of the Pod.</p>
+<p>If you ran this command immediately after the Pod was created, you might see:</p>
+<pre data-type="programlisting">NAME       READY     STATUS    RESTARTS   AGE
+kuard      0/1       Pending   0          1s</pre>
+<p>The <code>Pending</code> state indicates that the Pod has been submitted but hasn’t been scheduled yet.<a data-primary="Pending state (Pods)" data-type="indexterm" id="idm45664079592576"/> If a more significant error occurs, such as an attempt to create a Pod with a container image that doesn’t exist, it will also be listed in the status field.</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>By default, the <code>kubectl</code> command-line tool is concise in the
+information it reports, but you can get more information via command-line flags. <a data-primary="kubectl tool" data-secondary="commands" data-tertiary="-o wide flag" data-tertiary-sortas="o wide" data-type="indexterm" id="idm45664079589968"/>Adding <code>-o wide</code> to any <code>kubectl</code> command will print out slightly more information (while still keeping the information to a single line). Adding <code>-o json</code> or <code>-o yaml</code> will print out the complete objects in JSON or YAML, respectively. If you ever want to see an exhaustive, verbose logging of what
+<code>kubectl</code> is doing, you can add the <code>--v=10</code> flag for comprehensive logging at the expense of readability.<a data-primary="kubectl tool" data-secondary="commands" data-tertiary="--v=10 for comprehensive logging" data-tertiary-sortas="v=10" data-type="indexterm" id="idm45664079585632"/></p>
+</div>
+</div></section>
+<section data-pdf-bookmark="Pod Details" data-type="sect2"><div class="sect2" id="idm45664079583888">
+<h2>Pod Details</h2>
+<p>Sometimes, the single-line view is insufficient because it is too terse.<a data-primary="Pods" data-secondary="running" data-tertiary="getting Pod details" data-type="indexterm" id="idm45664079582256"/> Additionally, Kubernetes maintains numerous events about Pods that are present in the event stream, not attached to the Pod object.</p>
+<p>To find out more information about a Pod (or any Kubernetes object), you can use the <code>kubectl describe</code> command.<a data-primary="kubectl tool" data-secondary="commands" data-tertiary="describe" data-type="indexterm" id="idm45664079579936"/> For example, to describe the Pod we previously created, you can run:</p>
+<pre data-type="programlisting">$ <strong>kubectl describe pods kuard</strong></pre>
+<p>This outputs a bunch of information about the Pod in different sections. At the top is basic information about the Pod:</p>
+<pre data-type="programlisting">Name:           kuard
+Namespace:      default
+Node:           node1/10.0.15.185
+Start Time:     Sun, 02 Jul 2017 15:00:38 -0700
+Labels:         &lt;none&gt;
+Annotations:    &lt;none&gt;
+Status:         Running
+IP:             192.168.199.238
+Controllers:    &lt;none&gt;</pre>
+<p>Then there is information about <a data-primary="containers" data-secondary="running in a Pod, information about" data-type="indexterm" id="idm45664079575936"/>the containers running in the Pod:</p>
+<pre data-type="programlisting">Containers:
+  kuard:
+    Container ID:  docker://055095...
+    Image:         gcr.io/kuar-demo/kuard-amd64:blue
+    Image ID:      docker-pullable://gcr.io/kuar-demo/kuard-amd64@sha256:a580...
+    Port:          8080/TCP
+    State:         Running
+      Started:     Sun, 02 Jul 2017 15:00:41 -0700
+    Ready:         True
+    Restart Count: 0
+    Environment:   &lt;none&gt;
+    Mounts:
+      /var/run/secrets/kubernetes.io/serviceaccount from default-token-cg5f5 (ro)</pre>
+<p>Finally, there are events related to the Pod, such as when it was scheduled, when its image <a data-primary="events" data-secondary="related to a Pod, information about" data-type="indexterm" id="idm45664079573680"/>was pulled, and if/when it had to be restarted because of failing health checks:</p>
+<pre data-type="programlisting">Events:
+  Seen From              SubObjectPath           Type      Reason    Message
+  ---- ----              -------------           --------  ------    -------
+  50s  default-scheduler                         Normal    Scheduled Success...
+  49s  kubelet, node1    spec.containers{kuard}  Normal    Pulling   pulling...
+  47s  kubelet, node1    spec.containers{kuard}  Normal    Pulled    Success...
+  47s  kubelet, node1    spec.containers{kuard}  Normal    Created   Created...
+  47s  kubelet, node1    spec.containers{kuard}  Normal    Started   Started...</pre>
+</div></section>
+<section data-pdf-bookmark="Deleting a Pod" data-type="sect2"><div class="sect2" id="idm45664079583296">
+<h2>Deleting a Pod</h2>
+<p>When it is time to delete a Pod, you can delete<a data-primary="Pods" data-secondary="running" data-tertiary="deleting a Pod" data-type="indexterm" id="idm45664079570512"/><a data-primary="kubectl tool" data-secondary="commands" data-tertiary="delete pods" data-type="indexterm" id="idm45664079569264"/> it either by name:</p>
+<pre data-type="programlisting">$ <strong>kubectl delete pods/kuard</strong></pre>
+<p>or you can use the same file that you used to create it:</p>
+<pre data-type="programlisting">$ <strong>kubectl delete -f kuard-pod.yaml</strong></pre>
+<p>When a Pod is <a data-primary="kubectl tool" data-secondary="commands" data-tertiary="delete" data-type="indexterm" id="idm45664079564816"/>deleted, it is <em>not</em> immediately killed. Instead, if you run <code>kubectl get pods</code>, you will see that the Pod is in the <code>Terminating</code> state. <a data-primary="kubectl tool" data-secondary="commands" data-tertiary="get pods" data-type="indexterm" id="idm45664079562160"/><a data-primary="Terminating state (Pods)" data-type="indexterm" id="idm45664079560880"/><a data-primary="grace period (Pod termination)" data-type="indexterm" id="idm45664079560144"/>All Pods have a termination <em>grace period</em>. By default, this is 30 seconds. When a Pod is transitioned to <code>Terminating</code>, it no longer receives new requests. In a serving scenario, the grace period is important for reliability because it allows the Pod to finish any active requests that it may be in the middle of processing before it is terminated.</p>
+<div data-type="warning" epub:type="warning"><h6>Warning</h6>
+<p>When you delete a Pod, any data stored in the containers associated with that Pod will be deleted as well.  If you want to persist data across multiple instances of a Pod, you need to use Persistent​Vo⁠lumes, described at the end of this chapter.</p>
+</div>
+</div></section>
+</div></section>
+<section data-pdf-bookmark="Accessing Your Pod" data-type="sect1"><div class="sect1" id="idm45664079557392">
+<h1>Accessing Your Pod</h1>
+<p>Now that your Pod is running, you’re going to want to access it for a variety of reasons.<a data-primary="Pods" data-secondary="accessing" data-type="indexterm" id="ix_Podsacc"/>  You may want to load the web service that is running in the Pod.  You may want to view its logs to debug a problem that you are seeing, or even execute other commands inside the Pod to help debug. The following sections detail various ways you can interact with the code and data running inside your Pod.</p>
+<section data-pdf-bookmark="Getting More Information with Logs" data-type="sect2"><div class="sect2" id="idm45664079554272">
+<h2>Getting More Information with Logs</h2>
+<p>When your application needs debugging, it’s helpful to be able to dig deeper than <code>describe</code> to understand what the application is doing.<a data-primary="debugging" data-secondary="of running containers using logs" data-secondary-sortas="running" data-type="indexterm" id="idm45664079552128"/><a data-primary="Pods" data-secondary="accessing" data-tertiary="getting more info with logs" data-type="indexterm" id="idm45664079550912"/><a data-primary="logs" data-secondary="getting more information about your application with" data-type="indexterm" id="idm45664079549728"/> Kubernetes provides two commands for debugging running containers.<a data-primary="kubectl tool" data-secondary="commands" data-tertiary="logs" data-type="indexterm" id="idm45664079548560"/> The <code>kubectl logs</code> command downloads the current logs from the running instance:</p>
+<pre data-type="programlisting">$ <strong>kubectl logs kuard</strong></pre>
+<p>Adding the <code>-f</code> flag will cause the logs to stream continuously.</p>
+<p>The <code>kubectl logs</code> command always tries to get logs from the currently running container. Adding the <code>--previous</code> flag will get logs from a previous instance of the container. This is useful, for example, if your containers are continuously restarting due to a problem at container startup.</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>While using <code>kubectl logs</code> is useful for occasional debugging of containers in production environments, it’s generally useful to use a log aggregation service.<a data-primary="logs" data-secondary="log aggregation services" data-type="indexterm" id="idm45664079541696"/> There are several open source log aggregation tools, like Fluentd and Elasticsearch, as well as numerous cloud logging providers.<a data-primary="elasticsearch tool" data-type="indexterm" id="idm45664079540480"/><a data-primary="fluentd tool" data-type="indexterm" id="idm45664079539808"/> These log aggregation services provide greater capacity for storing a longer duration of logs as well as rich log searching and filtering capabilities. Many also provide the ability to aggregate logs from multiple Pods into a single view.</p>
+</div>
+</div></section>
+<section data-pdf-bookmark="Running Commands in Your Container with exec" data-type="sect2"><div class="sect2" id="idm45664079538752">
+<h2>Running Commands in Your Container with exec</h2>
+<p>Sometimes logs are insufficient, and to truly determine what’s going on, you need to execute commands in the context of the container itself.<a data-primary="Pods" data-secondary="accessing" data-tertiary="running commands in container with exec" data-type="indexterm" id="idm45664079537120"/><a data-primary="kubectl tool" data-secondary="commands" data-tertiary="exec" data-type="indexterm" id="idm45664079535856"/><a data-primary="containers" data-secondary="running commands in using kubectl exec" data-type="indexterm" id="idm45664079534640"/> To do this, you can use:</p>
+<pre data-type="programlisting">$ <strong>kubectl exec kuard -- date</strong></pre>
+<p>You can also get an interactive session by adding the <code>-it</code> flag:</p>
+<pre data-type="programlisting">$ <strong>kubectl exec -it kuard -- ash</strong></pre>
+</div></section>
+<section data-pdf-bookmark="Copying Files to and from Containers" data-type="sect2"><div class="sect2" id="idm45664079530448">
+<h2>Copying Files to and from Containers</h2>
+<p>In the previous chapter, we showed how to use the <code>kubectl cp</code> command to access files in a Pod.<a data-primary="Pods" data-secondary="accessing" data-tertiary="copying files to and from containers" data-type="indexterm" id="idm45664079528640"/> Generally speaking, copying files into a container is an antipattern. You really should treat the contents of a container as immutable. But occasionally it’s the most immediate way to stop the bleeding and restore your service to health, since it is quicker than building, pushing, and rolling out a new image. Once you stop the bleeding, however, it is critically important that you immediately go and do the image build and rollout, or you are guaranteed to forget the local change that you made to your container and overwrite it in the subsequent regularly scheduled rollout.<a data-primary="Pods" data-secondary="accessing" data-startref="ix_Podsacc" data-type="indexterm" id="idm45664079527200"/></p>
+</div></section>
+</div></section>
+<section data-pdf-bookmark="Health Checks" data-type="sect1"><div class="sect1" id="health_checks_sec_ref">
+<h1>Health Checks</h1>
+<p>When you run your application as a container in Kubernetes, it is automatically kept alive for you using a <em>process health check</em>. <a data-primary="Pods" data-secondary="health checks" data-type="indexterm" id="ix_Podshlth"/>This health check simply ensures that the main process of your application is always running. If it isn’t, Kubernetes restarts it.<a data-primary="process health checks" data-seealso="health checks" data-type="indexterm" id="idm45664079521760"/></p>
+<p>However, in most cases, a simple process check is insufficient. For example, if your process has deadlocked and is unable to serve requests, a process health check will still believe that your application is healthy since its process is still running.</p>
+<p>To address this, Kubernetes introduced health checks for application <em>liveness</em>. <span class="keep-together">Liveness</span> health checks run application-specific logic, like loading a web page, to verify that the application is not just still running, but is functioning properly. Since these liveness health checks are application-specific, you have to define them in your Pod manifest.</p>
+<section data-pdf-bookmark="Liveness Probe" data-type="sect2"><div class="sect2" id="idm45664079518464">
+<h2>Liveness Probe</h2>
+<p>Once the <code>kuard</code> process is up and running, we need a way to confirm that it is actually healthy and shouldn’t be restarted.<a data-primary="liveness probes" data-type="indexterm" id="idm45664079516192"/><a data-primary="health checks" data-secondary="liveness probes" data-type="indexterm" id="idm45664079515456"/><a data-primary="Pods" data-secondary="health checks" data-tertiary="liveness probes" data-type="indexterm" id="idm45664079514512"/> Liveness probes are defined per container, which means each container inside a Pod is health checked separately. In <a data-type="xref" href="#EXPODHEALTH">Example 5-2</a>, we add a liveness probe to our <code>kuard</code> container, which runs an HTTP request against the <code class="keep-together">/healthy</code> path on our container.</p>
+<div data-type="example" id="EXPODHEALTH">
+<h5><span class="label">Example 5-2. </span>kuard-pod-health.yaml</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Pod</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kuard</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">containers</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">gcr.io/kuar-demo/kuard-amd64:blue</code><code class="w"/>
+<code class="w">      </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kuard</code><code class="w"/>
+<code class="w">      </code><code class="nt">livenessProbe</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="nt">httpGet</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="nt">path</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">/healthy</code><code class="w"/>
+<code class="w">          </code><code class="nt">port</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">8080</code><code class="w"/>
+<code class="w">        </code><code class="nt">initialDelaySeconds</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">5</code><code class="w"/>
+<code class="w">        </code><code class="nt">timeoutSeconds</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">1</code><code class="w"/>
+<code class="w">        </code><code class="nt">periodSeconds</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">10</code><code class="w"/>
+<code class="w">        </code><code class="nt">failureThreshold</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">3</code><code class="w"/>
+<code class="w">      </code><code class="nt">ports</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">containerPort</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">8080</code><code class="w"/>
+<code class="w">          </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">http</code><code class="w"/>
+<code class="w">          </code><code class="nt">protocol</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">TCP</code><code class="w"/></pre></div>
+<p>The preceding Pod manifest uses an <code>httpGet</code> probe to<a data-primary="httpGet probe" data-type="indexterm" id="idm45664079448128"/> perform an HTTP <code>GET</code> request against the <code>/healthy</code> endpoint on port 8080 of the <code>kuard</code> container. The probe sets an <code>initialDelaySeconds</code> of <code>5</code>, and thus will not be called until 5 seconds after all the containers in the Pod are created. The probe must respond within the 1-second timeout, and the HTTP status code must be equal to or greater than 200 and less than 400 to be considered successful. Kubernetes will call the probe every 10 seconds. If more than three consecutive probes fail, the container will fail and restart.</p>
+<p>You can see this in action by looking at the <code>kuard</code> status page.  Create a Pod
+using this manifest and then port-forward to that Pod:</p>
+<pre data-type="programlisting">$ <strong>kubectl apply -f kuard-pod-health.yaml</strong>
+$ <strong>kubectl port-forward kuard 8080:8080</strong></pre>
+<p>Point your browser to <em>http://localhost:8080</em>.  Click the “Liveness Probe” tab. You should see a table that lists all of the probes that this instance of <code>kuard</code> has received.  <a data-primary="kubectl tool" data-secondary="commands" data-tertiary="describe pods" data-type="indexterm" id="idm45664079402208"/>If you click the “Fail” link on that page, <code>kuard</code> will start to fail health checks.  Wait long enough, and Kubernetes will restart the container.  At that point, the display will reset and start over again.  Details of the restart can be found by running the command <code>kubectl describe pods kuard</code>.  The “Events” section will have text similar to the following:</p>
+<pre data-type="programlisting">Killing container with id docker://2ac946...:pod "kuard_default(9ee84...)"
+container "kuard" is unhealthy, it will be killed and re-created.</pre>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>While the<a data-primary="restartPolicy (Pods)" data-type="indexterm" id="idm45664079398080"/> default response to a failed liveness check is to restart the Pod, the actual behavior is governed by the Pod’s <code>restartPolicy</code>. There are three options for the restart policy: <code>Always</code> (the default), <code>OnFailure</code> (restart only on liveness failure or nonzero process exit code), or <code>Never</code>.</p>
+</div>
+</div></section>
+<section data-pdf-bookmark="Readiness Probe" data-type="sect2"><div class="sect2" id="idm45664079395296">
+<h2>Readiness Probe</h2>
+<p>Of course, liveness isn’t the only kind of health check we want to perform. Kubernetes makes a distinction between <em>liveness</em> and <em>readiness</em>. <a data-primary="readiness probes" data-type="indexterm" id="idm45664079343888"/><a data-primary="health checks" data-secondary="readiness probes" data-type="indexterm" id="idm45664079343280"/><a data-primary="Pods" data-secondary="health checks" data-tertiary="readiness probes" data-type="indexterm" id="idm45664079342432"/>Liveness determines if an application is running properly. Containers that fail liveness checks are restarted.  Readiness describes when a container is ready to serve user requests. Containers that fail readiness checks are removed from service load balancers. Readiness probes are configured similarly to liveness probes. We explore Kubernetes services in detail in <a data-type="xref" href="ch07.xhtml#service_discovery">Chapter 7</a>.</p>
+<p>Combining the readiness and liveness probes helps ensure only healthy containers are running within the cluster.</p>
+</div></section>
+<section data-pdf-bookmark="Startup Probe" data-type="sect2"><div class="sect2" id="idm45664079339840">
+<h2>Startup Probe</h2>
+<p>Startup probes have recently been introduced to Kubernetes as an alternative way of managing slow-starting containers.<a data-primary="health checks" data-secondary="startup probes" data-type="indexterm" id="idm45664079338352"/><a data-primary="startup probes" data-type="indexterm" id="idm45664079337376"/><a data-primary="Pods" data-secondary="health checks" data-tertiary="startup probes" data-type="indexterm" id="idm45664079336704"/> When a Pod is started, the startup probe is run before any other probing of the Pod is started. The startup probe proceeds until it either times out (in which case the Pod is restarted) or it succeeds, at which time the liveness probe takes over. Startup probes enable you to poll slowly for a slow-starting container while also enabling a responsive liveness check once the slow-starting container has initialized.</p>
+</div></section>
+<section data-pdf-bookmark="Advanced Probe Configuration" data-type="sect2"><div class="sect2" id="idm45664079335104">
+<h2>Advanced Probe Configuration</h2>
+<p>Probes in Kubernetes have a number of advanced options, including how long to wait after <a data-primary="health checks" data-secondary="probe configuration, advanced" data-type="indexterm" id="idm45664079333728"/><a data-primary="configurations" data-secondary="advanced probe configuration" data-type="indexterm" id="idm45664079332784"/><a data-primary="Pods" data-secondary="health checks" data-tertiary="probe configuration, advanced" data-type="indexterm" id="idm45664079331872"/>Pod startup to start probing, how many failures should be considered a true failure, and how many successes are necessary to reset the failure count. All of these configurations receive default values when left unspecified, but they may be necessary for more advanced use cases such as applications that are inherently flaky or take a long time to start up.</p>
+</div></section>
+<section data-pdf-bookmark="Other Types of Health Checks" data-type="sect2"><div class="sect2" id="idm45664079330304">
+<h2>Other Types of Health Checks</h2>
+<p>In addition to HTTP checks, Kubernetes also supports <code>tcpSocket</code> health checks that open a TCP socket; if the connection succeeds, the probe succeeds.<a data-primary="Pods" data-secondary="health checks" data-tertiary="tcpSocket and exec probes" data-type="indexterm" id="idm45664079328624"/><a data-primary="health checks" data-secondary="tcpSocket and exec probes" data-type="indexterm" id="idm45664079327360"/><a data-primary="tcpSocket health checks" data-type="indexterm" id="idm45664079326400"/> This style of probe is useful for non-HTTP applications, such as databases or other non–HTTP-based APIs.</p>
+<p>Finally, Kubernetes allows <code>exec</code> probes. <a data-primary="exec probes" data-type="indexterm" id="idm45664079324672"/>These execute a script or program in the context of the container. Following typical convention, if this script returns a zero exit code, the probe succeeds; otherwise, it fails. <code>exec</code> scripts are often useful for custom application validation logic that doesn’t fit neatly into an HTTP call.<a data-primary="Pods" data-secondary="health checks" data-startref="ix_Podshlth" data-type="indexterm" id="idm45664079323296"/></p>
+</div></section>
+</div></section>
+<section data-pdf-bookmark="Resource Management" data-type="sect1"><div class="sect1" id="idm45664079525296">
+<h1>Resource Management</h1>
+<p>Most people move into containers and orchestrators like Kubernetes because of the radical improvements in image packaging and reliable deployment they provide.<a data-primary="Pods" data-secondary="resource management for" data-type="indexterm" id="ix_Podsresmgt"/><a data-primary="resource management" data-type="indexterm" id="ix_resmgt"/> In addition to application-oriented primitives that simplify distributed system development, equally important is that they allow you to increase the overall utilization of the compute nodes that make up the cluster. The basic cost of operating a machine, either virtual or physical, is basically constant regardless of whether it is idle or fully loaded.  Consequently, ensuring that these machines are maximally active increases the efficiency of every dollar spent on infrastructure.</p>
+<p>Generally speaking, we measure this efficiency with the utilization metric. <em>Utilization</em> is defined as the amount of a resource actively being used divided by the amount of a resource that has been purchased.<a data-primary="utilization metric (resources)" data-type="indexterm" id="idm45664079317360"/>  For example, if you purchase a one-core machine, and your application uses one-tenth of a core, then your utilization is 10%. With scheduling systems like Kubernetes managing resource packing, you can drive your utilization to greater than 50%. To achieve this, you have to tell Kubernetes about the resources your application requires so that Kubernetes can find the optimal packing of containers onto machines.</p>
+<p>Kubernetes allows users to specify two different resource metrics. Resource <em>requests</em> specify the minimum amount of a resource required to run the application.<a data-primary="requests for resources" data-type="indexterm" id="idm45664079315712"/><a data-primary="limits" data-type="indexterm" id="idm45664079315008"/>  Resource <em>limits</em> specify the maximum amount of a resource that an application can consume. Let’s look at these in greater detail in the following <span class="keep-together">sections</span>.</p>
+<p>Kubernetes recognizes a large number of different notations for specifying resources, from literals (“12345”) to millicores (“100m”). Of important note is the distinction between MB/GB/PB and MiB/GiB/PiB. The former is the familiar power of two units (e.g., 1 MB == 1,024 KB) while the latter is power of 10 units (1MiB == 1000KiB).</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>A common source of errors is specifying milliunits via a lowercase <em>m</em> versus megaunits via an uppercase <em>M</em>. Concretely, “400m” is 0.4 MB, not 400Mb, a significant difference!<a data-primary="milli-units and mega-units" data-type="indexterm" id="idm45664079310624"/></p>
+</div>
+<section class="pagebreak-before less_space" data-pdf-bookmark="Resource Requests: Minimum Required Resources" data-type="sect2"><div class="sect2" id="idm45664079309600">
+<h2>Resource Requests: Minimum Required Resources</h2>
+<p>When a Pod requests the resources required to run its containers, Kubernetes guarantees that these resources are available to the Pod.<a data-primary="resource management" data-secondary="resource requests, minimum required resources" data-type="indexterm" id="idm45664079307280"/><a data-primary="Pods" data-secondary="resource management for" data-tertiary="resource requests, minimum required resources" data-type="indexterm" id="idm45664079306208"/> The most commonly requested resources are CPU and memory, but Kubernetes supports other resource types as well, such as GPUs.<a data-primary="memory" data-secondary="requests for" data-type="indexterm" id="idm45664079304688"/><a data-primary="CPUs" data-secondary="requests for" data-type="indexterm" id="idm45664079303744"/><a data-primary="GPUs" data-type="indexterm" id="idm45664079302800"/> For example, to request that the <code>kuard</code> container land on a machine with half a CPU free and get 128 MB of memory allocated to it, we define the Pod as shown in <a data-type="xref" href="#EXPODRESREQ">Example 5-3</a>.</p>
+<div data-type="example" id="EXPODRESREQ">
+<h5><span class="label">Example 5-3. </span>kuard-pod-resreq.yaml</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Pod</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kuard</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">containers</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">gcr.io/kuar-demo/kuard-amd64:blue</code><code class="w"/>
+<code class="w">      </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kuard</code><code class="w"/>
+<code class="w">      </code><code class="nt">resources</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="nt">requests</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="nt">cpu</code><code class="p">:</code><code class="w"> </code><code class="s">"500m"</code><code class="w"/>
+<code class="w">          </code><code class="nt">memory</code><code class="p">:</code><code class="w"> </code><code class="s">"128Mi"</code><code class="w"/>
+<code class="w">      </code><code class="nt">ports</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">containerPort</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">8080</code><code class="w"/>
+<code class="w">          </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">http</code><code class="w"/>
+<code class="w">          </code><code class="nt">protocol</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">TCP</code><code class="w"/></pre></div>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>Resources are requested per container, not per Pod.<a data-primary="containers" data-secondary="resource requests per container" data-type="indexterm" id="idm45664079247536"/>  The total resources requested by the Pod is the sum of all resources requested by all containers in the Pod because the different containers often have very different CPU requirements. For example, if a Pod contains a web server and data synchronizer, the web server is user-facing and likely needs a great deal of CPU, while the data synchronizer can make do with very little.</p>
+</div>
+<p>Requests are used when scheduling Pods to nodes.<a data-primary="nodes" data-secondary="scheduling Pods to, resource requests" data-type="indexterm" id="idm45664079198464"/>  The Kubernetes scheduler will ensure that the sum of all requests of all Pods on a node does not exceed the capacity of the node.  Therefore, a Pod is guaranteed to have at least the requested resources when running on the node. Importantly, “request” specifies a minimum. It does not specify a maximum cap on the resources a Pod may use. To explore what this means, let’s look at an example.</p>
+<p>Imagine a container whose code attempts to use all available CPU cores. Suppose that we create a Pod with this container that requests 0.5 CPU. Kubernetes schedules this Pod onto a machine with a total of 2 CPU cores. As long as it is the only Pod on the machine, it will consume all 2.0 of the available cores, despite only requesting 0.5 CPU.</p>
+<p>If a second Pod with the same container and the same request of 0.5 CPU lands on the machine, then each Pod will receive 1.0 cores. If a third, identical Pod is scheduled, each Pod will receive 0.66 cores. Finally, if a fourth identical Pod is scheduled, each Pod will receive the 0.5 core it requested, and the node will be at capacity.</p>
+<p>CPU requests are implemented using the <code>cpu-shares</code> functionality in the Linux <span class="keep-together">kernel</span>.</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>Memory requests are handled similarly to CPU, but there is an important difference.<a data-primary="memory" data-secondary="requests for" data-type="indexterm" id="idm45664079194032"/> If a container is over its memory request, the OS can’t just remove memory from the process, because it’s been allocated. Consequently, when the system runs out of memory, the <code>kubelet</code> terminates containers whose memory usage is greater than their requested memory. These containers are automatically restarted, but with less available memory on the machine for the container to consume.</p>
+</div>
+<p>Since resource requests guarantee resource availability to a Pod, they are critical to ensuring that containers have sufficient resources in high-load
+situations.</p>
+</div></section>
+<section data-pdf-bookmark="Capping Resource Usage with Limits" data-type="sect2"><div class="sect2" id="idm45664079309008">
+<h2>Capping Resource Usage with Limits</h2>
+<p>In addition to setting the resources required by a Pod, which establishes the minimum resources available to it, you can also set a maximum on a its resource usage via resource <em>limits</em>.<a data-primary="resource management" data-secondary="capping resource usage with limits" data-type="indexterm" id="idm45664079189552"/><a data-primary="Pods" data-secondary="resource management for" data-tertiary="capping resource usage with limits" data-type="indexterm" id="idm45664079188576"/><a data-primary="limits" data-secondary="capping resource usage with" data-type="indexterm" id="idm45664079187344"/></p>
+<p>In our previous example, we created a <code>kuard</code> Pod that requested a minimum of 0.5 of a core and 128 MB of memory.  In the Pod manifest in <a data-type="xref" href="#EXPODRESLIM">Example 5-4</a>, we extend this configuration to add a limit of 1.0 CPU and 256 MB of memory.</p>
+<div data-type="example" id="EXPODRESLIM">
+<h5><span class="label">Example 5-4. </span>kuard-pod-reslim.yaml</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Pod</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kuard</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">containers</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">gcr.io/kuar-demo/kuard-amd64:blue</code><code class="w"/>
+<code class="w">      </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kuard</code><code class="w"/>
+<code class="w">      </code><code class="nt">resources</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="nt">requests</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="nt">cpu</code><code class="p">:</code><code class="w"> </code><code class="s">"500m"</code><code class="w"/>
+<code class="w">          </code><code class="nt">memory</code><code class="p">:</code><code class="w"> </code><code class="s">"128Mi"</code><code class="w"/>
+<code class="w">        </code><code class="nt">limits</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="nt">cpu</code><code class="p">:</code><code class="w"> </code><code class="s">"1000m"</code><code class="w"/>
+<code class="w">          </code><code class="nt">memory</code><code class="p">:</code><code class="w"> </code><code class="s">"256Mi"</code><code class="w"/>
+<code class="w">      </code><code class="nt">ports</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">containerPort</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">8080</code><code class="w"/>
+<code class="w">          </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">http</code><code class="w"/>
+<code class="w">          </code><code class="nt">protocol</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">TCP</code><code class="w"/></pre></div>
+<p>When you establish limits on a container, the kernel is configured to ensure that consumption cannot exceed these limits.<a data-primary="CPUs" data-secondary="limits on usage of" data-type="indexterm" id="idm45664079136224"/>  A container with a CPU limit of 0.5 cores will only ever get 0.5 cores, even if the CPU is otherwise idle. <a data-primary="memory" data-secondary="limits on usage of" data-type="indexterm" id="idm45664079042432"/>A container with a memory limit of 256 MB will not be allowed additional memory; for example, <code>malloc</code> will fail if its memory usage exceeds 256 MB.<a data-primary="malloc utility" data-type="indexterm" id="idm45664079040928"/><a data-primary="Pods" data-secondary="resource management for" data-startref="ix_Podsresmgt" data-type="indexterm" id="idm45664079040224"/><a data-primary="resource management" data-startref="ix_resmgt" data-type="indexterm" id="idm45664079039008"/></p>
+</div></section>
+</div></section>
+<section data-pdf-bookmark="Persisting Data with Volumes" data-type="sect1"><div class="sect1" id="idm45664079037936">
+<h1>Persisting Data with Volumes</h1>
+<p>When a Pod is deleted or a container restarts, any and all data in the
+container’s filesystem is also deleted.<a data-primary="persisting data with volumes" data-type="indexterm" id="ix_persvol"/><a data-primary="Pods" data-secondary="persisting data with volumes" data-type="indexterm" id="ix_Podspers"/><a data-primary="volumes" data-secondary="persisting data with" data-type="indexterm" id="ix_volspers"/> This is often a good thing, since you don’t want to leave around cruft that happened to be written by your stateless web application. In other cases, having access to persistent disk storage is an important part of a healthy application. Kubernetes models such persistent storage.</p>
+<section data-pdf-bookmark="Using Volumes with Pods" data-type="sect2"><div class="sect2" id="idm45664079032944">
+<h2>Using Volumes with Pods</h2>
+<p>To add a volume to a Pod manifest, there are two new stanzas to add to our
+configuration. The first is a new <code>spec.volumes</code> section. This array defines all of the volumes that may be accessed by containers in the Pod manifest. It’s important to note that not all containers are required to mount all volumes defined in the Pod. The second addition is the <code>volumeMounts</code> array in the container definition. This array defines the volumes that are mounted into a particular container and the path where each volume should be mounted. Note that two different containers in a Pod can mount the same volume at different mount paths.</p>
+<p>The manifest in <a data-type="xref" href="#EXPODVOL">Example 5-5</a> defines a single new volume named <code>kuard-data</code>, which the <code>kuard</code> container mounts to the <code>/data</code> path.</p>
+<div data-type="example" id="EXPODVOL">
+<h5><span class="label">Example 5-5. </span>kuard-pod-vol.yaml</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Pod</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kuard</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">volumes</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="s">"kuard-data"</code><code class="w"/>
+<code class="w">      </code><code class="nt">hostPath</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="nt">path</code><code class="p">:</code><code class="w"> </code><code class="s">"/var/lib/kuard"</code><code class="w"/>
+<code class="w">  </code><code class="nt">containers</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">gcr.io/kuar-demo/kuard-amd64:blue</code><code class="w"/>
+<code class="w">      </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kuard</code><code class="w"/>
+<code class="w">      </code><code class="nt">volumeMounts</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">mountPath</code><code class="p">:</code><code class="w"> </code><code class="s">"/data"</code><code class="w"/>
+<code class="w">          </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="s">"kuard-data"</code><code class="w"/>
+<code class="w">      </code><code class="nt">ports</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">containerPort</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">8080</code><code class="w"/>
+<code class="w">          </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">http</code><code class="w"/>
+<code class="w">          </code><code class="nt">protocol</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">TCP</code><code class="w"/></pre></div>
+</div></section>
+<section data-pdf-bookmark="Different Ways of Using Volumes with Pods" data-type="sect2"><div class="sect2" id="idm45664078979856">
+<h2>Different Ways of Using Volumes with Pods</h2>
+<p>There are a variety of ways you can use data in your application. The following are some of these ways and the recommended patterns for Kubernetes:</p>
+<dl>
+<dt>Communication/synchronization</dt>
+<dd>
+<p>In the first example of a Pod, we saw how two containers used a shared volume to serve a site while keeping it synchronized to a remote Git location (<a data-type="xref" href="#pod_example">Figure 5-1</a>). To achieve this, the Pod uses an <code>emptyDir</code> volume. <a data-primary="synchronization, using volumes" data-type="indexterm" id="idm45664078879456"/><a data-primary="communication/synchronization, using volumes" data-type="indexterm" id="idm45664078878752"/><a data-primary="emptyDir volume" data-type="indexterm" id="idm45664078878112"/>Such a volume is scoped to the Pod’s lifespan, but it can be shared between two containers, forming the basis for communication between our Git sync and web serving containers.</p>
+</dd>
+<dt>Cache</dt>
+<dd>
+<p>An application may use a volume that is valuable for performance, but not required for correct operation of the application. For example, perhaps the application keeps prerendered thumbnails of larger images. Of course, they can be reconstructed from the original images, but that makes serving the thumbnails more expensive. You want such a cache to survive a container restart due to a health-check failure, and thus <code class="keep-together">emptyDir</code> works well for the cache use case as well.</p>
+</dd>
+<dt>Persistent data</dt>
+<dd>
+<p>Sometimes you will use a volume for truly <a data-primary="storage" data-secondary="persistent data" data-type="indexterm" id="idm45664078873408"/>persistent data—data that is independent of the lifespan of a particular Pod, and should move between nodes in the cluster if a node fails or a Pod moves to a different machine. To achieve this, Kubernetes supports a wide variety of remote network storage volumes, including widely supported protocols like NFS and iSCSI as well as cloud provider network storage like Amazon Elastic Block Store, Azure File and Azure Disk, and Google’s Persistent Disk.</p>
+</dd>
+<dt>Mounting the host filesystem</dt>
+<dd>
+<p>Other applications don’t actually need a persistent volume, but they do need some access to the underlying host filesystem.<a data-primary="mounting host filesystem, using volumes" data-type="indexterm" id="idm45664078870832"/><a data-primary="hostPath volumes" data-type="indexterm" id="idm45664078870160"/><a data-primary="host filesystem, mounting" data-type="indexterm" id="idm45664078869488"/> For example, they may need access to the <em>/dev</em> filesystem to perform raw block-level access to a device on the system. For these cases, Kubernetes supports the <code>hostPath</code> volume, which can mount arbitrary locations on the worker node into the container. <a data-type="xref" href="#EXPODVOL">Example 5-5</a> uses the <code>hostPath</code> volume type.  The volume created is <em>/var/lib/kuard</em> on the host.</p>
+</dd>
+</dl>
+<p>Here is an example of using an NFS server:</p>
+<pre data-type="programlisting">...
+# Rest of pod definition above here
+volumes:
+    - name: "kuard-data"
+      nfs:
+        server: my.nfs.server.local
+        path: "/exports"</pre>
+<p>Persistent volumes are a deep topic. <a data-type="xref" href="ch16.xhtml#storage_k8s">Chapter 16</a> has a more in-depth examination of the subject.</p>
+</div></section>
+</div></section>
+<section data-pdf-bookmark="Putting It All Together" data-type="sect1"><div class="sect1" id="idm45664078842560">
+<h1>Putting It All Together</h1>
+<p>Many applications are stateful, and as such we must preserve any data and ensure access to the underlying storage volume <a data-primary="persisting data with volumes" data-startref="ix_persvol" data-type="indexterm" id="idm45664078840896"/><a data-primary="Pods" data-secondary="persisting data with volumes" data-startref="ix_Podspers" data-type="indexterm" id="idm45664078839952"/><a data-primary="volumes" data-secondary="persisting data with" data-startref="ix_volspers" data-type="indexterm" id="idm45664078838768"/><a data-primary="Pods" data-secondary="putting it all together in kuard manifest" data-type="indexterm" id="idm45664078837552"/><a data-primary="manifests (Pod)" data-secondary="complete manifest for kuard Pod" data-type="indexterm" id="idm45664078836512"/>regardless of what machine the application runs on. As we saw earlier, this can be achieved using a persistent volume backed by network-attached storage. We also want to ensure that a healthy instance of the <span class="keep-together">application</span> is running at all times, which means we want to make sure the container running <code>kuard</code> is ready before we expose it to clients.</p>
+<p>Through a combination of persistent volumes, readiness and liveness probes, and resource restrictions, Kubernetes provides everything needed to run stateful applications reliably. <a data-type="xref" href="#EXPODFULL">Example 5-6</a> pulls this all together into one manifest.</p>
+<div data-type="example" id="EXPODFULL">
+<h5><span class="label">Example 5-6. </span>kuard-pod-full.yaml</h5>
+<pre data-code-language="yaml" data-type="programlisting"><code class="nt">apiVersion</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">v1</code><code class="w"/>
+<code class="nt">kind</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">Pod</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kuard</code><code class="w"/>
+<code class="nt">spec</code><code class="p">:</code><code class="w"/>
+<code class="w">  </code><code class="nt">volumes</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="s">"kuard-data"</code><code class="w"/>
+<code class="w">      </code><code class="nt">nfs</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="nt">server</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">my.nfs.server.local</code><code class="w"/>
+<code class="w">        </code><code class="nt">path</code><code class="p">:</code><code class="w"> </code><code class="s">"/exports"</code><code class="w"/>
+<code class="w">  </code><code class="nt">containers</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">image</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">gcr.io/kuar-demo/kuard-amd64:blue</code><code class="w"/>
+<code class="w">      </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">kuard</code><code class="w"/>
+<code class="w">      </code><code class="nt">ports</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">containerPort</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">8080</code><code class="w"/>
+<code class="w">          </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">http</code><code class="w"/>
+<code class="w">          </code><code class="nt">protocol</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">TCP</code><code class="w"/>
+<code class="w">      </code><code class="nt">resources</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="nt">requests</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="nt">cpu</code><code class="p">:</code><code class="w"> </code><code class="s">"500m"</code><code class="w"/>
+<code class="w">          </code><code class="nt">memory</code><code class="p">:</code><code class="w"> </code><code class="s">"128Mi"</code><code class="w"/>
+<code class="w">        </code><code class="nt">limits</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="nt">cpu</code><code class="p">:</code><code class="w"> </code><code class="s">"1000m"</code><code class="w"/>
+<code class="w">          </code><code class="nt">memory</code><code class="p">:</code><code class="w"> </code><code class="s">"256Mi"</code><code class="w"/>
+<code class="w">      </code><code class="nt">volumeMounts</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="p-Indicator">-</code><code class="w"> </code><code class="nt">mountPath</code><code class="p">:</code><code class="w"> </code><code class="s">"/data"</code><code class="w"/>
+<code class="w">          </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="s">"kuard-data"</code><code class="w"/>
+<code class="w">      </code><code class="nt">livenessProbe</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="nt">httpGet</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="nt">path</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">/healthy</code><code class="w"/>
+<code class="w">          </code><code class="nt">port</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">8080</code><code class="w"/>
+<code class="w">        </code><code class="nt">initialDelaySeconds</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">5</code><code class="w"/>
+<code class="w">        </code><code class="nt">timeoutSeconds</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">1</code><code class="w"/>
+<code class="w">        </code><code class="nt">periodSeconds</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">10</code><code class="w"/>
+<code class="w">        </code><code class="nt">failureThreshold</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">3</code><code class="w"/>
+<code class="w">      </code><code class="nt">readinessProbe</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="nt">httpGet</code><code class="p">:</code><code class="w"/>
+<code class="w">          </code><code class="nt">path</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">/ready</code><code class="w"/>
+<code class="w">          </code><code class="nt">port</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">8080</code><code class="w"/>
+<code class="w">        </code><code class="nt">initialDelaySeconds</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">30</code><code class="w"/>
+<code class="w">        </code><code class="nt">timeoutSeconds</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">1</code><code class="w"/>
+<code class="w">        </code><code class="nt">periodSeconds</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">10</code><code class="w"/>
+<code class="w">        </code><code class="nt">failureThreshold</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">3</code><code class="w"/></pre></div>
+<p>The definition of the Pod has grown over the course of this chapter. Each
+new capability added to your application also adds a new section to its
+definition.</p>
+</div></section>
+<section data-pdf-bookmark="Summary" data-type="sect1"><div class="sect1" id="idm45664078570192">
+<h1>Summary</h1>
+<p>Pods represent the atomic unit of work in a Kubernetes cluster. They are
+comprised of one or more containers working together symbiotically. To create one, you write a Pod manifest and submit it to the Kubernetes API server by using the command-line tool or (less frequently) by making HTTP and JSON calls to the server directly.</p>
+<p>Once you’ve submitted the manifest to the API server, the Kubernetes scheduler finds a machine where the Pod can fit and schedules the Pod to that machine. After it’s scheduled, the <code>kubelet</code> daemon on that machine is responsible for creating the containers that correspond to the Pod, as well as performing any health checks defined in the Pod manifest.</p>
+<p>Once a Pod is scheduled to a node, no rescheduling occurs if that node fails. Additionally, to create multiple replicas of the same Pod, you have to create and name them manually. In <a data-type="xref" href="ch09.xhtml#replica_set">Chapter 9</a>, we introduce the ReplicaSet object and show how you can automate the creation of multiple identical Pods and ensure that they are re-created in the event of a node machine failure.<a data-primary="Pods" data-startref="ix_Pods" data-type="indexterm" id="idm45664078607440"/></p>
+</div></section>
+</div></section></div></body></html>

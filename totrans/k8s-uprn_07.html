@@ -1,0 +1,383 @@
+<html><head></head><body>
+<div id="sbo-rt-content"><section data-pdf-bookmark="Chapter 7. Service Discovery" data-type="chapter" epub:type="chapter"><div class="chapter" id="service_discovery">
+<h1><span class="label">Chapter 7. </span>Service Discovery</h1>
+<p>Kubernetes is a very dynamic system.  <a data-primary="service discovery" data-type="indexterm" id="ix_serdis"/>The system is involved in placing Pods on nodes, making sure they are up and running, and rescheduling them as needed.  There are ways to automatically change the number of Pods based on load (such as Horizontal Pod Autoscaling [see <a data-type="xref" href="ch09.xhtml#autoscaling">“Autoscaling a ReplicaSet”</a>]).  The API-driven nature of the system encourages others to create higher and higher levels of automation.</p>
+<p>While the dynamic nature of Kubernetes makes it easy to run a lot of things, it creates problems when it comes to <em>finding</em> those things.  Most of the traditional network infrastructure wasn’t built for the level of dynamism that Kubernetes presents.</p>
+<section data-pdf-bookmark="What Is Service Discovery?" data-type="sect1"><div class="sect1" id="idm45664078348992">
+<h1>What Is Service Discovery?</h1>
+<p>The general name for this class of problems and solutions is <em>service discovery</em>.  <a data-primary="service discovery" data-secondary="about" data-type="indexterm" id="idm45664078347152"/>Service-discovery tools help solve the problem of finding which processes are listening at which addresses for which services.  A good service-discovery system will enable users to resolve this information quickly and reliably.  A good system is also low-latency; clients are updated soon after the information associated with a service changes.  Finally, a good service-discovery system can store a richer definition of what that service is.  For example, perhaps there are multiple ports associated with the service.</p>
+<p>The Domain Name System (DNS) is the traditional system of service discovery on the internet.<a data-primary="DNS" data-secondary="service discovery on the internet" data-type="indexterm" id="idm45664078345520"/>  DNS is designed for relatively stable name resolution with wide and efficient caching.  It is a great system for the internet but falls short in the dynamic world of Kubernetes.<a data-primary="domain names" data-seealso="DNS" data-type="indexterm" id="idm45664078344160"/></p>
+<p>Unfortunately, many systems (for example, Java, by default) look up a name in DNS directly and never re-resolve it.  This can lead to clients caching stale mappings and talking to the wrong IP.  Even with a short TTL (time-to-live) and a well-behaved client, there is a <span class="keep-together">natural</span> delay between when a name resolution changes and when the client notices. There are natural limits to the amount and type of information that can be returned in a typical DNS query too.  <a data-primary="SRV records (DNS)" data-type="indexterm" id="idm45664078341856"/><a data-primary="A records (DNS)" data-type="indexterm" id="idm45664078341152"/>Things start to break past 20 to 30 address (A) records for a single name. Service (SRV) records solve some problems, but are often very hard to use.  Finally, the way that clients handle multiple IPs in a DNS record is usually to take the first IP address and rely on the DNS server to randomize or round-robin the order of records.  This is no substitute for more purpose-built load balancing.</p>
+</div></section>
+<section data-pdf-bookmark="The Service Object" data-type="sect1"><div class="sect1" id="idm45664078340096">
+<h1>The Service Object</h1>
+<p>Real service discovery in Kubernetes starts with a Service object.<a data-primary="service discovery" data-secondary="Service object" data-type="indexterm" id="idm45664078338464"/> A Service object is a way to create a named label selector.<a data-primary="labels" data-secondary="label selectors" data-tertiary="Service object creating named selector" data-type="indexterm" id="idm45664078337280"/>  As we will see, the Service object does some other nice things for us too.</p>
+<p>Just as the <code>kubectl run</code> command is an easy way to create a Kubernetes deployment, we can use <code>kubectl expose</code> to create a service.<a data-primary="kubectl tool" data-secondary="commands" data-tertiary="expose" data-type="indexterm" id="idm45664078334288"/>  We’ll talk about Deployments in detail in <a data-type="xref" href="ch10.xhtml#deployments_chapter">Chapter 10</a>, but for now you can think of a Deployment as an instance of a microservice.<a data-primary="deployments" data-secondary="creating deployments and services" data-type="indexterm" id="idm45664078332016"/> Let’s create some deployments and services so we can see how they work:</p>
+<pre data-type="programlisting">$ <strong>kubectl create deployment alpaca-prod \
+  --image=gcr.io/kuar-demo/kuard-amd64:blue \
+  --port=8080</strong>
+$ <strong>kubectl scale deployment alpaca-prod --replicas 3</strong>
+$ <strong>kubectl expose deployment alpaca-prod</strong>
+$ <strong>kubectl create deployment bandicoot-prod \
+  --image=gcr.io/kuar-demo/kuard-amd64:green \
+  --port=8080</strong>
+$ <strong>kubectl scale deployment bandicoot-prod --replicas 2</strong>
+  <strong>kubectl expose deployment bandicoot-prod</strong>
+$ <strong>kubectl get services -o wide</strong>
+
+NAME             CLUSTER-IP    ... PORT(S)  ... SELECTOR
+alpaca-prod      10.115.245.13 ... 8080/TCP ... app=alpaca
+bandicoot-prod   10.115.242.3  ... 8080/TCP ... app=bandicoot
+kubernetes       10.115.240.1  ... 443/TCP  ... &lt;none&gt;</pre>
+<p>After running these commands, we have three services.  The ones we just created are <code>alpaca-prod</code> and <code>bandicoot-prod</code>.  The <code>kubernetes</code> service is automatically created for you so that you can find and talk to the Kubernetes API from within the app.</p>
+<p>If we look at the <code>SELECTOR</code> column, we see that the <code>alpaca-prod</code> service simply gives a name to a selector and specifies which ports to talk to for that service. The <code>kubectl expose</code> command will conveniently pull both the label selector and the relevant ports (8080, in this case) from the deployment definition.</p>
+<p>Furthermore, that service is assigned a new type of virtual IP called a <em>cluster IP</em>.  <a data-primary="IP addresses" data-secondary="virtual, cluster IP" data-type="indexterm" id="idm45664078321776"/><a data-primary="cluster IPs" data-type="indexterm" id="idm45664078320768"/>This is a special IP address the system will load balance across all of the Pods that are identified by the selector.</p>
+<p>To interact with services, we are going to port-forward to one of the <code>alpaca</code> Pods. Start this command and leave it running in a terminal window. You can see the port-forward working by accessing the <code>alpaca</code> Pod at <span><em>http://localhost:48858</em></span>:</p>
+<pre data-type="programlisting">$ <strong>ALPACA_POD=$(kubectl get pods -l app=alpaca \
+    -o jsonpath='{.items[0].metadata.name}')</strong>
+$ <strong>kubectl port-forward $ALPACA_POD 48858:8080</strong></pre>
+<section data-pdf-bookmark="Service DNS" data-type="sect2"><div class="sect2" id="idm45664078315968">
+<h2>Service DNS</h2>
+<p>Because the cluster IP is virtual, it is stable, and it is appropriate to give it a DNS address. <a data-primary="DNS" data-secondary="address for cluster IP" data-type="indexterm" id="idm45664078314384"/><a data-primary="service discovery" data-secondary="Service object" data-tertiary="service DNS" data-type="indexterm" id="idm45664078313408"/>All of the issues around clients caching DNS results no longer apply.  Within a namespace, it is as easy as just using the service name to connect to one of the Pods identified by a service.</p>
+<p>Kubernetes provides a DNS service exposed to Pods running in the cluster.  This Kubernetes DNS service was installed as a system component when the cluster was first created.  The DNS service is, itself, managed by Kubernetes and is a great example of Kubernetes building on Kubernetes.  The Kubernetes DNS service provides DNS names for cluster IPs.</p>
+<p>You can try this out by expanding the “DNS Query” section on the <code>kuard</code> server
+status page.  Query the A record for <code>alpaca-prod</code>.  The output should look something like this:</p>
+<pre data-type="programlisting">;; opcode: QUERY, status: NOERROR, id: 12071
+;; flags: qr aa rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 0
+
+;; QUESTION SECTION:
+;alpaca-prod.default.svc.cluster.local.	IN	 A
+
+;; ANSWER SECTION:
+alpaca-prod.default.svc.cluster.local.	30	IN	A	10.115.245.13</pre>
+<p>The full DNS name here is <code>alpaca-prod.default.svc.cluster.local.</code>.  Let’s break this down:</p>
+<dl>
+<dt><code>alpaca-prod</code></dt>
+<dd>
+<p>The name of the service in question.</p>
+</dd>
+<dt><code>default</code></dt>
+<dd>
+<p>The namespace that this service is in.</p>
+</dd>
+<dt><code>svc</code></dt>
+<dd>
+<p>Recognizing that this is a service.  This allows Kubernetes to expose other types of things as DNS in the future.</p>
+</dd>
+<dt><code>cluster.local.</code></dt>
+<dd>
+<p>The base domain name for the cluster.  This is the default and what you will see for most clusters.  Administrators may change this to allow unique DNS names across multiple clusters.</p>
+</dd>
+</dl>
+<p>When referring to a service in your own namespace, you can just use the service name (<code>alpaca-prod</code>).  You can also refer to a service in another namespace with <code>alpaca-prod.default</code>.  And, of course, you can use the fully qualified service name (<code>alpaca-prod.default.svc.cluster.local.</code>). Try each of these out in the “DNS Query” section of <code>kuard</code>.</p>
+</div></section>
+<section data-pdf-bookmark="Readiness Checks" data-type="sect2"><div class="sect2" id="idm45664078299216">
+<h2>Readiness Checks</h2>
+<p>Often, when an application first starts up, it isn’t ready to handle requests.<a data-primary="service discovery" data-secondary="Service object" data-tertiary="readiness checks" data-type="indexterm" id="idm45664078297552"/><a data-primary="readiness probes" data-secondary="for services" data-secondary-sortas="services" data-type="indexterm" id="idm45664078296304"/>  There is usually some amount of initialization that can take anywhere from under a second to several minutes.  One nice thing the Service object does is track which of your Pods are ready via a readiness check.  Let’s modify our deployment to add a readiness check that is attached to a Pod, as we discussed in <a data-type="xref" href="ch05.xhtml#pods">Chapter 5</a>:</p>
+<pre data-type="programlisting">$ <strong>kubectl edit deployment/alpaca-prod</strong></pre>
+<p>This command will fetch the current version of the <code>alpaca-prod</code> deployment and bring it up in an editor. After you save and quit your editor, it’ll write the object back to Kubernetes. This is a quick way to edit an object without saving it to a YAML file.</p>
+<p>Add the following section:</p>
+<pre data-type="programlisting">spec:
+  ...
+  template:
+    ...
+    spec:
+      containers:
+        ...
+        name: alpaca-prod
+        <b>readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          periodSeconds: 2
+          initialDelaySeconds: 0
+          failureThreshold: 3
+          successThreshold: 1</b></pre>
+<p>This sets up the Pods this deployment will create so that they will be checked for readiness via an HTTP <code>GET</code> to <code>/ready</code> on port 8080.  This check is done every two seconds starting as soon as the Pod comes up.  If three successive checks fail, then the Pod will be considered not ready.  However, if only one check succeeds, the Pod will again be considered ready.</p>
+<p>Only ready Pods are sent traffic.</p>
+<p>Updating the deployment definition like this will delete and re-create the <code>alpaca</code> Pods.  <a data-primary="kubectl tool" data-secondary="commands" data-tertiary="port-forward" data-type="indexterm" id="idm45664078287328"/><a data-primary="port forwarding" data-type="indexterm" id="idm45664078286048"/>As such, we need to restart our <code>port-forward</code> command from earlier:</p>
+<pre data-type="programlisting">$ <strong>ALPACA_POD=$(kubectl get pods -l app=alpaca-prod \
+    -o jsonpath='{.items[0].metadata.name}')</strong>
+$ <strong>kubectl port-forward $ALPACA_POD 48858:8080</strong></pre>
+<p>Point your browser to <span><em>http://localhost:48858</em></span>, and you should see the debug page for that instance of <code>kuard</code>. Expand the “Readiness Probe” section.  You should see this page update every time there is a new readiness check from the system, which should happen every two seconds.</p>
+<p>In another terminal window, start a <code>watch</code> command on the endpoints for the <code>alpaca-prod</code> service.  <a data-primary="watch command, starting on service endpoints" data-type="indexterm" id="idm45664078279920"/><a data-primary="kubectl tool" data-secondary="commands" data-tertiary="--watch flag" data-tertiary-sortas="watch" data-type="indexterm" id="idm45664078279088"/>Endpoints are a lower-level way of finding what a service is sending traffic to and are covered later in this chapter.  The <code>--watch</code> option here causes the <code>kubectl</code> command to hang around and output any updates.  This is an easy way to see how a Kubernetes object changes over time:</p>
+<pre data-type="programlisting">$ <strong>kubectl get endpoints alpaca-prod --watch</strong></pre>
+<p>Now return to your browser and hit the “Fail” link for the readiness check. You should see that the server is now returning errors with codes in the 500s.  After three of these, this server is removed from the list of endpoints for the service.  Hit the “Succeed” link and notice that after a single readiness check, the endpoint is added back.</p>
+<p>This readiness check is a way for an overloaded or sick server to signal to the system that it doesn’t want to receive traffic anymore.  This is a great way to implement graceful shutdown.  The server can signal that it no longer wants traffic, wait until existing connections are closed, and then cleanly exit.</p>
+<p>Press Ctrl-C to exit out of both the <code>port-forward</code> and <code>watch</code> commands in your <span class="keep-together">terminals</span>.</p>
+</div></section>
+</div></section>
+<section data-pdf-bookmark="Looking Beyond the Cluster" data-type="sect1"><div class="sect1" id="idm45664078271888">
+<h1>Looking Beyond the Cluster</h1>
+<p>So far, everything we’ve covered in this chapter has been about exposing services inside of a cluster.<a data-primary="service discovery" data-secondary="looking beyond the cluster" data-type="indexterm" id="ix_serdisbeycls"/>  Oftentimes, the IPs for Pods are only reachable from within the cluster.  At some point, we have to allow new traffic in!</p>
+<p>The most portable way to do this is to use a feature called NodePorts, which enhance a service even further.  In addition to a cluster IP, the system picks a port (or the user can specify one), and every node in the cluster then forwards traffic to that port to the service.</p>
+<p>With this feature, if you can reach any node in the cluster, you can contact a service.  You can use the NodePort without knowing where any of the Pods for that service are running.  This can be integrated with hardware or software load balancers to expose the service further.<a data-primary="kubectl tool" data-secondary="commands" data-tertiary="edit" data-type="indexterm" id="idm45664078267136"/></p>
+<p>Try this out by modifying the <code>alpaca-prod</code> service:</p>
+<pre data-type="programlisting">$ <strong>kubectl edit service alpaca-prod</strong></pre>
+<p>Change the <code>spec.type</code> field to <code>NodePort</code>.  <a data-primary="NodePorts" data-type="indexterm" id="idm45664078262496"/>You can also do this when creating the service via <code>kubectl expose</code> by<a data-primary="kubectl tool" data-secondary="commands" data-tertiary="expose" data-type="indexterm" id="idm45664078261184"/> specifying <code>--type=NodePort</code>.  The system will assign a new NodePort:</p>
+<pre data-type="programlisting">$ <strong>kubectl describe service alpaca-prod</strong>
+
+Name:                   alpaca-prod
+Namespace:              default
+Labels:                 app=alpaca
+Annotations:            &lt;none&gt;
+Selector:               app=alpaca
+Type:                   NodePort
+IP:                     10.115.245.13
+Port:                   &lt;unset&gt; 8080/TCP
+NodePort:               &lt;unset&gt; 32711/TCP
+Endpoints:              10.112.1.66:8080,10.112.2.104:8080,10.112.2.105:8080
+Session Affinity:       None
+No events.</pre>
+<p>Here we see that the system assigned port 32711 to this service.  Now we can hit any of our cluster nodes on that port to access the service.  If you are sitting on the same network, you can access it directly.  If your cluster is in the cloud someplace, you can use SSH tunneling with something like this:</p>
+<pre data-type="programlisting">$ <strong>ssh &lt;<em>node</em>&gt; -L 8080:localhost:32711</strong></pre>
+<p>Now if you point your browser to <span><em>http://localhost:8080</em></span>, you will be connected to that service. Each request that you send to the service will be randomly directed to one of the Pods that implements the service. Reload the page a few times, and you will see that you are randomly assigned to different Pods.</p>
+<p>When you are done, exit the SSH session.<a data-primary="service discovery" data-secondary="looking beyond the cluster" data-startref="ix_serdisbeycls" data-type="indexterm" id="idm45664078254720"/></p>
+</div></section>
+<section data-pdf-bookmark="Load Balancer Integration" data-type="sect1"><div class="sect1" id="idm45664078271232">
+<h1>Load Balancer Integration</h1>
+<p>If you have a cluster that is configured to integrate with external load balancers, you can use the <code>LoadBalancer</code> type.<a data-primary="LoadBalancer type" data-type="indexterm" id="idm45664078251312"/><a data-primary="service discovery" data-secondary="load balancer integration" data-type="indexterm" id="ix_serdisldbal"/><a data-primary="load balancers" data-secondary="for services" data-secondary-sortas="services" data-type="indexterm" id="ix_ldbalser"/>  This builds on the <code>NodePort</code> type by additionally configuring the cloud to create a new load balancer and direct it at nodes in your cluster. Most cloud-based Kubernetes clusters offer load balancer integration, and there are a number of projects that implement load balancer integration for common physical load balancers as well, although these may require more manual integration with your cluster.</p>
+<p>Edit the <code>alpaca-prod</code> service again (<code>kubectl edit service alpaca-prod</code>) and change <code>spec.type</code> to <code>LoadBalancer</code>.</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>Creating a service of type <code>LoadBalancer</code> exposes that service to the public
+internet. Before you do this, you should make certain that it is something
+that is secure to be exposed to everyone in the world. We will discuss security risks further in this section. Additionally, Chapters <a href="ch19.xhtml#securing_pods">9</a> and <a href="ch20.xhtml#policy_and_governance_for_kubernetes_clusters">20</a> provide guidance on how to secure your application.</p>
+</div>
+<p>If you do a <code>kubectl get services</code> right away, you’ll see that the <code>EXTERNAL-IP</code>
+column for <code>alpaca-prod</code> now says <code>&lt;pending&gt;</code>.  Wait a bit and you should see a public address assigned by your cloud. You can look in the console for your cloud account and see the configuration work that Kubernetes did for you:</p>
+<pre data-type="programlisting">$ <strong>kubectl describe service alpaca-prod</strong>
+
+Name:                   alpaca-prod
+Namespace:              default
+Labels:                 app=alpaca
+Selector:               app=alpaca
+Type:                   LoadBalancer
+IP:                     10.115.245.13
+LoadBalancer Ingress:   104.196.248.204
+Port:                   &lt;unset&gt;	8080/TCP
+NodePort:               &lt;unset&gt;	32711/TCP
+Endpoints:              10.112.1.66:8080,10.112.2.104:8080,10.112.2.105:8080
+Session Affinity:       None
+Events:
+  FirstSeen ... Reason                Message
+  --------- ... ------                -------
+  3m        ... Type                  NodePort -&gt; LoadBalancer
+  3m        ... CreatingLoadBalancer  Creating load balancer
+  2m        ... CreatedLoadBalancer   Created load balancer</pre>
+<p>Here we see that we have an address of 104.196.248.204 now assigned to the <code>alpaca-prod</code> service.  Open up your browser and try!</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>This example is from a cluster launched and managed on the Google Cloud Platform via GKE. The way a load balancer is configured is specific to a cloud. <a data-primary="DNS" data-secondary="load balancers based on" data-type="indexterm" id="idm45664078236464"/>Some clouds have DNS-based load balancers (e.g., AWS Elastic Load Balancing [ELB]).  In this case, you’ll see a hostname here instead of an IP. Depending on the cloud provider, it may still take a little while for the load balancer to be fully operational.</p>
+</div>
+<p>Creating a cloud-based load balancer can take some time. Don’t be surprised
+if it takes a few minutes on most cloud providers.<a data-primary="cloud" data-secondary="creating cloud-based load balancer" data-type="indexterm" id="idm45664078234432"/></p>
+<p>The examples that we have seen so far use <em>external</em> load balancers; that
+is, load balancers that are connected to the public internet. While this is
+great for exposing services to the world, you’ll often want to expose
+your application within only your private network. To achieve this, use an <em>internal</em> load balancer. Unfortunately, because support for
+internal load balancers was added to Kubernetes more recently, it is done in
+a somewhat ad hoc manner via object annotations.<a data-primary="annotations" data-secondary="using object annotations to create internal load balancer" data-type="indexterm" id="idm45664078231312"/><a data-primary="Azure Kubernetes Service" data-secondary="creating internal load balancer in a cluster" data-type="indexterm" id="idm45664078230288"/> For example, to create an
+internal load balancer in an Azure Kubernetes Service cluster, you add the
+annotation <code>service.beta.kubernetes.io/azure-load-balancer-internal: "true"</code>
+to your <code>Service</code> resource. Here are the settings for some popular clouds:</p>
+<dl>
+<dt>Microsoft Azure</dt>
+<dd>
+<p><code>service.beta.kubernetes.io/azure-load-balancer-internal: "true"</code></p>
+</dd>
+<dt>Amazon Web Services</dt>
+<dd>
+<p><code>service.beta.kubernetes.io/aws-load-balancer-internal: "true"</code></p>
+</dd>
+<dt>Alibaba Cloud</dt>
+<dd>
+<p><code>service.beta.kubernetes.io/alibaba-cloud-loadbalancer-address-type: "intranet"</code></p>
+</dd>
+<dt>Google Cloud Platform</dt>
+<dd>
+<p><code>cloud.google.com/load-balancer-type: "Internal"</code></p>
+</dd>
+</dl>
+<p>When you add this annotation to your Service, it should look like this:</p>
+<pre data-code-language="yaml" data-type="programlisting"><code class="p">...</code><code class="w"/>
+<code class="nt">metadata</code><code class="p">:</code><code class="w"/>
+<code class="w">    </code><code class="p">...</code><code class="w"/>
+<code class="w">    </code><code class="nt">name</code><code class="p">:</code><code class="w"> </code><code class="l-Scalar-Plain">some-service</code><code class="w"/>
+<code class="w">    </code><code class="nt">annotations</code><code class="p">:</code><code class="w"/>
+<code class="w">        </code><code class="nt">service.beta.kubernetes.io/azure-load-balancer-internal</code><code class="p">:</code><code class="w"> </code><code class="s">"true"</code><code class="w"/>
+<code class="p">...</code><code class="w"/></pre>
+<p>When you create a service with one of these annotations, an internally exposed
+service will be created instead of one on the public internet.</p>
+<div data-type="tip"><h6>Tip</h6>
+<p>There are several other annotations that extend LoadBalancer behavior,
+including ones for using a preexisiting IP address. The specific
+extensions for your provider should be documented on its website.<a data-primary="load balancers" data-secondary="for services" data-startref="ix_ldbalser" data-type="indexterm" id="idm45664078204624"/><a data-primary="service discovery" data-secondary="load balancer integration" data-startref="ix_serdisldbal" data-type="indexterm" id="idm45664078203440"/></p>
+</div>
+</div></section>
+<section data-pdf-bookmark="Advanced Details" data-type="sect1"><div class="sect1" id="idm45664078252816">
+<h1>Advanced Details</h1>
+<p>Kubernetes is built to be an extensible system.<a data-primary="service discovery" data-secondary="advanced details" data-type="indexterm" id="idm45664078200592"/>  As such, there are layers that allow for more advanced integrations.  Understanding the details of how a sophisticated concept like services is implemented may help you troubleshoot or create more advanced integrations.  This section goes a bit below the surface.</p>
+<section data-pdf-bookmark="Endpoints" data-type="sect2"><div class="sect2" id="idm45664078195904">
+<h2>Endpoints</h2>
+<p>Some applications (and the system itself) want to be able to use services
+without using a cluster IP.<a data-primary="endpoints" data-secondary="Endpoints objects for Service objects" data-type="indexterm" id="idm45664078194096"/><a data-primary="service discovery" data-secondary="advanced details" data-tertiary="endpoints" data-type="indexterm" id="idm45664078193152"/>  This is done with another type of object called an Endpoints object.  For every Service object, Kubernetes creates a buddy Endpoints object that contains the IP addresses for that service:</p>
+<pre data-type="programlisting">$ <strong>kubectl describe endpoints alpaca-prod</strong>
+
+Name:           alpaca-prod
+Namespace:      default
+Labels:         app=alpaca
+Subsets:
+  Addresses:            10.112.1.54,10.112.2.84,10.112.2.85
+  NotReadyAddresses:    &lt;none&gt;
+  Ports:
+    Name        Port    Protocol
+    ----        ----    --------
+    &lt;unset&gt;     8080    TCP
+
+No events.</pre>
+<p>To use a service, an advanced application can talk to the Kubernetes API directly to look up endpoints and call them.  The Kubernetes API even has the capability to “watch” objects and be notified as soon as they change.  In this way, a client can react immediately as soon as the IPs associated with a service change.</p>
+<p>Let’s demonstrate this.<a data-primary="kubectl tool" data-secondary="commands" data-tertiary="get endpoints  --watch" data-type="indexterm" id="idm45664078189904"/>  In a terminal window, start the following command and leave it running:</p>
+<pre data-type="programlisting">$ <strong>kubectl get endpoints alpaca-prod --watch</strong></pre>
+<p>It will output the current state of the endpoint and then “hang”:</p>
+<pre data-type="programlisting">NAME          ENDPOINTS                                            AGE
+alpaca-prod   10.112.1.54:8080,10.112.2.84:8080,10.112.2.85:8080   1m</pre>
+<p>Now open up <em>another</em> terminal window and delete and re-create the deployment
+backing <code>alpaca-prod</code>:</p>
+<pre data-type="programlisting">$ <strong>kubectl delete deployment alpaca-prod</strong>
+$ <strong>kubectl create deployment alpaca-prod \
+  --image=gcr.io/kuar-demo/kuard-amd64:blue \
+  --port=8080</strong>
+$ <strong>kubectl scale deployment alpaca-prod --replicas=3</strong></pre>
+<p>If you look back at the output from the watched endpoint, you will see that as you deleted and re-created these Pods, the output of the command reflected the most up-to-date set of IP addresses associated with the service.  Your output will look something like this:</p>
+<pre data-type="programlisting">NAME          ENDPOINTS                                            AGE
+alpaca-prod   10.112.1.54:8080,10.112.2.84:8080,10.112.2.85:8080   1m
+alpaca-prod   10.112.1.54:8080,10.112.2.84:8080                    1m
+alpaca-prod   &lt;none&gt;                                               1m
+alpaca-prod   10.112.2.90:8080                                     1m
+alpaca-prod   10.112.1.57:8080,10.112.2.90:8080                    1m
+alpaca-prod   10.112.0.28:8080,10.112.1.57:8080,10.112.2.90:8080   1m</pre>
+<p>The Endpoints object is great if you are writing new code that is built to run on Kubernetes from the start.  But most projects aren’t in this position!  Most existing systems are built to work with regular old IP addresses that don’t change that often.</p>
+</div></section>
+<section data-pdf-bookmark="Manual Service Discovery" data-type="sect2"><div class="sect2" id="idm45664078180912">
+<h2>Manual Service Discovery</h2>
+<p>Kubernetes services are built on top of label selectors over Pods.<a data-primary="service discovery" data-secondary="advanced details" data-tertiary="manual service discovery" data-type="indexterm" id="idm45664078145296"/>  That means that you can use the Kubernetes API to do rudimentary service discovery without using a Service object at all! Let’s demonstrate.</p>
+<p>With <code>kubectl</code> (and via the API) we can easily<a data-primary="kubectl tool" data-secondary="commands" data-tertiary="get pods" data-type="indexterm" id="idm45664078143152"/><a data-primary="IP addresses" data-secondary="assigned to Pods, getting with kubectl" data-type="indexterm" id="idm45664078142064"/> see what IPs are assigned to each Pod in our example deployments:</p>
+<pre data-type="programlisting">$ <strong>kubectl get pods -o wide --show-labels</strong>
+
+NAME                            ... IP          ... LABELS
+alpaca-prod-12334-87f8h    ... 10.112.1.54 ... app=alpaca
+alpaca-prod-12334-jssmh    ... 10.112.2.84 ... app=alpaca
+alpaca-prod-12334-tjp56    ... 10.112.2.85 ... app=alpaca
+bandicoot-prod-5678-sbxzl  ... 10.112.1.55 ... app=bandicoot
+bandicoot-prod-5678-x0dh8  ... 10.112.2.86 ... app=bandicoot</pre>
+<p>This is great, but what if you have a ton of Pods?  You’ll probably want to filter this based on the labels applied as part of the deployment.  Let’s do that for just the <code>alpaca</code> app:</p>
+<pre data-type="programlisting">$ <strong>kubectl get pods -o wide --selector=app=alpaca</strong>
+
+NAME                         ... IP          ...
+alpaca-prod-3408831585-bpzdz ... 10.112.1.54 ...
+alpaca-prod-3408831585-kncwt ... 10.112.2.84 ...
+alpaca-prod-3408831585-l9fsq ... 10.112.2.85 ...</pre>
+<p>At this point, you have the basics of service discovery!  You can always use labels to identify the set of Pods you are interested in, get all of the Pods for those labels, and dig out the IP address.  But keeping the correct set of labels to use in sync can be tricky.  This is why the Service object was created.</p>
+</div></section>
+<section data-pdf-bookmark="kube-proxy and Cluster IPs" data-type="sect2"><div class="sect2" id="idm45664078137168">
+<h2>kube-proxy and Cluster IPs</h2>
+<p>Cluster IPs are stable virtual IPs that load balance traffic across all of the endpoints in a service.<a data-primary="service discovery" data-secondary="advanced details" data-tertiary="kube-proxy and cluster IPs" data-type="indexterm" id="idm45664078135584"/><a data-primary="kube-proxy" data-secondary="cluster IPs and" data-type="indexterm" id="idm45664078134272"/><a data-primary="cluster IPs" data-secondary="kube-proxy and" data-type="indexterm" id="idm45664078133328"/>  This magic is performed by a component running on every node in the cluster called the <code>kube-proxy</code> (<a data-type="xref" href="#fig07in01">Figure 7-1</a>).</p>
+<figure><div class="figure" id="fig07in01">
+<img alt="" height="405" src="assets/kur3_0701.png" width="738"/>
+<h6><span class="label">Figure 7-1. </span>Configuring and using a cluster IP</h6>
+</div></figure>
+<p>In <a data-type="xref" href="#fig07in01">Figure 7-1</a>, the <code>kube-proxy</code> watches for new services in the cluster via the API server.  <a data-primary="iptables rules" data-type="indexterm" id="idm45664078127008"/>It then programs a set of <code>iptables</code> rules in the kernel of that host to rewrite the destinations of packets so they are directed at one of the endpoints for that service.  If the set of endpoints for a service changes (due to Pods coming and going or due to a failed readiness check), the set of <code>iptables</code> rules is rewritten.</p>
+<p>The cluster IP itself is usually assigned by the API server as the service is created.  However, when creating the service, the user can specify a specific cluster IP.  Once set, the cluster IP cannot be modified without deleting and re-creating the Service object.</p>
+<div data-type="note" epub:type="note"><h6>Note</h6>
+<p>The Kubernetes service address range is configured using the
+<code class="keep-together">--service-cluster-ip-range</code> flag on the <code>kube-apiserver</code> binary. <a data-primary="kube-api server, --service-cluster-ip-range flag" data-type="indexterm" id="idm45664078122384"/>The service address range should not overlap with the IP subnets and ranges assigned to each Docker bridge or Kubernetes node. In addition, any explicit cluster IP requested must come from that range and not already be in use.</p>
+</div>
+</div></section>
+<section data-pdf-bookmark="Cluster IP Environment Variables" data-type="sect2"><div class="sect2" id="idm45664078120928">
+<h2>Cluster IP Environment Variables</h2>
+<p>While most users should be using the DNS services to find cluster IPs, there are some older mechanisms that may still be in use. <a data-primary="cluster IPs" data-secondary="environment variables" data-type="indexterm" id="idm45664078119472"/><a data-primary="service discovery" data-secondary="advanced details" data-tertiary="cluster IP environment variables" data-type="indexterm" id="idm45664078118496"/> One of these is injecting a set of environment variables into Pods as they start up.</p>
+<p>To see this in action, let’s look at the console for the <code>bandicoot</code> instance of <code>kuard</code>. Enter the following commands in your terminal:</p>
+<pre data-type="programlisting">$ <strong>BANDICOOT_POD=$(kubectl get pods -l app=bandicoot \
+    -o jsonpath='{.items[0].metadata.name}')</strong>
+$ <strong>kubectl port-forward $BANDICOOT_POD 48858:8080</strong></pre>
+<p>Now point your browser to <span><em>http://localhost:48858</em></span> to see the status page for this server.  Expand the “Server Env” section and note the set of environment variables for the <code>alpaca</code> service. The status page should show a table similar to <a data-type="xref" href="#S.E.V._Table">Table 7-1</a>.</p>
+<table id="S.E.V._Table">
+<caption><span class="label">Table 7-1. </span>Service environment variables</caption>
+<thead>
+<tr>
+<th>Key</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><p><code>ALPACA_PROD_PORT</code></p></td>
+<td><p><code>tcp://10.115.245.13:8080</code></p></td>
+</tr>
+<tr>
+<td><p><code>ALPACA_PROD_PORT_8080_TCP</code></p></td>
+<td><p><code>tcp://10.115.245.13:8080</code></p></td>
+</tr>
+<tr>
+<td><p><code>ALPACA_PROD_PORT_8080_TCP_ADDR</code></p></td>
+<td><p><code>10.115.245.13</code></p></td>
+</tr>
+<tr>
+<td><p><code>ALPACA_PROD_PORT_8080_TCP_PORT</code></p></td>
+<td><p><code>8080</code></p></td>
+</tr>
+<tr>
+<td><p><code>ALPACA_PROD_PORT_8080_TCP_PROTO</code></p></td>
+<td><p><code>tcp</code></p></td>
+</tr>
+<tr>
+<td><p><code>ALPACA_PROD_SERVICE_HOST</code></p></td>
+<td><p><code>10.115.245.13</code></p></td>
+</tr>
+<tr>
+<td><p><code>ALPACA_PROD_SERVICE_PORT</code></p></td>
+<td><p><code>8080</code></p></td>
+</tr>
+</tbody>
+</table>
+<p>The two main environment variables to use are <code>ALPACA_PROD_SERVICE_HOST</code> and <code>ALPACA_PROD_SERVICE_PORT</code>.  The other environment variables are created to be compatible with (now deprecated) Docker link variables.</p>
+<p>A problem with the environment variable approach is that it requires resources to be created in a specific order.  The services must be created before the Pods that reference them.  This can introduce quite a bit of complexity when deploying a set of services that make up a larger application. In addition, using <em>just</em> environment variables seems strange to many users.  For this reason, DNS is probably a better option.</p>
+</div></section>
+</div></section>
+<section data-pdf-bookmark="Connecting with Other Environments" data-type="sect1"><div class="sect1" id="idm45664078092352">
+<h1>Connecting with Other Environments</h1>
+<p>While it is great to have <a data-primary="service discovery" data-secondary="connecting with other environments" data-type="indexterm" id="ix_serdisconn"/>service discovery within your own cluster, many real-world applications actually require that you integrate more cloud native applications deployed in Kubernetes with applications deployed to more legacy environments. Additionally, you may need to integrate a Kubernetes cluster in the cloud with infrastructure that has been deployed on-premise. This is an area of Kubernetes that is still undergoing a fair amount of exploration and development of solutions.</p>
+<section data-pdf-bookmark="Connecting to Resources Outside of a Cluster" data-type="sect2"><div class="sect2" id="idm45664078089488">
+<h2>Connecting to Resources Outside of a Cluster</h2>
+<p>When you are connecting Kubernetes to legacy resources <a data-primary="resources" data-secondary="outside of the cluster, connecting to" data-type="indexterm" id="idm45664078087872"/>outside of the cluster, you can use selector-less services to declare a Kubernetes service with a manually assigned IP address that is outside of the cluster. <a data-primary="DNS" data-secondary="Kubernetes service discovery via" data-type="indexterm" id="idm45664078086800"/>That way, Kubernetes service discovery via DNS works as expected, but the network traffic itself flows to an external resource.<a data-primary="labels" data-secondary="label selectors" data-tertiary="creating selectorless service" data-type="indexterm" id="idm45664078085568"/> To create a selector-less service, you remove the <code>spec.selector</code> field from your resource, while leaving the <code>metadata</code> and the <code>ports</code> sections unchanged. Because your service has no selector, no endpoints are automatically added to the service. <a data-primary="endpoints" data-secondary="manually adding to a service" data-type="indexterm" id="idm45664078082704"/>This means that you must add them manually. Typically the endpoint that you will add will be a fixed IP address (e.g., the IP address of your database server) so you only need to add it once. But if the IP address that backs the service ever changes, you will need to update the corresponding endpoint resource. To create or update the endpoint resource, you use an endpoint that looks something like the following:</p>
+<pre data-type="programlisting">apiVersion: v1
+kind: Endpoints
+metadata:
+  # This name must match the name of your service
+  name: my-database-server
+subsets:
+  - addresses:
+      # Replace this IP with the real IP of your server
+      - ip: 1.2.3.4
+    ports:
+      # Replace this port with the port(s) you want to expose
+      - port: 1433</pre>
+</div></section>
+<section data-pdf-bookmark="Connecting External Resources to Services Inside a Cluster" data-type="sect2"><div class="sect2" id="idm45664078080240">
+<h2>Connecting External Resources to Services Inside a Cluster</h2>
+<p>Connecting external resources to Kubernetes services is somewhat trickier.<a data-primary="resources" data-secondary="external, connecting to services inside a cluster" data-type="indexterm" id="idm45664078078864"/> If your cloud provider supports it, the easiest thing to do is to create an “internal” load balancer, as described above, that lives in your virtual private network and can deliver traffic from a fixed IP address into the cluster. You can then use traditional DNS to make this IP address available to the external resource. If an internal load balancer isn’t available, you can use a <code>NodePort</code> service to expose the service on the IP addresses of the nodes in the cluster.<a data-primary="NodePorts" data-type="indexterm" id="idm45664078077280"/> You can then either program a physical load balancer to serve traffic to those nodes, or use DNS-based load-balancing to spread traffic between the nodes.</p>
+<p>If neither of those solutions works for your use case, more complex options include running the full <code>kube-proxy</code> on an external resource and programming that machine to use the DNS server in the Kubernetes cluster.<a data-primary="kube-proxy" data-secondary="running on external resource" data-type="indexterm" id="idm45664078075328"/> Such a setup is significantly more difficult to get right and should really only be used in on-premise environments. There are also a variety of open source projects (for example, HashiCorp’s Consul) that can be used to manage connectivity between in-cluster and out-of-cluster resources. Such options require significant knowledge of both networking and Kubernetes to get right and should really be considered a last resort.</p>
+</div></section>
+</div></section>
+<section data-pdf-bookmark="Cleanup" data-type="sect1"><div class="sect1" id="idm45664078073824">
+<h1>Cleanup</h1>
+<p>Run the following command to clean <a data-primary="service discovery" data-secondary="connecting with other environments" data-startref="ix_serdisconn" data-type="indexterm" id="idm45664078072528"/><a data-primary="kubectl tool" data-secondary="commands" data-tertiary="delete" data-type="indexterm" id="idm45664078071216"/>up all of the objects created in this chapter:</p>
+<pre data-type="programlisting">$ <strong>kubectl delete services,deployments -l app</strong></pre>
+</div></section>
+<section data-pdf-bookmark="Summary" data-type="sect1"><div class="sect1" id="idm45664078068576">
+<h1>Summary</h1>
+<p>Kubernetes is a dynamic system that challenges traditional methods of naming and connecting services over the network.  The Service object provides a flexible and powerful way to expose services both within the cluster and beyond. With the techniques covered here, you can connect services to each other and expose them outside the cluster.</p>
+<p>While using the dynamic service discovery mechanisms in Kubernetes introduces some new concepts and may, at first, seem complex, understanding and adapting these techniques is key to unlocking the power of Kubernetes.  Once your application can dynamically find services and react to the dynamic placement of those applications, you are free to stop worrying about where things are running and when they move.  Thinking about services in a logical way and letting Kubernetes take care of the details of container placement is a critical piece of the puzzle.</p>
+<p>Of course, service discovery is just the beginning of how application
+networking works with Kubernetes. <a data-type="xref" href="ch08.xhtml#ingress">Chapter 8</a> covers Ingress networking, which is dedicated to Layer 7 (HTTP) load balancing and routing, and <a data-type="xref" href="ch15.xhtml#service_mesh">Chapter 15</a> is about service meshes, which are a more recently developed approach to cloud native networking that provide many additional capabilities in addition to service discovery and load balancing.<a data-primary="service discovery" data-startref="ix_serdis" data-type="indexterm" id="idm45664078064576"/></p>
+</div></section>
+</div></section></div></body></html>
