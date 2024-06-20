@@ -1,4 +1,4 @@
-# 第九章。Kubernetes 和 OpenShift 的未来
+# 第九章：Kubernetes 和 OpenShift 的未来
 
 近年来，在 KubeCon + CloudNativeCon 大会上花一些时间，您很快会得出结论，Kubernetes 的未来非常光明。KubeCon + CloudNativeCon 大会的参与人数正在爆炸式增长。此外，Kubernetes 的开源社区贡献者数量不断扩大和加强。采用 Kubernetes 的行业数量令人震惊。¹ 同样，OpenShift 在过去一年中其客户基础从 1,000 增长到 1,700，并且在财富 500 强公司中也得到了强劲的采用。² 在本章中，我们对传统 Kubernetes 和 OpenShift 的未来做出了一些预测。我们讨论了这些技术在云原生计算的多个方面，包括遗留应用迁移、高性能计算、机器学习和深度学习应用、开源市场以及多云环境中的增长和影响的预期。然后，我们结论本章并讨论了进一步学习的推荐资源。
 

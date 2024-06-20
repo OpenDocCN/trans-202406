@@ -1,4 +1,4 @@
-# 第四章 内部协调
+# 第四章：内部协调
 
 要真正精通 React，我们需要理解它的功能 *做什么*。到目前为止，我们已经理解了 JSX 和 `React.createElement`。我们还在某种程度上理解了虚拟 DOM。让我们在本章中探讨它在 React 中的实际应用，并理解 `ReactDOM.createRoot(element).​ren⁠der()` 做了什么。具体来说，我们将探讨 React 如何构建其虚拟 DOM，然后通过称为协调的过程更新真实 DOM。
 

@@ -1,4 +1,4 @@
-# 第二章 TypeScript 的类型系统
+# 第二章：TypeScript 的类型系统
 
 TypeScript 生成代码（Item 3），但类型系统才是重头戏。这就是您使用这种语言的原因！
 

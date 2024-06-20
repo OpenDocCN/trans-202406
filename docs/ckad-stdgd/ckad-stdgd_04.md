@@ -1,4 +1,4 @@
-# 第四章 容器
+# 第四章：容器
 
 Kubernetes 是一个容器编排器，使用容器运行时在 Pod 内实例化容器。许多使用容器运行时 [containerd](https://containerd.io/) 的 Kubernetes 集群版本为 1.24 或更高。
 

@@ -1,4 +1,4 @@
-# 第二章。去 Objectville 旅行：类和对象
+# 第二章：去 Objectville 旅行：类和对象
 
 ![图片](img/f0027-01.png)
 

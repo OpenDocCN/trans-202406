@@ -1,4 +1,4 @@
-# 第四章 Kustomize
+# 第四章：Kustomize
 
 总结来说，将一些 YAML 文件应用到 Kubernetes 集群中并检查结果就是部署到 Kubernetes 集群。
 

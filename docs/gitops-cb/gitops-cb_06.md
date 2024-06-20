@@ -1,4 +1,4 @@
-# 第五章 Helm
+# 第五章：Helm
 
 在第四章中，您已经了解了 Kustomize，这是一个简单而强大的工具，用于管理 Kubernetes 资源。但是另一个流行的工具也旨在简化 Kubernetes 资源的管理：Helm。
 

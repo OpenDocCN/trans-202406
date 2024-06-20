@@ -1,4 +1,4 @@
-# 第三章. 与 Kubernetes 交互
+# 第三章：与 Kubernetes 交互
 
 作为应用程序开发者，你会希望与 Kubernetes 集群交互，管理操作应用程序的对象。每次对集群的调用都由 API 服务器组件接受和处理。有多种方法可以调用 API 服务器。例如，你可以使用基于 Web 的仪表板（[web-based dashboard](https://kubernetes.io/docs/tasks/access-application-cluster/web-ui-dashboard/)）、像 [`kubectl`](https://kubernetes.io/docs/reference/kubectl/) 这样的命令行工具，或直接对 RESTful API 端点发出 HTTPS 请求。
 

@@ -1,4 +1,4 @@
-# 第八章。AWS AppSync 深入解析
+# 第八章：AWS AppSync 深入解析
 
 在第三章中，我们学习了 GraphQL，并创建了一个基本的 GraphQL API。在本章中，我们将进一步扩展这些概念，使用本书 GitHub 存储库中的[AWS AppSync](https://github.com/dabit3/full-stack-serverless-code/tree/master/appsync-in-depth)创建一个音乐节应用程序。
 

@@ -1,4 +1,4 @@
-# 第六章。使用 Java 库：了解 Java API
+# 第六章：使用 Java 库：了解 Java API
 
 ![image](img/f0125-01.png)
 

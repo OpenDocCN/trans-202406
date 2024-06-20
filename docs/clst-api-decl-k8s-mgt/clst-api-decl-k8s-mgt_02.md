@@ -1,4 +1,4 @@
-# 第二章。声明性 Kubernetes 集群管理
+# 第二章：声明性 Kubernetes 集群管理
 
 当您创建 CRD 时，可以为其提供适当的控制器逻辑来维护关联的对象。通过这种方式，您可以扩展 Kubernetes 声明性 API 以包含新类型的对象。这正是 Cluster API 用来管理 Kubernetes 的方法：它提供资源来表示 Kubernetes 集群及其基础设施。
 

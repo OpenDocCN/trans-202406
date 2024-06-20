@@ -1,4 +1,4 @@
-# 第三章。工作负载
+# 第三章：工作负载
 
 当我们谈论[Kubernetes 中的工作负载](https://oreil.ly/Uz1gG)时，我们指的是运行应用程序的 API 资源类型。这些 API 资源类型包括 Deployment、ReplicaSet、StatefulSet、DaemonSet、Job、CronJob 和当然 Pod。CKA 的课程对你需要熟悉的工作负载类型非常具体。考试只包括 Deployment、ReplicaSet 和 Pod。您需要理解 Deployment 管理的复制和升级功能，并理解将配置数据注入 Pod 的 API 原语。
 

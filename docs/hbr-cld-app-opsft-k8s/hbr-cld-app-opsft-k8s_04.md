@@ -1,4 +1,4 @@
-# 第二章. 使用 OpenShift 和 Kubernetes 入门
+# 第二章：使用 OpenShift 和 Kubernetes 入门
 
 在本章中，我们涵盖了多个主题，这些主题提供了对 Kubernetes 和 OpenShift 的基础理解。我们首先概述了 Kubernetes 的架构，然后描述了几种部署选项，这些选项将使您能够同时启动基本的 Kubernetes 环境和 OpenShift 环境。接下来，我们介绍了用于与 Kubernetes 和 OpenShift 交互的命令行工具`kubectl`和`oc`。然后，我们简要回顾了 Pods、Deployments 和 Service Accounts 等基本 Kubernetes 概念。在本章的后半部分，我们介绍了 OpenShift 相比传统 Kubernetes 提供的几个增强概念。最后，我们讨论了在生产环境中运行 Kubernetes 或 OpenShift 时常用的更高级的主题。
 

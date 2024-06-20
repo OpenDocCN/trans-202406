@@ -1,4 +1,4 @@
-# 第十八章. Jetpack Compose: *自我组合*
+# 第十八章：Jetpack Compose: *自我组合*
 
 ![image](img/f0755-01.png)
 

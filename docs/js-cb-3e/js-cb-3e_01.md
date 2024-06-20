@@ -1,1 +1,1 @@
-# 第一部分. JavaScript 语言
+# 第一部分：JavaScript 语言

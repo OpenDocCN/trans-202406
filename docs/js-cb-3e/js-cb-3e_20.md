@@ -1,4 +1,4 @@
-# 第十七章. Node 基础
+# 第十七章：Node 基础
 
 “旧”和“新” JavaScript 之间的分界线是在 Node.js（主要简称为 Node）发布到世界上时发生的。是的，动态修改页面元素的能力是一个重要的里程碑，以及强调为 ECMAScript 的新版本确立前进路径，但真正让我们以全新的方式看待 JavaScript 的是 Node。而我很喜欢这种方式——我是 Node 和服务器端 JavaScript 开发的铁杆粉丝。
 

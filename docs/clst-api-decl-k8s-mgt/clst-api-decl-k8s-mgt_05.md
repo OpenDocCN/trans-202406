@@ -1,4 +1,4 @@
-# 第五章。Cluster API 和 Kubernetes 的未来
+# 第五章：Cluster API 和 Kubernetes 的未来
 
 云原生架构不会消失。为了推动规模，企业依赖模块化、基于微服务的应用程序。随着时间的推移，自动化和编排复杂部署将变得更加关键。容器和 Kubernetes 的采用将继续加速，越来越多的公司在各种环境中部署多个使用不同 Kubernetes 发行版的集群。
 

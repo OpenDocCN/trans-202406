@@ -1,4 +1,4 @@
-# 第四章。使用 Azure Arc 启用的 Kubernetes
+# 第四章：使用 Azure Arc 启用的 Kubernetes
 
 在这最后一章中，让我们开始探讨与 Azure Arc 启用的 Kubernetes 相关的架构及如何启动、监控和使用 RBAC 在 Azure Arc 预期 Kubernetes 集群中。我们还将深入了解如何使用 GitOps 将应用程序部署到 Azure Arc 预期 Kubernetes 集群。
 

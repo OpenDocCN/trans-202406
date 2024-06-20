@@ -1,4 +1,4 @@
-# 第二章。扩展 Azure 控制平面用于 Kubernetes
+# 第二章：扩展 Azure 控制平面用于 Kubernetes
 
 在本章中，我们将扩展讨论 Azure Arc，专注于如何在多个云环境中使用它来管理 Kubernetes。
 

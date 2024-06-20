@@ -1,4 +1,4 @@
-# 第九章。使用 Amplify DataStore 构建离线应用程序
+# 第九章：使用 Amplify DataStore 构建离线应用程序
 
 到目前为止，在本书中，我们已经使用过 REST API 和 GraphQL API。在使用 GraphQL API 时，我们使用 API 类直接调用突变和查询。
 

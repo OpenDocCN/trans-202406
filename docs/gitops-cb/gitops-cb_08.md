@@ -1,4 +1,4 @@
-# 第七章 Argo CD
+# 第七章：Argo CD
 
 在前一章中，您学习了有关 Tekton 和其他引擎（如 GitHub Actions）如何实现项目的持续集成（CI）部分。
 

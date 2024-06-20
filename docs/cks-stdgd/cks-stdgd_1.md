@@ -1,4 +1,4 @@
-# 第一章。考试细节和资源
+# 第一章：考试细节和资源
 
 本章介绍了备考 [Certified Kubernetes Security Specialist (CKS) 考试](https://www.cncf.io/certification/cks) 时候候候候候候候候候候候候候候候候候候候候候候候候候候候候候候候。我们将讨论该认证的目标受众、课程设置和考试环境，以及技巧和额外的学习资源。如果您对该认证计划已经很熟悉，可以直接跳到覆盖技术概念的章节。
 

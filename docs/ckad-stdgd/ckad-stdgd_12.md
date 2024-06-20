@@ -1,4 +1,4 @@
-# 第十二章。Helm
+# 第十二章：Helm
 
 [Helm](https://helm.sh) 是一种用于一组 Kubernetes 清单的模板引擎和包管理器。运行时，它将 YAML 模板文件中的占位符替换为实际的、最终用户定义的值。Helm 可执行文件生成的工件称为 *chart 文件*，打包了组成应用程序 API 资源的清单。您可以将 chart 文件上传到 *chart 仓库*，以便其他团队可以使用它来部署捆绑的清单。Helm 生态系统提供了广泛的可重用图表，用于常见用例，可以在 [Artifact Hub](https://artifacthub.io/) 上搜索（例如用于运行 Grafana 或 PostgreSQL）。
 

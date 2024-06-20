@@ -1,4 +1,4 @@
-# 第七章. 在 Objectville 中过上更好的生活：继承和多态
+# 第七章：在 Objectville 中过上更好的生活：继承和多态
 
 ![image](img/f0167-01.png)
 

@@ -1,4 +1,4 @@
-# 第三章 GitOps：Git 作为事实的来源
+# 第三章：GitOps：Git 作为事实的来源
 
 在本章中，我们将专注于 GitOps，这是 Azure Arc 可用 Kubernetes 的重要组成部分。GitOps 可能是一个新概念，因此我们将花时间定义和解析它是什么，它是如何工作的，以及您如何在 Azure Arc 可用 Kubernetes 中使用它。
 

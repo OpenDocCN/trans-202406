@@ -1,4 +1,4 @@
-# 第三章\. 获得 Kubernetes
+# 第三章：获得 Kubernetes
 
 > 困惑是知识的开始。
 > 

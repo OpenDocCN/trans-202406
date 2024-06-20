@@ -1,4 +1,4 @@
-# 第八章 TypeScript 迁移
+# 第八章：TypeScript 迁移
 
 您听说过 TypeScript 很棒。您也从痛苦的经验中知道，维护您 15 年历史，有 10 万行代码的 JavaScript 库并不是一件容易的事。如果它能成为 TypeScript 库就好了！
 

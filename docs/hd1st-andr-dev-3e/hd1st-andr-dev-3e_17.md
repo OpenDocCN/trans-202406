@@ -1,4 +1,4 @@
-# 第十四章。Room 数据库：*带视图的 Room*
+# 第十四章：Room 数据库：*带视图的 Room*
 
 ![image](img/f0569-01.png)
 

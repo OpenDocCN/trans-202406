@@ -1,4 +1,4 @@
-# 第十五章。提高你的 Swing：使用 Swing
+# 第十五章：提高你的 Swing：使用 Swing
 
 ![图片](img/f0509-01.png)
 

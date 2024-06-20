@@ -1,4 +1,4 @@
-# 第十章。Pod 和容器安全
+# 第十章：Pod 和容器安全
 
 当涉及通过 Kubernetes API 实现 Pod 安全时，您有两个主要选项可供选择：Pod 安全准入和 RuntimeClass。在本章中，我们将审查每个 API 的目的和用途，并提供其最佳实践。
 

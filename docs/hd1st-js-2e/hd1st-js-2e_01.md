@@ -1,4 +1,4 @@
-# 第一章。快速了解 Javascript：踏入水中
+# 第一章：快速了解 Javascript：踏入水中
 
 ![Image](img/f0001-01.png)
 

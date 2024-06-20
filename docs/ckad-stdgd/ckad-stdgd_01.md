@@ -1,4 +1,4 @@
-# 第一章。考试详情和资源
+# 第一章：考试详情和资源
 
 本章回答了准备成功通过 [Certified Kubernetes Application Developer (CKAD)](https://oreil.ly/sq-Po) 考试的候选人最常问的问题。后续章节将为您总结 Kubernetes 的优势和架构 以及如何使用 `kubectl` 与 Kubernetes 集群交互。
 
