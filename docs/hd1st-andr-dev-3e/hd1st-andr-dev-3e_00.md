@@ -1,4 +1,4 @@
-# 《Head First Android Development》的作者
+# 第一章：《Head First Android Development》的作者
 
 ![image](img/f000vi-01.png)
 

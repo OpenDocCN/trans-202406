@@ -1,4 +1,4 @@
-# -   第一章。介绍
+# 第一章：-   第一章。介绍
 
 Docker 是由当时被称为 dotCloud 公司的创始人兼 CEO Solomon Hykes 在 2013 年 3 月 15 日在加利福尼亚州圣克拉拉的[Python 开发者大会](https://us.pycon.org)上进行的一个五分钟的[闪电演讲](https://youtu.be/wW9CAH9nSLs)中首次向世界公开介绍的，没有任何预先公告和少量的热烈欢迎。在这一公告之时，除了 dotCloud 外，仅有大约 40 人有机会体验 Docker。
 
