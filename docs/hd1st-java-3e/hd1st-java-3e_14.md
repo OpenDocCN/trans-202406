@@ -1,4 +1,4 @@
-# 第十五章：Chapter 12\. Lambda 和 Stream：什么是，而不是如何：Lambda 和 Stream
+# 第十二章Lambda 和 Stream：什么是，而不是如何：Lambda 和 Stream
 
 ![image](img/f0369-01.png)
 

@@ -20,5 +20,4 @@
 +   [第十八章：Part III. Node.js](js-cb-3e_19.md)
 +   [第十七章：Node 基础](js-cb-3e_20.md)
 +   [第十八章：Node 模块](js-cb-3e_21.md)
-+   [第十八章：Node 模块](js-cb-3e_22.md)
 +   [第二十章：远程数据](js-cb-3e_23.md)

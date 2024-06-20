@@ -1,1 +1,1 @@
-# 第十一章：Part II. JavaScript in the Browser
+# 第二部分：JavaScript in the Browser
